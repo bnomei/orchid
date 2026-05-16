@@ -513,6 +513,35 @@ fn complete_writes_task_arrays_in_multiline_style() {
 }
 
 #[test]
+fn complete_preserves_inline_task_arrays() {
+    let repo = Repo::new();
+    let task_path = repo.root.join("specs/example/tasks/T001.md");
+
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_test",
+    ]);
+    repo.run(&[
+        "complete",
+        "--lease",
+        "l_test",
+        "--verified-by",
+        "validator:agent_456",
+    ]);
+
+    let rewritten = fs::read_to_string(&task_path).expect("task file");
+    assert!(rewritten.contains("scope = [\"src/feature/\"]"));
+    assert!(rewritten.contains("covers = [\"R001\"]"));
+    assert!(!rewritten.contains("scope = [\n    \"src/feature/\",\n]"));
+    assert!(!rewritten.contains("covers = [\n    \"R001\",\n]"));
+}
+
+#[test]
 fn block_writes_task_arrays_in_multiline_style() {
     let repo = Repo::new();
     let task_path = repo.root.join("specs/example/tasks/T002.md");

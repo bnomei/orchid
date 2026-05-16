@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Number, Value};
@@ -35,19 +36,19 @@ const TASK_FIELD_ORDER: &[&str] = &[
 #[derive(Debug, Clone)]
 pub(crate) struct TaskFrontmatter {
     raw: Map<String, Value>,
+    array_styles: BTreeMap<String, ArrayStyle>,
 }
 
 impl TaskFrontmatter {
-    pub(crate) fn from_map(raw: Map<String, Value>) -> Self {
-        Self { raw }
+    fn from_map_with_array_styles(
+        raw: Map<String, Value>,
+        array_styles: BTreeMap<String, ArrayStyle>,
+    ) -> Self {
+        Self { raw, array_styles }
     }
 
     pub(crate) fn raw_mut(&mut self) -> &mut Map<String, Value> {
         &mut self.raw
-    }
-
-    pub(crate) fn into_map(self) -> Map<String, Value> {
-        self.raw
     }
 
     pub(crate) fn id(&self, fallback: &Path) -> String {
@@ -93,6 +94,12 @@ impl TaskFrontmatter {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ArrayStyle {
+    Inline,
+    Multiline,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Task {
     pub(crate) path: PathBuf,
@@ -135,6 +142,19 @@ pub(crate) fn split_frontmatter(
     text: &str,
     path: &Path,
 ) -> OrchResult<(Map<String, Value>, String)> {
+    let (raw, body) = raw_frontmatter(text, path)?;
+    let parsed: toml::Value = toml::from_str(raw).map_err(|err| {
+        OrchError::new("invalid TOML frontmatter")
+            .detail("path", path_to_string(path))
+            .detail("message", err.to_string())
+    })?;
+    let Value::Object(meta) = toml_to_json(parsed) else {
+        return Err(OrchError::new("invalid TOML frontmatter").detail("path", path_to_string(path)));
+    };
+    Ok((meta, body))
+}
+
+fn raw_frontmatter<'a>(text: &'a str, path: &Path) -> OrchResult<(&'a str, String)> {
     if !text.starts_with("+++\n") {
         return Err(OrchError::new("missing TOML frontmatter").detail("path", path_to_string(path)));
     }
@@ -147,20 +167,15 @@ pub(crate) fn split_frontmatter(
     };
     let raw = &text[start..end];
     let body = text[end + marker.len()..].to_string();
-    let parsed: toml::Value = toml::from_str(raw).map_err(|err| {
-        OrchError::new("invalid TOML frontmatter")
-            .detail("path", path_to_string(path))
-            .detail("message", err.to_string())
-    })?;
-    let Value::Object(meta) = toml_to_json(parsed) else {
-        return Err(OrchError::new("invalid TOML frontmatter").detail("path", path_to_string(path)));
-    };
-    Ok((meta, body))
+    Ok((raw, body))
 }
 
 pub(crate) fn load_task(path: impl AsRef<Path>, root: &Path) -> OrchResult<Task> {
     let path = repo_path(root, path.as_ref(), "task_path")?;
-    let (mut meta, body) = split_frontmatter(&read_text(&path)?, &path)?;
+    let text = read_text(&path)?;
+    let (raw, _) = raw_frontmatter(&text, &path)?;
+    let array_styles = array_styles(raw);
+    let (mut meta, body) = split_frontmatter(&text, &path)?;
     let spec_id = path
         .parent()
         .and_then(|p| p.parent())
@@ -179,31 +194,67 @@ pub(crate) fn load_task(path: impl AsRef<Path>, root: &Path) -> OrchResult<Task>
     Ok(Task {
         path,
         spec_id,
-        frontmatter: TaskFrontmatter::from_map(meta),
+        frontmatter: TaskFrontmatter::from_map_with_array_styles(meta, array_styles),
         body,
     })
+}
+
+fn array_styles(raw: &str) -> BTreeMap<String, ArrayStyle> {
+    let mut styles = BTreeMap::new();
+    for line in raw.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let value = value.trim_start();
+        if !value.starts_with('[') {
+            continue;
+        }
+        let style = if value.contains(']') {
+            ArrayStyle::Inline
+        } else {
+            ArrayStyle::Multiline
+        };
+        styles.insert(key.trim().to_string(), style);
+    }
+    styles
 }
 
 pub(crate) fn quote_toml_string(value: &str) -> String {
     serde_json::to_string(value).expect("string encoding")
 }
 
-fn dump_toml_value(value: &Value) -> OrchResult<String> {
+fn dump_toml_value(value: &Value, array_style: Option<ArrayStyle>) -> OrchResult<String> {
     match value {
         Value::String(raw) => Ok(quote_toml_string(raw)),
         Value::Bool(raw) => Ok(if *raw { "true" } else { "false" }.to_string()),
         Value::Number(raw) if raw.is_i64() || raw.is_u64() => Ok(raw.to_string()),
         Value::Array(items) => {
             if items.is_empty() {
+                if array_style == Some(ArrayStyle::Multiline) {
+                    return Ok("[\n]".to_string());
+                }
                 return Ok("[]".to_string());
             }
 
             let mut dumped = Vec::with_capacity(items.len());
             for item in items {
                 let stringified = value_to_string(item).unwrap_or_default();
-                dumped.push(format!("    {},", quote_toml_string(&stringified)));
+                dumped.push(quote_toml_string(&stringified));
             }
-            Ok(format!("[\n{}\n]", dumped.join("\n")))
+
+            if array_style == Some(ArrayStyle::Inline) {
+                return Ok(format!("[{}]", dumped.join(", ")));
+            }
+
+            let lines: Vec<String> = dumped
+                .into_iter()
+                .map(|item| format!("    {item},"))
+                .collect();
+            Ok(format!("[\n{}\n]", lines.join("\n")))
         }
         Value::Null => Ok(quote_toml_string("")),
         other => Err(OrchError::new("unsupported frontmatter value type")
@@ -211,7 +262,15 @@ fn dump_toml_value(value: &Value) -> OrchResult<String> {
     }
 }
 
-pub(crate) fn dump_frontmatter(meta: &Map<String, Value>) -> OrchResult<String> {
+#[cfg(test)]
+fn dump_frontmatter(meta: &Map<String, Value>) -> OrchResult<String> {
+    dump_frontmatter_with_array_styles(meta, &BTreeMap::new())
+}
+
+fn dump_frontmatter_with_array_styles(
+    meta: &Map<String, Value>,
+    array_styles: &BTreeMap<String, ArrayStyle>,
+) -> OrchResult<String> {
     let mut keys: Vec<String> = TASK_FIELD_ORDER
         .iter()
         .filter(|key| meta.contains_key(**key))
@@ -228,18 +287,21 @@ pub(crate) fn dump_frontmatter(meta: &Map<String, Value>) -> OrchResult<String> 
     let mut lines = vec![FRONTMATTER.to_string()];
     for key in keys {
         let value = meta.get(&key).unwrap_or(&Value::Null);
-        lines.push(format!("{key} = {}", dump_toml_value(value)?));
+        lines.push(format!(
+            "{key} = {}",
+            dump_toml_value(value, array_styles.get(&key).copied())?
+        ));
     }
     lines.push(FRONTMATTER.to_string());
     Ok(lines.join("\n") + "\n")
 }
 
-pub(crate) fn write_task(task: &Task, meta: &Map<String, Value>) -> OrchResult<()> {
-    atomic_write(&task.path, &(dump_frontmatter(meta)? + &task.body))
-}
-
 pub(crate) fn write_task_frontmatter(task: &Task, frontmatter: TaskFrontmatter) -> OrchResult<()> {
-    write_task(task, &frontmatter.into_map())
+    atomic_write(
+        &task.path,
+        &(dump_frontmatter_with_array_styles(&frontmatter.raw, &frontmatter.array_styles)?
+            + &task.body),
+    )
 }
 
 pub(crate) fn read_optional(path: &Path) -> OrchResult<String> {
@@ -305,5 +367,22 @@ mod tests {
         assert_eq!(parsed["id"], "T900");
         assert_eq!(parsed["scope"], json!(["src/orchid"]));
         assert_eq!(body, "\n## Context\n");
+    }
+
+    #[test]
+    fn task_frontmatter_preserves_existing_inline_array_style() {
+        let raw = "scope = [\"src/orchid\"]\ndepends = [\n    \"T001\",\n]\ncovers = [\n]\n";
+        let styles = array_styles(raw);
+        let mut meta = Map::new();
+        meta.insert("id".to_string(), json!("T900"));
+        meta.insert("scope".to_string(), json!(["src/orchid"]));
+        meta.insert("depends".to_string(), json!(["T001"]));
+        meta.insert("covers".to_string(), json!([]));
+
+        let dumped = dump_frontmatter_with_array_styles(&meta, &styles).unwrap();
+
+        assert!(dumped.contains("scope = [\"src/orchid\"]"));
+        assert!(dumped.contains("depends = [\n    \"T001\",\n]"));
+        assert!(dumped.contains("covers = [\n]"));
     }
 }
