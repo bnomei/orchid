@@ -299,7 +299,21 @@ pub(crate) fn lease_id_for(task_path: &Path, owner: &str) -> LeaseId {
     let mut hasher = Sha1::new();
     hasher.update(seed.as_bytes());
     let digest = hasher.finalize();
-    LeaseId::from_raw(format!("l_{:x}", digest)[..14].to_string())
+    let mut lease_id = String::with_capacity(14);
+    lease_id.push_str("l_");
+    for byte in digest.as_slice().iter().take(6) {
+        lease_id.push(hex_char(byte >> 4));
+        lease_id.push(hex_char(byte & 0x0f));
+    }
+    LeaseId::from_raw(lease_id)
+}
+
+fn hex_char(value: u8) -> char {
+    match value {
+        0..=9 => (b'0' + value) as char,
+        10..=15 => (b'a' + value - 10) as char,
+        _ => unreachable!("hex nibble is always in range"),
+    }
 }
 
 impl From<serde_json::Error> for OrchError {
