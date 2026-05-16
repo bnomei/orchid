@@ -476,6 +476,71 @@ fn complete_updates_only_task_and_next_finds_stage_or_cleanup() {
 }
 
 #[test]
+fn complete_writes_task_arrays_in_multiline_style() {
+    let repo = Repo::new();
+    let task_path = repo.root.join("specs/example/tasks/T001.md");
+    let original = fs::read_to_string(&task_path).expect("task file");
+    let multiline = original
+        .replace(
+            "scope = [\"src/feature/\"]",
+            "scope = [\n    \"src/feature/\",\n]",
+        )
+        .replace("covers = [\"R001\"]", "covers = [\n    \"R001\",\n]");
+    fs::write(&task_path, multiline).expect("rewrite task file");
+
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_test",
+    ]);
+    repo.run(&[
+        "complete",
+        "--lease",
+        "l_test",
+        "--verified-by",
+        "validator:agent_456",
+    ]);
+
+    let rewritten = fs::read_to_string(&task_path).expect("task file");
+    assert!(rewritten.contains("scope = [\n    \"src/feature/\",\n]"));
+    assert!(rewritten.contains("covers = [\n    \"R001\",\n]"));
+    assert!(!rewritten.contains("scope = [\"src/feature/\"]"));
+    assert!(!rewritten.contains("covers = [\"R001\"]"));
+}
+
+#[test]
+fn block_writes_task_arrays_in_multiline_style() {
+    let repo = Repo::new();
+    let task_path = repo.root.join("specs/example/tasks/T002.md");
+    let original = fs::read_to_string(&task_path).expect("task file");
+    let multiline = original
+        .replace(
+            "scope = [\"src/dependent/\"]",
+            "scope = [\n    \"src/dependent/\",\n]",
+        )
+        .replace("depends = [\"T001\"]", "depends = [\n    \"T001\",\n]");
+    fs::write(&task_path, multiline).expect("rewrite task file");
+
+    repo.run(&[
+        "block",
+        "example",
+        "T002",
+        "--reason",
+        "waiting for external input",
+    ]);
+
+    let rewritten = fs::read_to_string(&task_path).expect("task file");
+    assert!(rewritten.contains("scope = [\n    \"src/dependent/\",\n]"));
+    assert!(rewritten.contains("depends = [\n    \"T001\",\n]"));
+    assert!(!rewritten.contains("scope = [\"src/dependent/\"]"));
+    assert!(!rewritten.contains("depends = [\"T001\"]"));
+}
+
+#[test]
 fn git_touched_and_stage_plan_split_scope_and_baseline() {
     let repo = Repo::new();
     repo.init_git();

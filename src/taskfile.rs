@@ -194,12 +194,16 @@ fn dump_toml_value(value: &Value) -> OrchResult<String> {
         Value::Bool(raw) => Ok(if *raw { "true" } else { "false" }.to_string()),
         Value::Number(raw) if raw.is_i64() || raw.is_u64() => Ok(raw.to_string()),
         Value::Array(items) => {
+            if items.is_empty() {
+                return Ok("[]".to_string());
+            }
+
             let mut dumped = Vec::with_capacity(items.len());
             for item in items {
                 let stringified = value_to_string(item).unwrap_or_default();
-                dumped.push(quote_toml_string(&stringified));
+                dumped.push(format!("    {},", quote_toml_string(&stringified)));
             }
-            Ok(format!("[{}]", dumped.join(", ")))
+            Ok(format!("[\n{}\n]", dumped.join("\n")))
         }
         Value::Null => Ok(quote_toml_string("")),
         other => Err(OrchError::new("unsupported frontmatter value type")
@@ -293,6 +297,8 @@ mod tests {
         meta.insert("verification_mode".to_string(), json!("mayor"));
 
         let dumped = dump_frontmatter(&meta).unwrap();
+        assert!(dumped.contains("scope = [\n    \"src/orchid\",\n]"));
+        assert!(dumped.contains("depends = []"));
         let text = dumped + "\n## Context\n";
         let (parsed, body) = split_frontmatter(&text, Path::new("task.md")).unwrap();
 
