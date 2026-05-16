@@ -1,0 +1,9 @@
+{
+  "ok": false,
+  "error": "ready requires --spec or --all-open",
+  "code": "scope_required",
+  "runtime": {
+    "active_count": 0,
+    "active_leases": []
+  }
+}

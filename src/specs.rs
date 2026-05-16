@@ -1,0 +1,447 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde_json::{Map, Value};
+
+use crate::core::{ErrorCode, OrchError, OrchResult};
+use crate::model::{LeaseRecord, Scope, SpecId, SpecPolicy, VerificationMode};
+use crate::paths::{read_text, relpath};
+use crate::taskfile::{load_task, Task};
+
+pub(crate) const STATUSES: &[&str] = &[
+    "blocked",
+    "done",
+    "pending_review",
+    "pending_validation",
+    "todo",
+];
+
+pub(crate) type ReadyTasksResult = (Vec<Task>, Vec<Map<String, Value>>, Vec<String>);
+
+const INACTIVE_SPEC_PREFIXES: &[&str] = &["DRAFT-", "TBD-", "MANUAL-", "DONE-"];
+const INACTIVE_SPEC_NAMES: &[&str] = &["DRAFT", "TBD", "MANUAL", "DONE"];
+
+pub(crate) fn path_in_scope(path: &str, scopes: &[String]) -> bool {
+    Scope::from_entries(scopes.to_vec()).contains_path(path)
+}
+
+pub(crate) fn scopes_overlap(a: &[String], b: &[String]) -> bool {
+    Scope::from_entries(a.to_vec()).overlaps(&Scope::from_entries(b.to_vec()))
+}
+
+pub(crate) fn spec_is_inactive(name: &str) -> bool {
+    name.starts_with('_')
+        || INACTIVE_SPEC_NAMES.contains(&name)
+        || INACTIVE_SPEC_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
+pub(crate) fn spec_selector_name(value: &str) -> String {
+    if value.starts_with("specs/") {
+        Path::new(value)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(value)
+            .to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+pub(crate) fn safe_spec_id(value: &str) -> OrchResult<String> {
+    SpecId::parse(value).map(SpecId::into_string)
+}
+
+fn numerical_spec_key(name: &str) -> (u8, u64, String) {
+    let digits: String = name.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        (1, 0, name.to_string())
+    } else {
+        (0, digits.parse().unwrap_or(0), name.to_string())
+    }
+}
+
+pub(crate) fn active_spec_dirs(
+    root: &Path,
+    spec_names: Option<&[String]>,
+) -> OrchResult<Vec<PathBuf>> {
+    let specs = root.join("specs");
+    if !specs.exists() {
+        return Ok(Vec::new());
+    }
+    if let Some(spec_names) = spec_names {
+        let mut dirs = Vec::new();
+        for spec_name in spec_names {
+            let name = spec_selector_name(spec_name);
+            if spec_is_inactive(&name) {
+                return Err(OrchError::coded(
+                    "inactive spec is not dispatchable",
+                    ErrorCode::InactiveSpec,
+                )
+                .detail("spec", name));
+            }
+            let spec_dir = specs.join(&name);
+            if !spec_dir.is_dir() {
+                return Err(OrchError::coded("spec not found", ErrorCode::SpecNotFound)
+                    .detail("spec", name));
+            }
+            dirs.push(spec_dir);
+        }
+        return Ok(dirs);
+    }
+
+    let mut dirs: Vec<PathBuf> = fs::read_dir(specs)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|name| !spec_is_inactive(name))
+        })
+        .collect();
+    dirs.sort_by_key(|path| {
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        numerical_spec_key(name)
+    });
+    Ok(dirs)
+}
+
+pub(crate) fn task_paths(root: &Path, spec_names: Option<&[String]>) -> OrchResult<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for spec_dir in active_spec_dirs(root, spec_names)? {
+        let task_dir = spec_dir.join("tasks");
+        if task_dir.exists() {
+            let mut task_files: Vec<PathBuf> = fs::read_dir(task_dir)?
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("md"))
+                .collect();
+            task_files.sort();
+            paths.extend(task_files);
+        }
+    }
+    Ok(paths)
+}
+
+pub(crate) fn load_tasks(root: &Path, spec_names: Option<&[String]>) -> OrchResult<Vec<Task>> {
+    let mut tasks = Vec::new();
+    for path in task_paths(root, spec_names)? {
+        tasks.push(load_task(path, root)?);
+    }
+    Ok(tasks)
+}
+
+fn first_open_spec(tasks: &[Task]) -> Option<String> {
+    let mut by_spec: BTreeMap<String, Vec<&Task>> = BTreeMap::new();
+    for task in tasks {
+        by_spec.entry(task.spec_id.clone()).or_default().push(task);
+    }
+    let mut specs: Vec<String> = by_spec.keys().cloned().collect();
+    specs.sort_by_key(|spec| numerical_spec_key(spec));
+    specs.into_iter().find(|spec| {
+        by_spec
+            .get(spec)
+            .is_some_and(|items| items.iter().any(|task| !task.status_model().is_done()))
+    })
+}
+
+pub(crate) fn select_tasks(
+    root: &Path,
+    spec_names: Option<&[String]>,
+    all_open: bool,
+) -> OrchResult<(Vec<Task>, Vec<String>)> {
+    if spec_names.is_some_and(|names| !names.is_empty()) && all_open {
+        return Err(OrchError::coded(
+            "use either --spec or --all-open, not both",
+            ErrorCode::ScopeSelectorConflict,
+        ));
+    }
+    if let Some(spec_names) = spec_names {
+        if !spec_names.is_empty() {
+            let tasks = load_tasks(root, Some(spec_names))?;
+            let selected = spec_names
+                .iter()
+                .map(|spec| spec_selector_name(spec))
+                .collect();
+            return Ok((tasks, selected));
+        }
+    }
+    if all_open {
+        let tasks = load_tasks(root, None)?;
+        let Some(selected) = first_open_spec(&tasks) else {
+            return Ok((Vec::new(), Vec::new()));
+        };
+        let selected_tasks = tasks
+            .into_iter()
+            .filter(|task| task.spec_id == selected)
+            .collect();
+        return Ok((selected_tasks, vec![selected]));
+    }
+    Err(OrchError::coded(
+        "ready requires --spec or --all-open",
+        ErrorCode::ScopeRequired,
+    ))
+}
+
+pub(crate) fn ensure_spec_dispatchable(root: &Path, spec_id: &str) -> OrchResult<()> {
+    if spec_is_inactive(spec_id) {
+        return Err(
+            OrchError::coded("inactive spec is not dispatchable", ErrorCode::InactiveSpec)
+                .detail("spec", spec_id),
+        );
+    }
+    let policy = load_spec_policy(root, spec_id)?;
+    if policy.is_manual() {
+        return Err(OrchError::coded("spec manual", ErrorCode::SpecManual).detail("spec", spec_id));
+    }
+    if policy.checkpoint_before_implementation() {
+        return Err(OrchError::coded(
+            "human checkpoint blocks dispatch",
+            ErrorCode::HumanCheckpoint,
+        )
+        .detail("spec", spec_id)
+        .detail("checkpoint", "before-implementation"));
+    }
+    Ok(())
+}
+
+pub(crate) fn inactive_spec_names(root: &Path) -> OrchResult<Vec<String>> {
+    let specs = root.join("specs");
+    if !specs.exists() {
+        return Ok(Vec::new());
+    }
+    let mut names: Vec<String> = fs::read_dir(specs)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter_map(|path| {
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
+        .filter(|name| spec_is_inactive(name))
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+pub(crate) fn load_spec_policy(root: &Path, spec_id: &str) -> OrchResult<SpecPolicy> {
+    let path = root.join("specs").join(spec_id).join("spec.toml");
+    if !path.exists() {
+        return Ok(SpecPolicy::empty());
+    }
+    let raw = read_text(&path)?;
+    let parsed: toml::Value = toml::from_str(&raw).map_err(|err| {
+        OrchError::new("invalid spec.toml")
+            .detail("path", relpath(&path, root))
+            .detail("message", err.to_string())
+    })?;
+    Ok(SpecPolicy::from_map(toml_to_json_object(parsed)))
+}
+
+pub(crate) fn task_key(task: &Task) -> String {
+    format!("{}/{}", task.spec_id, task.id())
+}
+
+pub(crate) fn resolve_task(root: &Path, target: &str, task_id: Option<&str>) -> OrchResult<Task> {
+    let target_path = Path::new(target);
+    if task_id.is_none() && target_path.extension().and_then(|s| s.to_str()) == Some("md") {
+        return load_task(target_path, root);
+    }
+    if task_id.is_none() && target.contains('/') {
+        let mut parts = target.splitn(2, '/');
+        let spec = parts.next().unwrap_or("");
+        let task = parts.next().unwrap_or("");
+        return load_task(
+            root.join("specs")
+                .join(spec)
+                .join("tasks")
+                .join(format!("{task}.md")),
+            root,
+        );
+    }
+    let Some(task_id) = task_id else {
+        return Err(OrchError::coded(
+            "task id is required unless target is a task path or spec/task",
+            ErrorCode::TaskIdRequired,
+        ));
+    };
+    let spec_name = if target.starts_with("specs/") {
+        Path::new(target)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(target)
+            .to_string()
+    } else {
+        target.to_string()
+    };
+    load_task(
+        root.join("specs")
+            .join(spec_name)
+            .join("tasks")
+            .join(format!("{task_id}.md")),
+        root,
+    )
+}
+
+pub(crate) fn task_by_ref<'a>(
+    tasks: &'a [Task],
+    spec_id: &str,
+    reference: &str,
+) -> Option<&'a Task> {
+    if reference.is_empty() || reference == "-" {
+        return None;
+    }
+    let (spec, task_id) = if let Some((spec, task_id)) = reference.split_once('/') {
+        (spec, task_id)
+    } else {
+        (spec_id, reference)
+    };
+    tasks
+        .iter()
+        .find(|task| task.spec_id == spec && task.id() == task_id)
+}
+
+pub(crate) fn ready_tasks(
+    root: &Path,
+    spec_names: Option<&[String]>,
+    all_open: bool,
+    active: Option<&[LeaseRecord]>,
+) -> OrchResult<ReadyTasksResult> {
+    let (tasks, selected_specs) = select_tasks(root, spec_names, all_open)?;
+    let active = active.unwrap_or(&[]);
+    let mut ready = Vec::new();
+    let mut blocked = Vec::new();
+
+    for task in &tasks {
+        let policy = load_spec_policy(root, &task.spec_id)?;
+        let mut reason: Option<String> = None;
+        if policy.is_manual() {
+            reason = Some("spec manual".to_string());
+        } else if policy.checkpoint_before_implementation() {
+            reason = Some("human checkpoint:before-implementation".to_string());
+        } else if !task.status_model().is_todo() {
+            reason = Some(format!("status:{}", task.status()));
+        } else if !VerificationMode::parse(task.verification_mode()).is_dispatchable() {
+            reason = Some("invalid verification_mode".to_string());
+        } else {
+            for dep in task.depends() {
+                match task_by_ref(&tasks, &task.spec_id, &dep) {
+                    None => {
+                        reason = Some(format!("missing dependency:{dep}"));
+                        break;
+                    }
+                    Some(dep_task) if dep_task.status() != "done" => {
+                        reason = Some(format!("unmet dependency:{dep}"));
+                        break;
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+
+        if reason.is_none() {
+            for lease in active {
+                if lease.task_path() == relpath(&task.path, root) {
+                    reason = Some("already leased".to_string());
+                    break;
+                }
+                if scopes_overlap(&task.scope(), &lease.scope()) {
+                    let lease_id = lease.id().unwrap_or("");
+                    reason = Some(format!("scope conflict:{lease_id}"));
+                    break;
+                }
+            }
+        }
+
+        if let Some(reason) = reason {
+            let mut item = Map::new();
+            item.insert("task".to_string(), Value::String(task_key(task)));
+            item.insert("reason".to_string(), Value::String(reason));
+            blocked.push(item);
+        } else {
+            ready.push(task.clone());
+        }
+    }
+    Ok((ready, blocked, selected_specs))
+}
+
+pub(crate) fn selected_task_counts(tasks: &[Task]) -> Map<String, Value> {
+    let mut counts: BTreeMap<String, i64> = STATUSES
+        .iter()
+        .map(|status| (status.to_string(), 0))
+        .collect();
+    for task in tasks {
+        *counts.entry(task.status()).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(key, value)| (key, Value::Number(value.into())))
+        .collect()
+}
+
+pub(crate) fn status_set() -> BTreeSet<&'static str> {
+    STATUSES.iter().copied().collect()
+}
+
+fn toml_to_json_object(value: toml::Value) -> Map<String, Value> {
+    match toml_to_json(value) {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    }
+}
+
+fn toml_to_json(value: toml::Value) -> Value {
+    match value {
+        toml::Value::String(raw) => Value::String(raw),
+        toml::Value::Integer(raw) => Value::Number(raw.into()),
+        toml::Value::Float(raw) => serde_json::Number::from_f64(raw)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        toml::Value::Boolean(raw) => Value::Bool(raw),
+        toml::Value::Datetime(raw) => Value::String(raw.to_string()),
+        toml::Value::Array(items) => Value::Array(items.into_iter().map(toml_to_json).collect()),
+        toml::Value::Table(table) => {
+            let mut map = Map::new();
+            for (key, value) in table {
+                map.insert(key, toml_to_json(value));
+            }
+            Value::Object(map)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_spec_id_is_rejected_before_filesystem_use() {
+        let err = safe_spec_id("specs/../outside").unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidSpecId.as_str());
+        assert_eq!(err.details["spec"], "specs/../outside");
+    }
+
+    #[test]
+    fn scope_helpers_match_directory_boundaries() {
+        assert!(path_in_scope(
+            "src/feature/file.rs",
+            &["src/feature".to_string()]
+        ));
+        assert!(!path_in_scope(
+            "src/feature_extra/file.rs",
+            &["src/feature".to_string()]
+        ));
+        assert!(scopes_overlap(
+            &["src/feature".to_string()],
+            &["src/feature/file.rs".to_string()]
+        ));
+        assert!(!scopes_overlap(
+            &["src/feature".to_string()],
+            &["src/feature-extra".to_string()]
+        ));
+    }
+}

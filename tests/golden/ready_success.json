@@ -1,0 +1,32 @@
+{
+  "ok": true,
+  "mode": "spec",
+  "selected_specs": [
+    "example"
+  ],
+  "skipped_inactive_specs": [],
+  "ready": [
+    {
+      "task": "example/T001",
+      "path": "specs/example/tasks/T001.md",
+      "scope": [
+        "src/feature/"
+      ],
+      "verification_mode": "validator"
+    }
+  ],
+  "blocked": [
+    {
+      "task": "example/T002",
+      "reason": "unmet dependency:T001"
+    },
+    {
+      "task": "example/T003",
+      "reason": "status:done"
+    }
+  ],
+  "runtime": {
+    "active_count": 0,
+    "active_leases": []
+  }
+}
