@@ -94,8 +94,24 @@ Keep `specs/` task files and any copied `skills/` files under version control.
 
 ## Installation
 
+### GitHub Releases
+
+Download a prebuilt archive from the
+[GitHub Releases](https://github.com/bnomei/orchid/releases) page, extract it,
+and place `orchid` on your `PATH`.
+
+### Crates.io
+
 ```sh
 cargo install orchid-cli
+```
+
+### From Source
+
+```sh
+git clone https://github.com/bnomei/orchid.git
+cd orchid
+cargo build --release
 ```
 
 ## CLI Quickstart
