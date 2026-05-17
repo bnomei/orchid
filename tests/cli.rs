@@ -594,11 +594,11 @@ fn git_touched_and_stage_plan_split_scope_and_baseline() {
     .unwrap();
     let payload = repo.run(&["git-touched", "--lease", "l_test"]);
     assert_eq!(
-        payload["touched_in_scope"],
+        payload["stage"],
         serde_json::json!(["src/feature/work.txt"])
     );
     assert_eq!(
-        payload["out_of_scope"],
+        payload["blocked_by"]["out_of_scope"],
         serde_json::json!(["src/other/work.txt"])
     );
     assert_eq!(

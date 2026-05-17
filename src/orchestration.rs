@@ -8,7 +8,9 @@ use crate::core::{
     insert, json_ok, now_iso, parse_duration, parse_iso_datetime_str, value_to_string, ErrorCode,
     OrchError, OrchResult,
 };
-use crate::gitstate::{git_status_data, stage_plan_for_lease, touched_for_lease};
+use crate::gitstate::{
+    changed_paths_value, git_status_data, stage_plan_for_lease, touched_for_lease,
+};
 use crate::model::{ActiveLeaseRecordInput, LeaseId, LeaseMode, LeaseRecord, ReportFrontmatter};
 use crate::paths::{
     atomic_write, ensure_runtime_dirs, packets_dir, relpath, repo_path, reports_dir,
@@ -264,10 +266,7 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
-        baseline_changed: git_state
-            .get("all_changed")
-            .cloned()
-            .unwrap_or_else(|| Value::Array(Vec::new())),
+        baseline_changed: changed_paths_value(&git_state),
         report_path: relpath(
             &reports_dir(root).join(format!("{}.md", lease_id.as_str())),
             root,
@@ -711,8 +710,7 @@ pub(crate) fn git_status(root: &Path) -> OrchResult<Map<String, Value>> {
 
 pub(crate) fn git_touched(root: &Path, lease_id: &str) -> OrchResult<Map<String, Value>> {
     let lease = load_lease(root, lease_id)?;
-    let mut data = touched_for_lease(root, &lease)?;
-    data.remove("git");
+    let data = touched_for_lease(root, &lease)?;
     let mut payload = json_ok();
     payload.extend(data);
     Ok(payload)

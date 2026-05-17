@@ -378,12 +378,18 @@ impl StagePlan {
         let mut map = Map::new();
         map.insert("lease_id".to_string(), Value::String(self.lease_id.clone()));
         map.insert("task".to_string(), Value::String(self.task.clone()));
-        map.insert("safe_to_stage".to_string(), Value::Bool(self.safe_to_stage));
-        map.insert(
-            "pathspecs".to_string(),
-            Value::Array(self.pathspecs.iter().cloned().map(Value::String).collect()),
-        );
-        map.insert("excluded".to_string(), Value::Object(self.excluded.clone()));
+        if !self.safe_to_stage {
+            map.insert("safe_to_stage".to_string(), Value::Bool(false));
+        }
+        if !self.pathspecs.is_empty() {
+            map.insert(
+                "pathspecs".to_string(),
+                Value::Array(self.pathspecs.iter().cloned().map(Value::String).collect()),
+            );
+        }
+        if !self.excluded.is_empty() {
+            map.insert("excluded".to_string(), Value::Object(self.excluded.clone()));
+        }
         map
     }
 }

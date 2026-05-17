@@ -61,14 +61,6 @@ pub(crate) fn git_status_data(root: &Path) -> OrchResult<Map<String, Value>> {
     if !git_available(root) {
         let mut map = Map::new();
         map.insert("git".to_string(), Value::Bool(false));
-        map.insert("branch".to_string(), Value::String(String::new()));
-        map.insert("head".to_string(), Value::String(String::new()));
-        map.insert("clean".to_string(), Value::Bool(true));
-        map.insert(
-            "changed".to_string(),
-            changed_object(Vec::new(), Vec::new(), Vec::new()),
-        );
-        map.insert("all_changed".to_string(), Value::Array(Vec::new()));
         return Ok(map);
     }
 
@@ -96,17 +88,16 @@ pub(crate) fn git_status_data(root: &Path) -> OrchResult<Map<String, Value>> {
     let staged = visible(staged);
     let untracked = visible(untracked);
     let all_changed = visible(all);
+    let changed = changed_object(modified, staged, untracked);
 
     let mut map = Map::new();
     map.insert("git".to_string(), Value::Bool(true));
     map.insert("branch".to_string(), Value::String(branch));
     map.insert("head".to_string(), Value::String(head));
     map.insert("clean".to_string(), Value::Bool(all_changed.is_empty()));
-    map.insert(
-        "changed".to_string(),
-        changed_object(modified, staged, untracked),
-    );
-    map.insert("all_changed".to_string(), string_array(all_changed));
+    if changed.as_object().is_some_and(|items| !items.is_empty()) {
+        map.insert("changed".to_string(), changed);
+    }
     Ok(map)
 }
 
@@ -119,14 +110,36 @@ fn visible(paths: BTreeSet<String>) -> Vec<String> {
 
 fn changed_object(modified: Vec<String>, staged: Vec<String>, untracked: Vec<String>) -> Value {
     let mut changed = Map::new();
-    changed.insert("modified".to_string(), string_array(modified));
-    changed.insert("staged".to_string(), string_array(staged));
-    changed.insert("untracked".to_string(), string_array(untracked));
+    insert_array_if_non_empty(&mut changed, "modified", modified);
+    insert_array_if_non_empty(&mut changed, "staged", staged);
+    insert_array_if_non_empty(&mut changed, "untracked", untracked);
     Value::Object(changed)
 }
 
 fn string_array(items: Vec<String>) -> Value {
     Value::Array(items.into_iter().map(Value::String).collect())
+}
+
+fn insert_array_if_non_empty(map: &mut Map<String, Value>, key: &str, items: Vec<String>) {
+    if !items.is_empty() {
+        map.insert(key.to_string(), string_array(items));
+    }
+}
+
+pub(crate) fn changed_paths_value(status: &Map<String, Value>) -> Value {
+    string_array(changed_paths(status))
+}
+
+fn changed_paths(status: &Map<String, Value>) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    if let Some(changed) = status.get("changed").and_then(Value::as_object) {
+        for key in ["modified", "staged", "untracked"] {
+            for path in string_list(changed.get(key)) {
+                paths.insert(path);
+            }
+        }
+    }
+    paths.into_iter().collect()
 }
 
 pub(crate) fn touched_for_lease(
@@ -135,7 +148,7 @@ pub(crate) fn touched_for_lease(
 ) -> OrchResult<Map<String, Value>> {
     let status = git_status_data(root)?;
     let baseline: BTreeSet<String> = lease.baseline_changed().into_iter().collect();
-    let current: BTreeSet<String> = string_list(status.get("all_changed")).into_iter().collect();
+    let current: BTreeSet<String> = changed_paths(&status).into_iter().collect();
     let changed_since_lease: Vec<String> = current.difference(&baseline).cloned().collect();
     let ambiguous: Vec<String> = current.intersection(&baseline).cloned().collect();
     let scope = lease.scope();
@@ -160,56 +173,38 @@ pub(crate) fn touched_for_lease(
     preexisting_dirty.sort();
     let mut ambiguous = ambiguous;
     ambiguous.sort();
+    let mut stage: Vec<String> = in_scope.into_iter().chain(control_plane).collect();
+    stage.sort();
+    stage.dedup();
 
     let mut map = Map::new();
     map.insert("lease_id".to_string(), lease.id_value());
     map.insert("task".to_string(), lease.task_value());
-    map.insert("scope".to_string(), string_array(scope));
-    map.insert("touched_in_scope".to_string(), string_array(in_scope));
-    map.insert("control_plane".to_string(), string_array(control_plane));
-    map.insert(
-        "out_of_scope".to_string(),
-        string_array(out_of_scope.clone()),
-    );
-    map.insert(
-        "preexisting_dirty".to_string(),
-        string_array(preexisting_dirty),
-    );
-    map.insert("ambiguous".to_string(), string_array(ambiguous.clone()));
-    map.insert(
-        "safe_to_stage".to_string(),
-        Value::Bool(out_of_scope.is_empty() && ambiguous.is_empty()),
-    );
-    map.insert("git".to_string(), Value::Object(status));
+    insert_array_if_non_empty(&mut map, "stage", stage);
+    let mut blocked_by = Map::new();
+    insert_array_if_non_empty(&mut blocked_by, "out_of_scope", out_of_scope.clone());
+    insert_array_if_non_empty(&mut blocked_by, "ambiguous", ambiguous.clone());
+    if !blocked_by.is_empty() {
+        map.insert("blocked_by".to_string(), Value::Object(blocked_by));
+    }
+    insert_array_if_non_empty(&mut map, "preexisting_dirty", preexisting_dirty);
+    if !out_of_scope.is_empty() || !ambiguous.is_empty() {
+        map.insert("safe_to_stage".to_string(), Value::Bool(false));
+    }
     Ok(map)
 }
 
 pub(crate) fn stage_plan_for_lease(root: &Path, lease: &LeaseRecord) -> OrchResult<StagePlan> {
     let data = touched_for_lease(root, lease)?;
-    let mut pathspecs: BTreeSet<String> = string_list(data.get("touched_in_scope"))
-        .into_iter()
-        .collect();
-    pathspecs.extend(string_list(data.get("control_plane")));
+    let pathspecs: BTreeSet<String> = string_list(data.get("stage")).into_iter().collect();
 
     let mut excluded = Map::new();
-    excluded.insert(
-        "out_of_scope".to_string(),
-        data.get("out_of_scope")
-            .cloned()
-            .unwrap_or_else(|| Value::Array(Vec::new())),
-    );
-    excluded.insert(
-        "preexisting_dirty".to_string(),
-        data.get("preexisting_dirty")
-            .cloned()
-            .unwrap_or_else(|| Value::Array(Vec::new())),
-    );
-    excluded.insert(
-        "ambiguous".to_string(),
-        data.get("ambiguous")
-            .cloned()
-            .unwrap_or_else(|| Value::Array(Vec::new())),
-    );
+    if let Some(blocked_by) = data.get("blocked_by").and_then(Value::as_object) {
+        excluded.extend(blocked_by.clone());
+    }
+    if let Some(preexisting_dirty) = data.get("preexisting_dirty") {
+        excluded.insert("preexisting_dirty".to_string(), preexisting_dirty.clone());
+    }
 
     Ok(StagePlan {
         lease_id: lease.id().unwrap_or("").to_string(),
@@ -217,7 +212,7 @@ pub(crate) fn stage_plan_for_lease(root: &Path, lease: &LeaseRecord) -> OrchResu
         safe_to_stage: data
             .get("safe_to_stage")
             .and_then(Value::as_bool)
-            .unwrap_or(false),
+            .unwrap_or(true),
         pathspecs: pathspecs.into_iter().collect(),
         excluded,
     })
