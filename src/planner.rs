@@ -170,8 +170,7 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
     if !stale.is_empty() {
         let mut details = Map::new();
         details.insert("stale".to_string(), compact_array(stale));
-        details.insert("ready".to_string(), Value::Array(Vec::new()));
-        details.insert("blocked".to_string(), blocked_array(visible_blocked));
+        insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
         return NextDecision {
             phase: Phase::Recover,
             recommended_action: format!(
@@ -187,8 +186,7 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
         let lease_id = first.lease_id.clone();
         let mut details = Map::new();
         details.insert("reports_ready".to_string(), reports_array(reports_ready));
-        details.insert("ready".to_string(), Value::Array(Vec::new()));
-        details.insert("blocked".to_string(), blocked_array(visible_blocked));
+        insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
         return NextDecision {
             phase: Phase::Validate,
             recommended_action: format!("report-check {report}; git-touched --lease {lease_id}"),
@@ -199,8 +197,7 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
     if !active.is_empty() {
         let mut details = Map::new();
         details.insert("active".to_string(), compact_array(active));
-        details.insert("ready".to_string(), Value::Array(Vec::new()));
-        details.insert("blocked".to_string(), blocked_array(visible_blocked));
+        insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
         return NextDecision {
             phase: Phase::Wait,
             recommended_action:
@@ -227,8 +224,7 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
                     .collect(),
             ),
         );
-        details.insert("ready".to_string(), Value::Array(Vec::new()));
-        details.insert("blocked".to_string(), blocked_array(visible_blocked));
+        insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
         return NextDecision {
             phase: Phase::Stage,
             recommended_action: format!("git-stage-plan --lease {}", first.lease_id),
@@ -240,8 +236,7 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
         let lease_id = cleanup[0].lease_id.clone();
         let mut details = Map::new();
         details.insert("cleanup".to_string(), cleanup_array(cleanup));
-        details.insert("ready".to_string(), Value::Array(Vec::new()));
-        details.insert("blocked".to_string(), blocked_array(visible_blocked));
+        insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
         return NextDecision {
             phase: Phase::Cleanup,
             recommended_action: format!("close --lease {lease_id}"),
@@ -255,7 +250,7 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
         let id = first.id.clone();
         let mut details = Map::new();
         details.insert("ready".to_string(), ready_array(ready));
-        details.insert("blocked".to_string(), blocked_array(visible_blocked));
+        insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
         return NextDecision {
             phase: Phase::Dispatch,
             recommended_action: format!("lease {spec} {id} --owner worker:<agent-id>"),
@@ -278,8 +273,7 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
     };
     let mut details = Map::new();
     details.insert("counts".to_string(), Value::Object(counts));
-    details.insert("ready".to_string(), Value::Array(Vec::new()));
-    details.insert("blocked".to_string(), blocked_array(visible_blocked));
+    insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
     NextDecision {
         phase,
         recommended_action: recommended_action.to_string(),
@@ -331,6 +325,13 @@ fn blocked_array(items: Vec<BlockedTask>) -> Value {
             .map(|item| Value::Object(item.to_payload()))
             .collect(),
     )
+}
+
+fn insert_non_empty(map: &mut Map<String, Value>, key: &str, value: Value) {
+    if value.as_array().is_some_and(Vec::is_empty) {
+        return;
+    }
+    map.insert(key.to_string(), value);
 }
 
 #[cfg(test)]

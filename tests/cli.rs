@@ -773,7 +773,6 @@ fn remaining_public_commands_keep_their_json_contracts() {
 
     let git_status = repo.run(&["git-status"]);
     assert_eq!(git_status["git"], false);
-    assert_eq!(git_status["active_leases"], serde_json::json!([]));
 
     let lint = repo.run(&["lint"]);
     assert_eq!(lint["tasks"], 3);

@@ -3,7 +3,6 @@
   "selected_specs": [
     "example"
   ],
-  "skipped_inactive_specs": [],
   "ready": [
     {
       "task": "example/T001",

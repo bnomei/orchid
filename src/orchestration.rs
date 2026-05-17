@@ -164,7 +164,7 @@ pub(crate) fn ready(root: &Path, request: &ReadyRequest) -> OrchResult<Map<Strin
     } else {
         Vec::new()
     };
-    insert(
+    insert_non_empty(
         &mut payload,
         "skipped_inactive_specs",
         string_values(skipped),
@@ -186,15 +186,9 @@ pub(crate) fn ready(root: &Path, request: &ReadyRequest) -> OrchResult<Map<Strin
                 .collect(),
         ),
     );
-    insert(
-        &mut payload,
-        "blocked",
-        if request.explain {
-            objects_array(blocked)
-        } else {
-            Value::Array(Vec::new())
-        },
-    );
+    if request.explain {
+        insert_non_empty(&mut payload, "blocked", objects_array(blocked));
+    }
     Ok(payload)
 }
 
@@ -225,7 +219,7 @@ pub(crate) fn status(root: &Path, request: &StatusRequest) -> OrchResult<Map<Str
         "selected_specs",
         string_values(selected_specs),
     );
-    insert(
+    insert_non_empty(
         &mut payload,
         "skipped_inactive_specs",
         string_values(inactive_spec_names(root)?),
@@ -450,12 +444,12 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     insert(&mut payload, "task", task_key(&task));
     if request.clean_spec_research {
         let (deleted, pruned) = clean_spec_research(root, &task.spec_id)?;
-        insert(
+        insert_non_empty(
             &mut payload,
             "spec_research_deleted",
             string_values(deleted),
         );
-        insert(&mut payload, "pruned", string_values(pruned));
+        insert_non_empty(&mut payload, "pruned", string_values(pruned));
     }
     Ok(payload)
 }
@@ -551,8 +545,12 @@ pub(crate) fn research_path(
     let mut payload = json_ok();
     insert(&mut payload, "spec", spec_id);
     insert(&mut payload, "path", relpath(&path, root));
-    insert(&mut payload, "exists", path.exists());
-    insert(&mut payload, "created", created);
+    if path.exists() {
+        insert(&mut payload, "exists", true);
+    }
+    if created {
+        insert(&mut payload, "created", true);
+    }
     Ok(payload)
 }
 
@@ -562,8 +560,8 @@ pub(crate) fn research_clean(root: &Path, spec: &str) -> OrchResult<Map<String, 
     let (deleted, pruned) = clean_spec_research(root, &spec_id)?;
     let mut payload = json_ok();
     insert(&mut payload, "spec", spec_id);
-    insert(&mut payload, "deleted", string_values(deleted));
-    insert(&mut payload, "pruned", string_values(pruned));
+    insert_non_empty(&mut payload, "deleted", string_values(deleted));
+    insert_non_empty(&mut payload, "pruned", string_values(pruned));
     Ok(payload)
 }
 
@@ -580,8 +578,8 @@ pub(crate) fn close(root: &Path, request: &CloseRequest) -> OrchResult<Map<Strin
     let (deleted, pruned) = close_lease_files(root, &lease)?;
     let mut payload = json_ok();
     insert(&mut payload, "lease_id", request.lease.clone());
-    insert(&mut payload, "deleted", string_values(deleted));
-    insert(&mut payload, "pruned", string_values(pruned));
+    insert_non_empty(&mut payload, "deleted", string_values(deleted));
+    insert_non_empty(&mut payload, "pruned", string_values(pruned));
     Ok(payload)
 }
 
@@ -608,9 +606,9 @@ pub(crate) fn cleanup(root: &Path, request: &CleanupRequest) -> OrchResult<Map<S
     deleted.sort();
     deleted.dedup();
     let mut payload = json_ok();
-    insert(&mut payload, "closed", string_values(closed));
-    insert(&mut payload, "deleted", string_values(deleted));
-    insert(
+    insert_non_empty(&mut payload, "closed", string_values(closed));
+    insert_non_empty(&mut payload, "deleted", string_values(deleted));
+    insert_non_empty(
         &mut payload,
         "pruned",
         string_values(prune_empty_runtime_dirs(root)),
@@ -738,7 +736,7 @@ pub(crate) fn git_status(root: &Path) -> OrchResult<Map<String, Value>> {
         .into_iter()
         .filter_map(|lease| lease.id().map(str::to_string))
         .collect();
-    insert(&mut payload, "active_leases", string_values(active_ids));
+    insert_non_empty(&mut payload, "active_leases", string_values(active_ids));
     Ok(payload)
 }
 
@@ -787,10 +785,11 @@ pub(crate) fn lint(root: &Path) -> OrchResult<Map<String, Value>> {
         }
     }
     let mut payload = Map::new();
-    if !errors.is_empty() {
+    let failed = !errors.is_empty();
+    if failed {
         insert(&mut payload, "ok", false);
     }
-    insert(&mut payload, "errors", objects_array(errors));
+    insert_non_empty(&mut payload, "errors", objects_array(errors));
     insert(&mut payload, "tasks", tasks.len() as i64);
     Ok(payload)
 }
@@ -804,6 +803,13 @@ fn compact_leases(leases: Vec<LeaseRecord>) -> OrchResult<Value> {
             })
             .collect::<OrchResult<Vec<_>>>()?,
     ))
+}
+
+fn insert_non_empty(map: &mut Map<String, Value>, key: &str, value: Value) {
+    if value.as_array().is_some_and(Vec::is_empty) {
+        return;
+    }
+    map.insert(key.to_string(), value);
 }
 
 fn specs_arg(specs: &[String]) -> Option<&[String]> {
