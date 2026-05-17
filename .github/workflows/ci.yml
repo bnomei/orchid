@@ -49,8 +49,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Install Rust 1.82
-        uses: dtolnay/rust-toolchain@1.82
+      - name: Install Rust 1.85
+        uses: dtolnay/rust-toolchain@1.85
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
         with:

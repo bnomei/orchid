@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
@@ -128,8 +129,20 @@ pub(crate) fn atomic_write(path: &Path, data: &str) -> OrchResult<()> {
         std::process::id()
     ));
     fs::write(&tmp, data)?;
-    fs::rename(tmp, path)?;
+    replace_file(&tmp, path)?;
     Ok(())
+}
+
+fn replace_file(tmp: &Path, path: &Path) -> OrchResult<()> {
+    match fs::rename(tmp, path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            fs::remove_file(path)?;
+            fs::rename(tmp, path)?;
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) fn atomic_write_json<T: Serialize>(path: &Path, data: &T) -> OrchResult<()> {

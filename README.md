@@ -3,7 +3,7 @@
 [![Crates.io Version](https://img.shields.io/crates/v/orchid-cli)](https://crates.io/crates/orchid-cli)
 [![Crates.io Downloads](https://img.shields.io/crates/d/orchid-cli)](https://crates.io/crates/orchid-cli)
 [![License](https://img.shields.io/crates/l/orchid-cli)](https://crates.io/crates/orchid-cli)
-[![Rust 1.82+](https://img.shields.io/badge/rust-1.82%2B-orange)](https://www.rust-lang.org)
+[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange)](https://www.rust-lang.org)
 
 Task-file orchestration helper for coordinating scoped agent work in a shared
 Git worktree.
