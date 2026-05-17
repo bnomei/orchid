@@ -31,6 +31,12 @@ in Git-friendly files: specs, task packets, reports, touched-file evidence, and
 completion metadata. A fresh agent session can resume from those artifacts
 instead of replaying the conversation.
 
+That also makes spawned subagents more effective. Each worker can start with a
+fresh, isolated context containing only the lease, task, requirements, design,
+and report template it needs. Instead of dragging the full coordinator thread
+into every implementation attempt, Orchid keeps workers in a focused slice of
+the problem where they can reason and edit with less distraction.
+
 It is not formal spec-driven design. It is a small harness loop: capture the
 target, split it into scoped slices, lease one slice, verify it, write state
 back, and repeat.
