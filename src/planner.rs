@@ -39,25 +39,19 @@ pub(crate) struct ReadyTask {
     pub(crate) id: String,
     pub(crate) spec: String,
     pub(crate) task: String,
-    pub(crate) path: String,
     pub(crate) scope: Vec<String>,
-    pub(crate) verification_mode: String,
+    pub(crate) verify: String,
 }
 
 impl ReadyTask {
     fn to_payload(&self) -> Map<String, Value> {
         let mut map = Map::new();
-        map.insert("spec".to_string(), Value::String(self.spec.clone()));
         map.insert("task".to_string(), Value::String(self.task.clone()));
-        map.insert("path".to_string(), Value::String(self.path.clone()));
         map.insert(
             "scope".to_string(),
             Value::Array(self.scope.iter().cloned().map(Value::String).collect()),
         );
-        map.insert(
-            "verification_mode".to_string(),
-            Value::String(self.verification_mode.clone()),
-        );
+        map.insert("verify".to_string(), Value::String(self.verify.clone()));
         map
     }
 }
@@ -105,7 +99,6 @@ impl Phase {
 }
 
 pub(crate) struct NextInput {
-    pub(crate) selected_specs: Vec<String>,
     pub(crate) stale: Vec<CompactLease>,
     pub(crate) reports_ready: Vec<ReportReady>,
     pub(crate) active: Vec<CompactLease>,
@@ -121,7 +114,6 @@ pub(crate) struct NextInput {
 pub(crate) struct NextDecision {
     pub(crate) phase: Phase,
     pub(crate) commands: Vec<Vec<String>>,
-    pub(crate) selected_specs: Vec<String>,
     pub(crate) details: Map<String, Value>,
 }
 
@@ -156,16 +148,6 @@ impl NextDecision {
                 ),
             );
         }
-        map.insert(
-            "selected_specs".to_string(),
-            Value::Array(
-                self.selected_specs
-                    .iter()
-                    .cloned()
-                    .map(Value::String)
-                    .collect(),
-            ),
-        );
         map.extend(self.details.clone());
         map
     }
@@ -173,7 +155,6 @@ impl NextDecision {
 
 pub(crate) fn decide_next(input: NextInput) -> NextDecision {
     let NextInput {
-        selected_specs,
         stale,
         reports_ready,
         active,
@@ -198,7 +179,6 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
                 "--older-than".to_string(),
                 older_than,
             ]],
-            selected_specs,
             details,
         };
     }
@@ -215,7 +195,6 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
                 vec!["report-check".to_string(), report],
                 vec!["git-touched".to_string(), "--lease".to_string(), lease_id],
             ],
-            selected_specs,
             details,
         };
     }
@@ -226,7 +205,6 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
         return NextDecision {
             phase: Phase::Wait,
             commands: Vec::new(),
-            selected_specs,
             details,
         };
     }
@@ -255,7 +233,6 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
                 "--lease".to_string(),
                 first.lease_id.clone(),
             ]],
-            selected_specs,
             details,
         };
     }
@@ -267,7 +244,6 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
         return NextDecision {
             phase: Phase::Cleanup,
             commands: vec![vec!["close".to_string(), "--lease".to_string(), lease_id]],
-            selected_specs,
             details,
         };
     }
@@ -287,7 +263,6 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
                 "--owner".to_string(),
                 "worker:<agent-id>".to_string(),
             ]],
-            selected_specs,
             details,
         };
     }
@@ -307,7 +282,6 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
     NextDecision {
         phase,
         commands: Vec::new(),
-        selected_specs,
         details,
     }
 }
@@ -370,7 +344,6 @@ mod tests {
 
     fn input() -> NextInput {
         NextInput {
-            selected_specs: vec!["example".to_string()],
             stale: Vec::new(),
             reports_ready: Vec::new(),
             active: Vec::new(),
@@ -415,9 +388,8 @@ mod tests {
             id: "T001".to_string(),
             spec: "example".to_string(),
             task: "example/T001".to_string(),
-            path: "specs/example/tasks/T001.md".to_string(),
             scope: vec!["src/feature/".to_string()],
-            verification_mode: "validator".to_string(),
+            verify: "validator".to_string(),
         }
     }
 

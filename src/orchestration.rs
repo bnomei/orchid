@@ -24,7 +24,7 @@ use crate::runtime::{
 use crate::specs::{
     ensure_spec_dispatchable, inactive_spec_names, load_spec_policy, load_tasks, ready_tasks,
     resolve_task, scopes_overlap, select_tasks, selected_task_counts, status_set, task_by_ref,
-    task_key, STATUSES,
+    task_key,
 };
 use crate::taskfile::{
     load_task, quote_toml_string, read_optional, split_frontmatter, write_task_frontmatter,
@@ -142,23 +142,13 @@ pub(crate) struct ReportCheckRequest {
 
 pub(crate) fn ready(root: &Path, request: &ReadyRequest) -> OrchResult<Map<String, Value>> {
     let active = active_leases(root)?;
-    let (ready, blocked, selected_specs) = ready_tasks(
+    let (ready, blocked, _) = ready_tasks(
         root,
         specs_arg(&request.specs),
         request.all_open,
         Some(&active),
     )?;
     let mut payload = json_ok();
-    insert(
-        &mut payload,
-        "mode",
-        if request.all_open { "all-open" } else { "spec" },
-    );
-    insert(
-        &mut payload,
-        "selected_specs",
-        string_values(selected_specs),
-    );
     let skipped = if request.all_open {
         inactive_spec_names(root)?
     } else {
@@ -178,9 +168,8 @@ pub(crate) fn ready(root: &Path, request: &ReadyRequest) -> OrchResult<Map<Strin
                 .map(|task| {
                     let mut item = Map::new();
                     insert(&mut item, "task", task_key(task));
-                    insert(&mut item, "path", relpath(&task.path, root));
                     insert(&mut item, "scope", string_values(task.scope()));
-                    insert(&mut item, "verification_mode", task.verification_mode());
+                    insert(&mut item, "verify", task.verification_mode());
                     Value::Object(item)
                 })
                 .collect(),
@@ -193,37 +182,19 @@ pub(crate) fn ready(root: &Path, request: &ReadyRequest) -> OrchResult<Map<Strin
 }
 
 pub(crate) fn status(root: &Path, request: &StatusRequest) -> OrchResult<Map<String, Value>> {
-    let (tasks, selected_specs) = if specs_arg(&request.specs).is_some() || request.all_open {
+    let (tasks, _) = if specs_arg(&request.specs).is_some() || request.all_open {
         select_tasks(root, specs_arg(&request.specs), request.all_open)?
     } else {
         (load_tasks(root, None)?, Vec::new())
     };
-    let mut counts: Map<String, Value> = STATUSES
-        .iter()
-        .map(|status| ((*status).to_string(), Value::Number(0.into())))
-        .collect();
-    for task in &tasks {
-        let count = counts
-            .get(&task.status())
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
-            + 1;
-        counts.insert(task.status(), Value::Number(count.into()));
-    }
+    let counts = nonzero_counts(selected_task_counts(&tasks));
+    let active = active_leases(root)?.len();
     let mut payload = json_ok();
     insert(&mut payload, "tasks", tasks.len() as i64);
     insert(&mut payload, "counts", Value::Object(counts));
-    insert(&mut payload, "running", active_leases(root)?.len() as i64);
-    insert(
-        &mut payload,
-        "selected_specs",
-        string_values(selected_specs),
-    );
-    insert_non_empty(
-        &mut payload,
-        "skipped_inactive_specs",
-        string_values(inactive_spec_names(root)?),
-    );
+    if active != 0 {
+        insert(&mut payload, "active", active as i64);
+    }
     Ok(payload)
 }
 
@@ -320,7 +291,7 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
 pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String, Value>> {
     let stale_after = parse_duration(&request.older_than)?;
     let now = Utc::now();
-    let (tasks, selected_specs) = select_tasks(root, specs_arg(&request.specs), request.all_open)?;
+    let (tasks, _) = select_tasks(root, specs_arg(&request.specs), request.all_open)?;
     let active = active_leases(root)?;
     let (ready, blocked, _) = ready_tasks(
         root,
@@ -362,9 +333,8 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
             id: task.id(),
             spec: task.spec_id.clone(),
             task: task_key(task),
-            path: relpath(&task.path, root),
             scope: task.scope(),
-            verification_mode: task.verification_mode().to_string(),
+            verify: task.verification_mode().to_string(),
         })
         .collect();
     let blocked = blocked
@@ -383,7 +353,6 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
         })
         .collect();
     Ok(decide_next(NextInput {
-        selected_specs,
         stale,
         reports_ready,
         active: active
@@ -810,6 +779,13 @@ fn insert_non_empty(map: &mut Map<String, Value>, key: &str, value: Value) {
         return;
     }
     map.insert(key.to_string(), value);
+}
+
+fn nonzero_counts(counts: Map<String, Value>) -> Map<String, Value> {
+    counts
+        .into_iter()
+        .filter(|(_, value)| value.as_i64().unwrap_or(0) != 0)
+        .collect()
 }
 
 fn specs_arg(specs: &[String]) -> Option<&[String]> {

@@ -253,7 +253,6 @@ fn all_open_selects_first_open_numerical_spec_and_skips_inactive() {
     repo.write_task_file("DONE-99-closed", "T001", "todo", "src/closed/");
 
     let payload = repo.run(&["ready", "--all-open", "--explain"]);
-    assert_eq!(payload["selected_specs"], serde_json::json!(["01-first"]));
     assert_eq!(payload["ready"][0]["task"], "01-first/T001");
     assert_eq!(
         payload["skipped_inactive_specs"],
@@ -731,7 +730,6 @@ fn remaining_public_commands_keep_their_json_contracts() {
     assert_eq!(payload["tasks"], 3);
     assert_eq!(payload["counts"]["todo"], 2);
     assert_eq!(payload["counts"]["done"], 1);
-    assert_eq!(payload["selected_specs"], serde_json::json!(["example"]));
 
     let lease = repo.run(&[
         "lease",

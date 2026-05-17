@@ -1,16 +1,11 @@
 {
-  "mode": "spec",
-  "selected_specs": [
-    "example"
-  ],
   "ready": [
     {
       "task": "example/T001",
-      "path": "specs/example/tasks/T001.md",
       "scope": [
         "src/feature/"
       ],
-      "verification_mode": "validator"
+      "verify": "validator"
     }
   ],
   "blocked": [
