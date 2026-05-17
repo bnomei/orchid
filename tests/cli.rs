@@ -714,12 +714,20 @@ fn security_lock_and_help_contracts() {
     let payload = repo.run_fail(&["lease", "example", "T001", "--owner", "worker:agent_123"]);
     assert_eq!(payload["code"], "runtime_lock_busy");
 
+    let help = repo.run_help(&[]);
+    assert!(help.contains("List ready task files"));
+    assert!(help.contains("Generate a worker, validator, reviewer, or loop-runner packet"));
+
     let help = repo.run_help(&["lease"]);
+    assert!(help.contains("Task target: SPEC with TASK_ID"));
+    assert!(help.contains("Lease owner label"));
     assert!(help.contains("--serial"));
     assert!(help.contains("--allow-parallel"));
     let help = repo.run_help(&["next"]);
+    assert!(help.contains("Include recommended action, queues, and blockers"));
     assert!(help.contains("--older-than"));
     let help = repo.run_help(&["complete"]);
+    assert!(help.contains("Independent review reference for the commit"));
     assert!(help.contains("--clean-spec-research"));
 }
 

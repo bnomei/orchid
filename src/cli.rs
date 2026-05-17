@@ -11,11 +11,15 @@ use crate::orchestration::{
 use crate::paths::root_from_arg;
 
 #[derive(Parser)]
-#[command(name = "orchid", about = "Task-file orchestration helper")]
+#[command(
+    name = "orchid",
+    about = "Coordinate scoped agent work from repo-local specs",
+    long_about = "Orchid coordinates scoped agent work from repo-local specs. It leases Markdown task files, creates fresh role packets, validates worker reports, checks Git scope, and emits JSON ACKs for orchestrators."
+)]
 struct Cli {
-    #[arg(long, help = "Repo root; defaults to cwd")]
+    #[arg(long, help = "Repository root; defaults to the current directory")]
     root: Option<String>,
-    #[arg(long, help = "Pretty-print JSON")]
+    #[arg(long, help = "Pretty-print JSON output")]
     pretty: bool,
     #[command(subcommand)]
     command: Command,
@@ -23,69 +27,97 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "List ready task files")]
     Ready(ReadyArgs),
+    #[command(about = "Summarize specs, task states, and active leases")]
     Status(StatusArgs),
+    #[command(about = "Reserve a task for one scoped worker")]
     Lease(LeaseArgs),
+    #[command(about = "List active lease runtime files")]
     Running,
+    #[command(about = "Refresh a lease heartbeat timestamp")]
     Heartbeat {
+        #[arg(help = "Lease id to heartbeat, for example l_123")]
         lease: String,
     },
+    #[command(about = "Find leases with stale heartbeats")]
     Stale {
-        #[arg(long, default_value = "30m")]
+        #[arg(
+            long,
+            default_value = "30m",
+            help = "Minimum lease age, such as 10m, 2h, or 1d"
+        )]
         older_than: String,
     },
+    #[command(about = "Release a lease without completing its task")]
     Release {
+        #[arg(help = "Lease id to release")]
         lease: String,
-        #[arg(long, default_value = "")]
+        #[arg(long, default_value = "", help = "Reason recorded in the release ACK")]
         reason: String,
     },
+    #[command(about = "Close lease runtime files after handoff")]
     Close(CloseArgs),
+    #[command(about = "Remove completed or released runtime artifacts")]
     Cleanup(CleanupArgs),
+    #[command(about = "Decide the next orchestration action")]
     Next(NextArgs),
-    #[command(name = "research-path")]
+    #[command(
+        name = "research-path",
+        about = "Print or create a spec research workspace"
+    )]
     ResearchPath(ResearchPathArgs),
-    #[command(name = "research-clean")]
+    #[command(name = "research-clean", about = "Delete a spec research workspace")]
     ResearchClean {
+        #[arg(help = "Spec id or specs/<spec-id> path")]
         spec: String,
     },
+    #[command(about = "Generate a worker, validator, reviewer, or loop-runner packet")]
     Packet(PacketArgs),
-    #[command(name = "report-check")]
+    #[command(
+        name = "report-check",
+        about = "Validate a worker report before completion"
+    )]
     ReportCheck {
+        #[arg(help = "Report path, usually .orchid/reports/<lease>.md")]
         report: String,
     },
-    #[command(name = "git-status")]
+    #[command(name = "git-status", about = "Return compact Git status")]
     GitStatus,
-    #[command(name = "git-touched")]
+    #[command(
+        name = "git-touched",
+        about = "Compare Git changes against a lease scope"
+    )]
     GitTouched {
-        #[arg(long)]
+        #[arg(long, help = "Lease id to inspect")]
         lease: String,
     },
-    #[command(name = "git-stage-plan")]
+    #[command(name = "git-stage-plan", about = "Plan safe Git pathspecs for a lease")]
     GitStagePlan {
-        #[arg(long)]
+        #[arg(long, help = "Lease id to plan staging for")]
         lease: String,
     },
+    #[command(about = "Record verified work as complete")]
     Complete(CompleteArgs),
+    #[command(about = "Mark a task blocked with a reason")]
     Block(BlockArgs),
+    #[command(about = "Validate spec and task-file structure")]
     Lint,
 }
 
 #[derive(Args)]
 struct ReadyArgs {
-    #[arg(long, action = clap::ArgAction::Append, help = "Restrict ready queue to this spec; repeatable")]
+    #[arg(long, action = clap::ArgAction::Append, help = "Limit ready queue to a spec id; repeatable")]
     spec: Vec<String>,
-    #[arg(
-        long,
-        help = "Select only the first open active spec by numerical prefix"
-    )]
+    #[arg(long, help = "Select the first open active spec by numerical prefix")]
     all_open: bool,
-    #[arg(long)]
+    #[arg(long, help = "Include blocked tasks and selection details")]
     explain: bool,
 }
 
 #[derive(Args)]
 struct StatusArgs {
-    #[arg(long, action = clap::ArgAction::Append, help = "Restrict status to this spec; repeatable")]
+    #[arg(long, action = clap::ArgAction::Append, help = "Limit status to a spec id; repeatable")]
     spec: Vec<String>,
     #[arg(
         long,
@@ -97,26 +129,30 @@ struct StatusArgs {
 #[derive(Args)]
 #[command(group = clap::ArgGroup::new("mode").args(["serial", "allow_parallel"]).multiple(false))]
 struct LeaseArgs {
-    target: String,
-    task_id: Option<String>,
-    #[arg(long)]
-    owner: String,
-    #[arg(long)]
-    lease_id: Option<String>,
-    #[arg(long, help = "Reject this lease if any other active lease exists")]
-    serial: bool,
     #[arg(
-        long,
-        help = "Intentionally allow a disjoint lease while other leases are active"
+        help = "Task target: SPEC with TASK_ID, SPEC/TASK, specs/SPEC with TASK_ID, or specs/SPEC/tasks/TASK.md"
     )]
+    target: String,
+    #[arg(help = "Task id when TARGET is a spec id or specs/SPEC path")]
+    task_id: Option<String>,
+    #[arg(long, help = "Lease owner label, such as worker:agent_123")]
+    owner: String,
+    #[arg(long, help = "Override generated lease id for tests or recovery")]
+    lease_id: Option<String>,
+    #[arg(long, help = "Require no other active leases")]
+    serial: bool,
+    #[arg(long, help = "Allow a disjoint lease while other leases are active")]
     allow_parallel: bool,
 }
 
 #[derive(Args)]
 struct CloseArgs {
-    #[arg(long)]
+    #[arg(long, help = "Lease id to close")]
     lease: String,
-    #[arg(long, help = "Close and delete files for an active lease")]
+    #[arg(
+        long,
+        help = "Close and delete runtime files even if the lease is active"
+    )]
     force: bool,
 }
 
@@ -131,23 +167,21 @@ struct CleanupArgs {
 
 #[derive(Args)]
 struct NextArgs {
-    #[arg(long, action = clap::ArgAction::Append, help = "Restrict next action to this spec; repeatable")]
+    #[arg(long, action = clap::ArgAction::Append, help = "Limit next action to a spec id; repeatable")]
     spec: Vec<String>,
-    #[arg(
-        long,
-        help = "Select only the first open active spec by numerical prefix"
-    )]
+    #[arg(long, help = "Select the first open active spec by numerical prefix")]
     all_open: bool,
-    #[arg(long, default_value = DEFAULT_STALE_AFTER)]
+    #[arg(long, default_value = DEFAULT_STALE_AFTER, help = "Minimum lease age for recover/stale decisions")]
     older_than: String,
-    #[arg(long)]
+    #[arg(long, help = "Include recommended action, queues, and blockers")]
     explain: bool,
 }
 
 #[derive(Args)]
 struct ResearchPathArgs {
+    #[arg(help = "Spec id or specs/<spec-id> path")]
     spec: String,
-    #[arg(long, help = "Create .orchid/spec-research/<spec-id>")]
+    #[arg(long, help = "Create the workspace if missing")]
     create: bool,
 }
 
@@ -173,37 +207,58 @@ impl From<PacketRole> for PacketRoleKind {
 
 #[derive(Args)]
 struct PacketArgs {
-    #[arg(long)]
+    #[arg(long, help = "Lease id to build a role packet for")]
     lease: String,
-    #[arg(long, value_enum, default_value = "worker")]
+    #[arg(
+        long,
+        value_enum,
+        default_value = "worker",
+        help = "Packet role to generate"
+    )]
     role: PacketRole,
 }
 
 #[derive(Args)]
 struct CompleteArgs {
-    #[arg(long)]
+    #[arg(long, help = "Lease id to complete")]
     lease: String,
-    #[arg(long)]
+    #[arg(long, help = "Validator or coordinator label that verified the work")]
     verified_by: String,
-    #[arg(long, default_value = "")]
+    #[arg(long, default_value = "", help = "Worker label to record on the task")]
     implemented_by: String,
-    #[arg(long, default_value = "passed")]
+    #[arg(long, default_value = "passed", help = "Verification result to record")]
     verification_status: String,
-    #[arg(long, default_value = "")]
+    #[arg(
+        long,
+        default_value = "",
+        help = "Report path or summary reference to record"
+    )]
     report: String,
-    #[arg(long, default_value = "")]
+    #[arg(
+        long,
+        default_value = "",
+        help = "Commit hash produced by the coordinator"
+    )]
     commit: String,
-    #[arg(long, default_value = "")]
+    #[arg(
+        long,
+        default_value = "",
+        help = "Independent review reference for the commit"
+    )]
     commit_review: String,
-    #[arg(long)]
+    #[arg(long, help = "Delete .orchid/spec-research/<spec-id> after completion")]
     clean_spec_research: bool,
 }
 
 #[derive(Args)]
 struct BlockArgs {
+    #[arg(
+        help = "Task target: SPEC with TASK_ID, SPEC/TASK, specs/SPEC with TASK_ID, or specs/SPEC/tasks/TASK.md"
+    )]
     target: String,
+    #[arg(help = "Task id when TARGET is a spec id or specs/SPEC path")]
     task_id: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Reason to write to task state")]
     reason: String,
 }
 
