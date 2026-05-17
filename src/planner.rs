@@ -357,14 +357,11 @@ mod tests {
 
     fn compact_lease(lease_id: &str) -> CompactLease {
         CompactLease {
-            lease_id: Value::String(lease_id.to_string()),
+            id: Value::String(lease_id.to_string()),
             task: Value::String("example/T001".to_string()),
             owner: Value::String("worker:agent_123".to_string()),
-            lease_mode: "single".to_string(),
-            scope: Value::Array(Vec::new()),
-            heartbeat_at: "2026-01-01T00:00:00Z".to_string(),
-            age_seconds: 0,
-            heartbeat_age_seconds: 0,
+            mode: "single".to_string(),
+            age: 0,
             stale: false,
         }
     }

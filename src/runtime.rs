@@ -138,17 +138,11 @@ pub(crate) fn compact_lease(
         None => parse_duration(DEFAULT_STALE_AFTER)?,
     };
     Ok(CompactLease {
-        lease_id: lease.id_value(),
+        id: lease.id_value(),
         task: lease.task_value(),
         owner: lease.owner_value(),
-        lease_mode: lease.mode(),
-        scope: lease
-            .get("scope")
-            .cloned()
-            .unwrap_or_else(|| Value::Array(Vec::new())),
-        heartbeat_at: lease.heartbeat_at(),
-        age_seconds: elapsed_seconds(lease.get("started_at"), now),
-        heartbeat_age_seconds: elapsed_seconds(lease.heartbeat_or_started(), now),
+        mode: lease.mode(),
+        age: elapsed_seconds(lease.heartbeat_or_started(), now),
         stale: lease_stale(lease, now, stale_after),
     })
 }

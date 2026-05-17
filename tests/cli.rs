@@ -290,7 +290,7 @@ fn lease_runtime_and_parallel_guards_match_python_contract() {
     assert!(repo.root.join(".orchid/leases/l_one.json").exists());
     assert!(!repo.root.join(".orch").exists());
     let running = repo.run_from_cwd(&["running"]);
-    assert_eq!(running["leases"][0]["lease_id"], "l_one");
+    assert_eq!(running["leases"][0]["id"], "l_one");
     assert_eq!(
         task_status(&repo.root, "specs/example/tasks/T001.md"),
         "todo"
@@ -406,7 +406,7 @@ fn next_moves_through_dispatch_wait_validate_and_recover() {
     fs::write(&lease_path, serde_json::to_string(&lease).unwrap()).expect("rewrite lease");
     let payload = repo.run(&["next", "--spec", "example", "--older-than", "30m"]);
     assert_eq!(payload["phase"], "recover");
-    assert_eq!(payload["stale"][0]["lease_id"], "l_test");
+    assert_eq!(payload["stale"][0]["id"], "l_test");
 }
 
 #[test]
@@ -745,7 +745,7 @@ fn remaining_public_commands_keep_their_json_contracts() {
         "l_test",
     ]);
     let running = repo.run(&["running"]);
-    assert_eq!(running["leases"][0]["lease_id"], "l_test");
+    assert_eq!(running["leases"][0]["id"], "l_test");
 
     let heartbeat = repo.run(&["heartbeat", "l_test"]);
     assert_eq!(heartbeat["action"], "heartbeat");
@@ -759,7 +759,7 @@ fn remaining_public_commands_keep_their_json_contracts() {
     lease_json["heartbeat_at"] = Value::String(old);
     fs::write(&lease_path, serde_json::to_string(&lease_json).unwrap()).expect("rewrite lease");
     let stale = repo.run(&["stale", "--older-than", "30m"]);
-    assert_eq!(stale["stale"][0]["lease_id"], "l_test");
+    assert_eq!(stale["stale"][0]["id"], "l_test");
 
     fs::write(
         repo.root.join(lease["report"].as_str().unwrap()),

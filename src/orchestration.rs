@@ -514,9 +514,13 @@ pub(crate) fn stale(root: &Path, older_than: &str) -> OrchResult<Map<String, Val
         let heartbeat = parse_iso_datetime_str(&raw).unwrap_or(epoch);
         if heartbeat < cutoff {
             let mut item = Map::new();
-            item.insert("lease_id".to_string(), lease.id_value());
+            item.insert("id".to_string(), lease.id_value());
             item.insert("task".to_string(), lease.task_value());
-            insert(&mut item, "heartbeat_at", raw);
+            insert(
+                &mut item,
+                "age",
+                (Utc::now() - heartbeat).num_seconds().max(0),
+            );
             stale.push(item);
         }
     }

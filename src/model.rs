@@ -321,10 +321,6 @@ impl LeaseRecord {
         self.get("heartbeat_at").or_else(|| self.get("started_at"))
     }
 
-    pub(crate) fn heartbeat_at(&self) -> String {
-        self.get_str("heartbeat_at").unwrap_or("").to_string()
-    }
-
     pub(crate) fn raw(&self) -> &Map<String, Value> {
         &self.data
     }
@@ -343,33 +339,27 @@ impl LeaseStatus {
 
 #[derive(Debug, Clone)]
 pub(crate) struct CompactLease {
-    pub(crate) lease_id: Value,
+    pub(crate) id: Value,
     pub(crate) task: Value,
     pub(crate) owner: Value,
-    pub(crate) lease_mode: String,
-    pub(crate) scope: Value,
-    pub(crate) heartbeat_at: String,
-    pub(crate) age_seconds: i64,
-    pub(crate) heartbeat_age_seconds: i64,
+    pub(crate) mode: String,
+    pub(crate) age: i64,
     pub(crate) stale: bool,
 }
 
 impl CompactLease {
     pub(crate) fn to_payload(&self) -> Map<String, Value> {
         let mut map = Map::new();
-        map.insert("lease_id".to_string(), self.lease_id.clone());
+        map.insert("id".to_string(), self.id.clone());
         map.insert("task".to_string(), self.task.clone());
         map.insert("owner".to_string(), self.owner.clone());
-        insert(&mut map, "lease_mode", self.lease_mode.clone());
-        map.insert("scope".to_string(), self.scope.clone());
-        insert(&mut map, "heartbeat_at", self.heartbeat_at.clone());
-        insert(&mut map, "age_seconds", self.age_seconds);
-        insert(
-            &mut map,
-            "heartbeat_age_seconds",
-            self.heartbeat_age_seconds,
-        );
-        insert(&mut map, "stale", self.stale);
+        insert(&mut map, "age", self.age);
+        if self.mode != "single" {
+            insert(&mut map, "mode", self.mode.clone());
+        }
+        if self.stale {
+            insert(&mut map, "stale", true);
+        }
         map
     }
 }
