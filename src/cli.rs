@@ -229,7 +229,10 @@ pub fn run() -> i32 {
 
     match result {
         Ok(payload) => {
-            let ok = payload.get("ok").and_then(Value::as_bool).unwrap_or(true);
+            let ok = payload
+                .get("ok")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| !payload.contains_key("error"));
             emit(&payload, cli.pretty);
             if ok {
                 0

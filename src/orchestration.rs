@@ -311,7 +311,6 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
     save_lease(root, &lease)?;
 
     let mut payload = json_ok();
-    insert(&mut payload, "action", "lease");
     insert(&mut payload, "lease_id", lease_id.into_string());
     insert(&mut payload, "lease_mode", lease_mode.as_str());
     insert(&mut payload, "task", task_key(&task));
@@ -447,10 +446,8 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     lease.set("completed_at", completed_at);
     save_lease(root, &lease)?;
     let mut payload = json_ok();
-    insert(&mut payload, "action", "complete");
     insert(&mut payload, "lease_id", request.lease.clone());
     insert(&mut payload, "task", task_key(&task));
-    insert(&mut payload, "status", "done");
     if request.clean_spec_research {
         let (deleted, pruned) = clean_spec_research(root, &task.spec_id)?;
         insert(
@@ -473,9 +470,7 @@ pub(crate) fn block(root: &Path, request: &BlockRequest) -> OrchResult<Map<Strin
     insert(meta, "blocked_reason", request.reason.clone());
     write_task_frontmatter(&task, frontmatter)?;
     let mut payload = json_ok();
-    insert(&mut payload, "action", "block");
     insert(&mut payload, "task", task_key(&task));
-    insert(&mut payload, "status", "blocked");
     Ok(payload)
 }
 
@@ -486,7 +481,6 @@ pub(crate) fn heartbeat(root: &Path, lease_id: &str) -> OrchResult<Map<String, V
     lease.set("heartbeat_at", heartbeat_at.clone());
     save_lease(root, &lease)?;
     let mut payload = json_ok();
-    insert(&mut payload, "action", "heartbeat");
     insert(&mut payload, "lease_id", lease_id);
     insert(&mut payload, "heartbeat_at", heartbeat_at);
     Ok(payload)
@@ -539,9 +533,7 @@ pub(crate) fn release(root: &Path, lease_id: &str, reason: &str) -> OrchResult<M
     }
     save_lease(root, &lease)?;
     let mut payload = json_ok();
-    insert(&mut payload, "action", "release");
     insert(&mut payload, "lease_id", lease_id);
-    insert(&mut payload, "status", "released");
     Ok(payload)
 }
 
@@ -557,7 +549,6 @@ pub(crate) fn research_path(
         created = true;
     }
     let mut payload = json_ok();
-    insert(&mut payload, "action", "research-path");
     insert(&mut payload, "spec", spec_id);
     insert(&mut payload, "path", relpath(&path, root));
     insert(&mut payload, "exists", path.exists());
@@ -570,7 +561,6 @@ pub(crate) fn research_clean(root: &Path, spec: &str) -> OrchResult<Map<String, 
     let _lock = runtime_lock(root)?;
     let (deleted, pruned) = clean_spec_research(root, &spec_id)?;
     let mut payload = json_ok();
-    insert(&mut payload, "action", "research-clean");
     insert(&mut payload, "spec", spec_id);
     insert(&mut payload, "deleted", string_values(deleted));
     insert(&mut payload, "pruned", string_values(pruned));
@@ -589,7 +579,6 @@ pub(crate) fn close(root: &Path, request: &CloseRequest) -> OrchResult<Map<Strin
     }
     let (deleted, pruned) = close_lease_files(root, &lease)?;
     let mut payload = json_ok();
-    insert(&mut payload, "action", "close");
     insert(&mut payload, "lease_id", request.lease.clone());
     insert(&mut payload, "deleted", string_values(deleted));
     insert(&mut payload, "pruned", string_values(pruned));
@@ -619,7 +608,6 @@ pub(crate) fn cleanup(root: &Path, request: &CleanupRequest) -> OrchResult<Map<S
     deleted.sort();
     deleted.dedup();
     let mut payload = json_ok();
-    insert(&mut payload, "action", "cleanup");
     insert(&mut payload, "closed", string_values(closed));
     insert(&mut payload, "deleted", string_values(deleted));
     insert(
@@ -707,7 +695,6 @@ pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<Str
     lease.set("packet_path", relpath(&packet_path, root));
     save_lease(root, &lease)?;
     let mut payload = json_ok();
-    insert(&mut payload, "action", "packet");
     insert(&mut payload, "lease_id", request.lease.clone());
     insert(&mut payload, "role", request.role.as_str());
     insert(&mut payload, "packet", relpath(&packet_path, root));
@@ -736,7 +723,6 @@ pub(crate) fn report_check(
         );
     }
     let mut payload = json_ok();
-    insert(&mut payload, "action", "report-check");
     insert(&mut payload, "lease_id", lease_id);
     insert(&mut payload, "task", lease.task_value());
     insert(&mut payload, "report", relpath(&report_path, root));
@@ -801,7 +787,9 @@ pub(crate) fn lint(root: &Path) -> OrchResult<Map<String, Value>> {
         }
     }
     let mut payload = Map::new();
-    insert(&mut payload, "ok", errors.is_empty());
+    if !errors.is_empty() {
+        insert(&mut payload, "ok", false);
+    }
     insert(&mut payload, "errors", objects_array(errors));
     insert(&mut payload, "tasks", tasks.len() as i64);
     Ok(payload)

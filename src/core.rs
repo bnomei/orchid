@@ -132,14 +132,11 @@ pub(crate) fn utc_now() -> DateTime<Utc> {
 }
 
 pub(crate) fn json_ok() -> Map<String, Value> {
-    let mut map = Map::new();
-    map.insert("ok".to_string(), Value::Bool(true));
-    map
+    Map::new()
 }
 
 pub(crate) fn json_fail(error: &str, code: Option<&str>) -> Map<String, Value> {
     let mut map = Map::new();
-    map.insert("ok".to_string(), Value::Bool(false));
     map.insert("error".to_string(), Value::String(error.to_string()));
     map.insert(
         "code".to_string(),

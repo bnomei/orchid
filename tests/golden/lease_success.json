@@ -1,6 +1,4 @@
 {
-  "ok": true,
-  "action": "lease",
   "lease_id": "l_contract",
   "lease_mode": "single",
   "task": "example/T001",

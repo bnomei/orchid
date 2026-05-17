@@ -128,8 +128,6 @@ pub(crate) struct NextDecision {
 impl NextDecision {
     pub(crate) fn to_payload(&self) -> Map<String, Value> {
         let mut map = Map::new();
-        map.insert("ok".to_string(), Value::Bool(true));
-        map.insert("action".to_string(), Value::String("next".to_string()));
         map.insert(
             "phase".to_string(),
             Value::String(self.phase.as_str().to_string()),

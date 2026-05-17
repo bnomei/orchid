@@ -230,17 +230,14 @@ fn canonical_binary_json_contracts_are_stable() {
 fn ready_requires_scope_and_reports_blocked_tasks() {
     let repo = Repo::new();
     let payload = repo.run_from_cwd(&["ready", "--spec", "example"]);
-    assert_eq!(payload["ok"], true);
     assert_eq!(payload["ready"][0]["task"], "example/T001");
 
     let payload = repo.run(&["ready", "--spec", "example", "--explain"]);
-    assert_eq!(payload["ok"], true);
     assert_eq!(payload["ready"][0]["task"], "example/T001");
     assert_eq!(payload["blocked"][0]["reason"], "unmet dependency:T001");
     assert_eq!(payload["blocked"][1]["reason"], "status:done");
 
     let payload = repo.run_fail(&["ready"]);
-    assert_eq!(payload["ok"], false);
     assert_eq!(payload["error"], "ready requires --spec or --all-open");
     assert_eq!(payload["code"], "scope_required");
 }
@@ -428,7 +425,8 @@ fn complete_updates_only_task_and_next_finds_stage_or_cleanup() {
         "--verified-by",
         "validator:agent_456",
     ]);
-    assert_eq!(payload["status"], "done");
+    assert_eq!(payload["lease_id"], "l_test");
+    assert_eq!(payload["task"], "example/T001");
     assert_eq!(
         task_status(&repo.root, "specs/example/tasks/T001.md"),
         "done"
@@ -748,7 +746,6 @@ fn remaining_public_commands_keep_their_json_contracts() {
     assert_eq!(running["leases"][0]["id"], "l_test");
 
     let heartbeat = repo.run(&["heartbeat", "l_test"]);
-    assert_eq!(heartbeat["action"], "heartbeat");
     assert_eq!(heartbeat["lease_id"], "l_test");
 
     let lease_path = repo.root.join(".orchid/leases/l_test.json");
@@ -767,26 +764,23 @@ fn remaining_public_commands_keep_their_json_contracts() {
     )
     .unwrap();
     let report = repo.run(&["report-check", ".orchid/reports/l_test.md"]);
-    assert_eq!(report["action"], "report-check");
     assert_eq!(report["next"], "validation");
 
     let release = repo.run(&["release", "l_test", "--reason", "paused"]);
-    assert_eq!(release["status"], "released");
+    assert_eq!(release["lease_id"], "l_test");
     let close = repo.run(&["close", "--lease", "l_test"]);
-    assert_eq!(close["action"], "close");
+    assert_eq!(close["lease_id"], "l_test");
 
     let git_status = repo.run(&["git-status"]);
     assert_eq!(git_status["git"], false);
     assert_eq!(git_status["active_leases"], serde_json::json!([]));
 
     let lint = repo.run(&["lint"]);
-    assert_eq!(lint["ok"], true);
     assert_eq!(lint["tasks"], 3);
 
     let repo = Repo::new();
     let block = repo.run(&["block", "example", "T001", "--reason", "needs decision"]);
-    assert_eq!(block["action"], "block");
-    assert_eq!(block["status"], "blocked");
+    assert_eq!(block["task"], "example/T001");
     let next = repo.run(&["next", "--spec", "example", "--explain"]);
     assert_eq!(next["phase"], "blocked");
 }
