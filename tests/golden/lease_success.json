@@ -5,23 +5,5 @@
   "lease_mode": "single",
   "task": "example/T001",
   "task_path": "specs/example/tasks/T001.md",
-  "report": ".orchid/reports/l_contract.md",
-  "runtime": {
-    "active_count": 1,
-    "active_leases": [
-      {
-        "lease_id": "l_contract",
-        "task": "example/T001",
-        "owner": "worker:agent_123",
-        "lease_mode": "single",
-        "scope": [
-          "src/feature/"
-        ],
-        "heartbeat_at": "<timestamp>",
-        "age_seconds": "<age>",
-        "heartbeat_age_seconds": "<age>",
-        "stale": false
-      }
-    ]
-  }
+  "report": ".orchid/reports/l_contract.md"
 }

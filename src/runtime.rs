@@ -3,12 +3,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, TimeDelta, Utc};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use sha1::{Digest, Sha1};
 
 use crate::core::{
-    elapsed_seconds, insert, now_iso, parse_duration, parse_iso_datetime, utc_now, ErrorCode,
-    OrchError, OrchResult, DEFAULT_STALE_AFTER,
+    elapsed_seconds, now_iso, parse_duration, parse_iso_datetime, utc_now, ErrorCode, OrchError,
+    OrchResult, DEFAULT_STALE_AFTER,
 };
 use crate::model::{CompactLease, LeaseId, LeaseRecord};
 use crate::paths::{
@@ -151,32 +151,6 @@ pub(crate) fn compact_lease(
         heartbeat_age_seconds: elapsed_seconds(lease.heartbeat_or_started(), now),
         stale: lease_stale(lease, now, stale_after),
     })
-}
-
-pub(crate) fn runtime_summary(root: &Path) -> OrchResult<Map<String, Value>> {
-    let now = utc_now();
-    let stale_after = parse_duration(DEFAULT_STALE_AFTER)?;
-    let leases: Vec<Value> = active_leases(root)?
-        .into_iter()
-        .map(|lease| {
-            compact_lease(&lease, Some(now), Some(stale_after))
-                .map(|lease| Value::Object(lease.to_payload()))
-        })
-        .collect::<OrchResult<_>>()?;
-    let mut map = Map::new();
-    insert(&mut map, "active_count", leases.len() as i64);
-    insert(&mut map, "active_leases", Value::Array(leases));
-    Ok(map)
-}
-
-pub(crate) fn with_runtime(
-    root: &Path,
-    mut payload: Map<String, Value>,
-) -> OrchResult<Map<String, Value>> {
-    if !payload.contains_key("runtime") {
-        payload.insert("runtime".to_string(), Value::Object(runtime_summary(root)?));
-    }
-    Ok(payload)
 }
 
 pub(crate) fn report_path_for_lease(root: &Path, lease: &LeaseRecord) -> OrchResult<PathBuf> {

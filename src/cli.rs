@@ -9,7 +9,6 @@ use crate::orchestration::{
     PacketRequest, PacketRoleKind, ReportCheckRequest,
 };
 use crate::paths::root_from_arg;
-use crate::runtime::with_runtime;
 
 #[derive(Parser)]
 #[command(name = "orchid", about = "Task-file orchestration helper")]
@@ -219,12 +218,12 @@ pub fn run() -> i32 {
         }
     };
 
-    let result = match run_command(&root, &cli.command) {
-        Ok(payload) => with_runtime(&root, payload),
+    let result: OrchResult<Map<String, Value>> = match run_command(&root, &cli.command) {
+        Ok(payload) => Ok(payload),
         Err(error) => {
             let mut payload = json_fail(&error.message, Some(&error.code));
             payload.extend(error.details);
-            with_runtime(&root, payload)
+            Ok(payload)
         }
     };
 

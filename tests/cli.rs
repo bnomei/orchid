@@ -235,7 +235,6 @@ fn ready_requires_scope_and_reports_blocked_tasks() {
 
     let payload = repo.run(&["ready", "--spec", "example", "--explain"]);
     assert_eq!(payload["ok"], true);
-    assert_eq!(payload["runtime"]["active_count"], 0);
     assert_eq!(payload["ready"][0]["task"], "example/T001");
     assert_eq!(payload["blocked"][0]["reason"], "unmet dependency:T001");
     assert_eq!(payload["blocked"][1]["reason"], "status:done");
@@ -288,7 +287,6 @@ fn lease_runtime_and_parallel_guards_match_python_contract() {
     ]);
     assert_eq!(payload["lease_id"], "l_one");
     assert_eq!(payload["lease_mode"], "single");
-    assert_eq!(payload["runtime"]["active_count"], 1);
     assert!(repo.root.join(".orchid/leases/l_one.json").exists());
     assert!(!repo.root.join(".orch").exists());
     let running = repo.run_from_cwd(&["running"]);
@@ -321,7 +319,8 @@ fn lease_runtime_and_parallel_guards_match_python_contract() {
         "--allow-parallel",
     ]);
     assert_eq!(payload["lease_mode"], "parallel");
-    assert_eq!(payload["runtime"]["active_count"], 2);
+    let running = repo.run(&["running"]);
+    assert_eq!(running["leases"].as_array().unwrap().len(), 2);
 }
 
 #[test]
@@ -430,7 +429,6 @@ fn complete_updates_only_task_and_next_finds_stage_or_cleanup() {
         "validator:agent_456",
     ]);
     assert_eq!(payload["status"], "done");
-    assert_eq!(payload["runtime"]["active_count"], 0);
     assert_eq!(
         task_status(&repo.root, "specs/example/tasks/T001.md"),
         "done"

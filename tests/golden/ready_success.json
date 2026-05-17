@@ -24,9 +24,5 @@
       "task": "example/T003",
       "reason": "status:done"
     }
-  ],
-  "runtime": {
-    "active_count": 0,
-    "active_leases": []
-  }
+  ]
 }
