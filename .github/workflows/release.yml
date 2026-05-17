@@ -89,7 +89,7 @@ jobs:
           archive="${BIN_NAME}-${{ steps.version.outputs.version }}-${{ matrix.target }}"
           mkdir -p "dist" "${archive}"
           cp "target/${{ matrix.target }}/release/${BIN_NAME}" "${archive}/"
-          cp README.md LICENSE "${archive}/"
+          cp README.md LICENSE CHANGELOG.md "${archive}/"
           tar -czf "dist/${archive}.tar.gz" "${archive}"
 
       - name: Package Windows
@@ -99,7 +99,7 @@ jobs:
           $archive = "${env:BIN_NAME}-${{ steps.version.outputs.version }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path dist, $archive | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${env:BIN_NAME}${{ matrix.exe }}" $archive
-          Copy-Item README.md, LICENSE $archive
+          Copy-Item README.md, LICENSE, CHANGELOG.md $archive
           Compress-Archive -Path "$archive/*" -DestinationPath "dist/$archive.zip"
 
       - name: Upload workflow artifacts
