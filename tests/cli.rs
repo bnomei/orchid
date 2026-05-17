@@ -358,10 +358,10 @@ fn next_moves_through_dispatch_wait_validate_and_recover() {
     let repo = Repo::new();
     let payload = repo.run(&["next", "--spec", "example", "--explain"]);
     assert_eq!(payload["phase"], "dispatch");
-    assert!(payload["recommended_action"]
-        .as_str()
-        .unwrap()
-        .contains("lease example T001"));
+    assert_eq!(
+        payload["cmd"],
+        serde_json::json!(["lease", "example", "T001", "--owner", "worker:<agent-id>"])
+    );
 
     let lease = repo.run(&[
         "lease",

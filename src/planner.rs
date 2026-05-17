@@ -120,7 +120,7 @@ pub(crate) struct NextInput {
 
 pub(crate) struct NextDecision {
     pub(crate) phase: Phase,
-    pub(crate) recommended_action: String,
+    pub(crate) commands: Vec<Vec<String>>,
     pub(crate) selected_specs: Vec<String>,
     pub(crate) details: Map<String, Value>,
 }
@@ -132,10 +132,30 @@ impl NextDecision {
             "phase".to_string(),
             Value::String(self.phase.as_str().to_string()),
         );
-        map.insert(
-            "recommended_action".to_string(),
-            Value::String(self.recommended_action.clone()),
-        );
+        if self.commands.len() == 1 {
+            map.insert(
+                "cmd".to_string(),
+                Value::Array(
+                    self.commands[0]
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            );
+        } else if !self.commands.is_empty() {
+            map.insert(
+                "cmds".to_string(),
+                Value::Array(
+                    self.commands
+                        .iter()
+                        .map(|command| {
+                            Value::Array(command.iter().cloned().map(Value::String).collect())
+                        })
+                        .collect(),
+                ),
+            );
+        }
         map.insert(
             "selected_specs".to_string(),
             Value::Array(
@@ -173,9 +193,11 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
         insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
         return NextDecision {
             phase: Phase::Recover,
-            recommended_action: format!(
-                "stale --older-than {older_than}; then heartbeat, release, or close --force"
-            ),
+            commands: vec![vec![
+                "stale".to_string(),
+                "--older-than".to_string(),
+                older_than,
+            ]],
             selected_specs,
             details,
         };
@@ -189,7 +211,10 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
         insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
         return NextDecision {
             phase: Phase::Validate,
-            recommended_action: format!("report-check {report}; git-touched --lease {lease_id}"),
+            commands: vec![
+                vec!["report-check".to_string(), report],
+                vec!["git-touched".to_string(), "--lease".to_string(), lease_id],
+            ],
             selected_specs,
             details,
         };
@@ -200,9 +225,7 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
         insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
         return NextDecision {
             phase: Phase::Wait,
-            recommended_action:
-                "wait for active leases, heartbeat them, or run stale if they stop moving"
-                    .to_string(),
+            commands: Vec::new(),
             selected_specs,
             details,
         };
@@ -227,7 +250,11 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
         insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
         return NextDecision {
             phase: Phase::Stage,
-            recommended_action: format!("git-stage-plan --lease {}", first.lease_id),
+            commands: vec![vec![
+                "git-stage-plan".to_string(),
+                "--lease".to_string(),
+                first.lease_id.clone(),
+            ]],
             selected_specs,
             details,
         };
@@ -239,7 +266,7 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
         insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
         return NextDecision {
             phase: Phase::Cleanup,
-            recommended_action: format!("close --lease {lease_id}"),
+            commands: vec![vec!["close".to_string(), "--lease".to_string(), lease_id]],
             selected_specs,
             details,
         };
@@ -253,7 +280,13 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
         insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
         return NextDecision {
             phase: Phase::Dispatch,
-            recommended_action: format!("lease {spec} {id} --owner worker:<agent-id>"),
+            commands: vec![vec![
+                "lease".to_string(),
+                spec,
+                id,
+                "--owner".to_string(),
+                "worker:<agent-id>".to_string(),
+            ]],
             selected_specs,
             details,
         };
@@ -261,22 +294,19 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
 
     let total: i64 = counts.values().filter_map(Value::as_i64).sum();
     let done = counts.get("done").and_then(Value::as_i64).unwrap_or(0);
-    let (phase, recommended_action) = if total != 0 && done == total {
-        (Phase::Done, "stop; selected scope is complete")
+    let phase = if total != 0 && done == total {
+        Phase::Done
     } else if has_blocked {
-        (
-            Phase::Blocked,
-            "resolve blocked tasks or escalate; do not broaden scope",
-        )
+        Phase::Blocked
     } else {
-        (Phase::Done, "stop; no dispatchable tasks in selected scope")
+        Phase::Done
     };
     let mut details = Map::new();
     details.insert("counts".to_string(), Value::Object(counts));
     insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
     NextDecision {
         phase,
-        recommended_action: recommended_action.to_string(),
+        commands: Vec::new(),
         selected_specs,
         details,
     }
