@@ -77,7 +77,8 @@ Example prompt for executing a spec:
 Implement the open spec 012 with $orchid.
 ```
 
-For a longer prompt that asks another agent to research and customize the
+> [!TIP]
+> For a longer prompt that asks another agent to research and customize the
 included skill stubs, see
 [skills/skill-enrichment-prompt.md](skills/skill-enrichment-prompt.md).
 
