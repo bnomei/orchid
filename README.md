@@ -154,12 +154,42 @@ state and active leases.
 Lease one task before handing it to an agent, then generate the packet:
 
 ```sh
-orchid lease example T001 --owner worker:agent_123
+orchid lease example T001 --owner worker:agent_123 --agent-id agent_123
 orchid packet --lease l_123 --role worker
 ```
 
 The lease records owner, scope, Git baseline, report path, and heartbeat data
 under `.orchid/`.
+
+For scoped ephemeral work that should keep Orchid's lease, scope, packet, Git,
+and report rails without creating durable spec files, create a bud:
+
+```sh
+orchid bud \
+  --title "Diagnose research runner failure" \
+  --scope src/research \
+  --scope src/config.rs \
+  --instructions /tmp/bud.md \
+  --agent-id agent_123
+```
+
+`bud` writes only runtime files under `.orchid/`: a lease, instruction snapshot,
+and worker packet. It returns JSON with the `lease_id`, `packet`, and `report`
+paths. It does not create `specs/` files and does not pre-create the report
+file. Point the worker at the packet path; the worker reads the packet and
+writes the report. The coordinator still owns `report-check`, `git-touched`,
+validation, `complete`, and `close`.
+
+If the orchestrator only learns the runtime agent id after creating a lease,
+attach it later:
+
+```sh
+orchid lease-attach-agent --lease l_123 --agent-id agent_123
+orchid status --agent-id agent_123
+```
+
+`agent_id` is only for discovery and recovery. Use the returned `lease_id` for
+all operational commands.
 
 Track work that is still in flight:
 

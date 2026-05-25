@@ -207,6 +207,36 @@ impl LeaseStatus {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum LeaseKind {
+    Task,
+    Bud,
+    Other(String),
+}
+
+impl LeaseKind {
+    pub(crate) fn from_value(value: Option<&Value>) -> Self {
+        let raw = value.and_then(Value::as_str).unwrap_or("task");
+        match raw {
+            "task" => Self::Task,
+            "bud" => Self::Bud,
+            _ => Self::Other(raw.to_string()),
+        }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        match self {
+            LeaseKind::Task => "task",
+            LeaseKind::Bud => "bud",
+            LeaseKind::Other(raw) => raw,
+        }
+    }
+
+    pub(crate) fn is_bud(&self) -> bool {
+        matches!(self, Self::Bud)
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum LeaseMode {
     Parallel,
@@ -233,6 +263,7 @@ pub(crate) struct ActiveLeaseRecordInput {
     pub(crate) lease_id: LeaseId,
     pub(crate) lease_mode: LeaseMode,
     pub(crate) owner: String,
+    pub(crate) agent_id: Option<String>,
     pub(crate) task: String,
     pub(crate) task_path: String,
     pub(crate) scope: Vec<String>,
@@ -250,9 +281,13 @@ impl LeaseRecord {
     pub(crate) fn new_active(input: ActiveLeaseRecordInput) -> Self {
         let mut data = Map::new();
         insert(&mut data, "lease_id", input.lease_id.into_string());
+        insert(&mut data, "kind", LeaseKind::Task.as_str());
         insert(&mut data, "status", LeaseStatus::Active.as_str());
         insert(&mut data, "lease_mode", input.lease_mode.as_str());
         insert(&mut data, "owner", input.owner);
+        if let Some(agent_id) = input.agent_id.filter(|value| !value.is_empty()) {
+            insert(&mut data, "agent_id", agent_id);
+        }
         insert(&mut data, "task", input.task);
         insert(&mut data, "task_path", input.task_path);
         insert(&mut data, "scope", string_values(input.scope));
@@ -293,6 +328,14 @@ impl LeaseRecord {
         LeaseStatus::from_value(self.get("status"))
     }
 
+    pub(crate) fn kind(&self) -> LeaseKind {
+        LeaseKind::from_value(self.get("kind"))
+    }
+
+    pub(crate) fn is_bud(&self) -> bool {
+        self.kind().is_bud()
+    }
+
     pub(crate) fn mode(&self) -> String {
         self.get_str("lease_mode").unwrap_or("").to_string()
     }
@@ -303,6 +346,29 @@ impl LeaseRecord {
 
     pub(crate) fn task_path(&self) -> &str {
         self.get_str("task_path").unwrap_or("")
+    }
+
+    pub(crate) fn agent_id(&self) -> Option<&str> {
+        self.get_str("agent_id").filter(|value| !value.is_empty())
+    }
+
+    pub(crate) fn title(&self) -> Option<&str> {
+        self.get_str("title").filter(|value| !value.is_empty())
+    }
+
+    pub(crate) fn instructions_path(&self) -> Option<&str> {
+        self.get_str("instructions_path")
+            .filter(|value| !value.is_empty())
+    }
+
+    pub(crate) fn packet_path(&self) -> Option<&str> {
+        self.get_str("packet_path")
+            .filter(|value| !value.is_empty())
+    }
+
+    pub(crate) fn worker_packet_path(&self) -> Option<&str> {
+        self.get_str("worker_packet_path")
+            .filter(|value| !value.is_empty())
     }
 
     pub(crate) fn scope(&self) -> Vec<String> {
@@ -342,6 +408,8 @@ pub(crate) struct CompactLease {
     pub(crate) id: Value,
     pub(crate) task: Value,
     pub(crate) owner: Value,
+    pub(crate) kind: String,
+    pub(crate) agent_id: Option<String>,
     pub(crate) mode: String,
     pub(crate) age: i64,
     pub(crate) stale: bool,
@@ -353,6 +421,12 @@ impl CompactLease {
         map.insert("id".to_string(), self.id.clone());
         map.insert("task".to_string(), self.task.clone());
         map.insert("owner".to_string(), self.owner.clone());
+        if self.kind != "task" {
+            insert(&mut map, "kind", self.kind.clone());
+        }
+        if let Some(agent_id) = &self.agent_id {
+            insert(&mut map, "agent_id", agent_id.clone());
+        }
         insert(&mut map, "age", self.age);
         if self.mode != "single" {
             insert(&mut map, "mode", self.mode.clone());

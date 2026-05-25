@@ -320,6 +320,66 @@ fn lease_runtime_and_parallel_guards_match_python_contract() {
 }
 
 #[test]
+fn lease_agent_metadata_attach_and_status_lookup_work() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--agent-id",
+        "agent_123",
+        "--lease-id",
+        "l_agent",
+    ]);
+    let status = repo.run(&["status", "--agent-id", "agent_123"]);
+    assert_eq!(status["agent_id"], "agent_123");
+    assert_eq!(status["lease_id"], "l_agent");
+    assert_eq!(status["kind"], "task");
+    assert_eq!(status["status"], "active");
+    assert_eq!(status["task"], "example/T001");
+    assert_eq!(status["report"], ".orchid/reports/l_agent.md");
+
+    repo.write_task_file("example", "T005", "todo", "src/other/");
+    repo.run(&[
+        "lease",
+        "example",
+        "T005",
+        "--owner",
+        "worker:unassigned",
+        "--lease-id",
+        "l_attach",
+        "--allow-parallel",
+    ]);
+    let attach = repo.run(&[
+        "lease-attach-agent",
+        "--lease",
+        "l_attach",
+        "--agent-id",
+        "agent_456",
+    ]);
+    assert_eq!(attach["lease_id"], "l_attach");
+    assert_eq!(attach["agent_id"], "agent_456");
+    let status = repo.run(&["status", "--agent-id", "agent_456"]);
+    assert_eq!(status["lease_id"], "l_attach");
+    assert_eq!(status["owner"], "worker:agent_456");
+
+    let missing = repo.run_fail(&["status", "--agent-id", "agent_missing"]);
+    assert_eq!(missing["code"], "agent_lease_not_found");
+    let combined = repo.run_fail(&["status", "--agent-id", "agent_123", "--spec", "example"]);
+    assert_eq!(combined["code"], "scope_selector_conflict");
+    let duplicate = repo.run_fail(&[
+        "lease-attach-agent",
+        "--lease",
+        "l_attach",
+        "--agent-id",
+        "agent_123",
+    ]);
+    assert_eq!(duplicate["code"], "agent_id_already_attached");
+}
+
+#[test]
 fn serial_and_scope_conflicts_are_rejected() {
     let repo = Repo::new();
     repo.run(&[
@@ -350,6 +410,133 @@ fn serial_and_scope_conflicts_are_rejected() {
     .expect("write overlap task");
     let payload = repo.run_fail(&["lease", "example", "T004", "--owner", "worker:agent_456"]);
     assert_eq!(payload["code"], "scope_conflict");
+}
+
+#[test]
+fn bud_creates_runtime_packet_without_report_stub() {
+    let repo = Repo::new();
+    let instructions = repo.root.join("bud-instructions.md");
+    fs::write(&instructions, "Diagnose the runner failure.\n").unwrap();
+    let payload = repo.run(&[
+        "bud",
+        "--title",
+        "Diagnose runner failure",
+        "--scope",
+        "src/feature/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--agent-id",
+        "agent_123",
+        "--lease-id",
+        "l_bud",
+    ]);
+    assert_eq!(payload["lease_id"], "l_bud");
+    assert_eq!(payload["kind"], "bud");
+    assert_eq!(payload["task"], "bud:l_bud");
+    assert_eq!(payload["owner"], "worker:agent_123");
+    assert_eq!(payload["agent_id"], "agent_123");
+    assert_eq!(payload["packet"], ".orchid/packets/l_bud-worker.md");
+    assert_eq!(payload["report"], ".orchid/reports/l_bud.md");
+    assert!(repo.root.join(".orchid/leases/l_bud.json").exists());
+    assert!(repo.root.join(".orchid/buds/l_bud.md").exists());
+    assert!(!repo.root.join(".orchid/reports/l_bud.md").exists());
+
+    let packet = fs::read_to_string(repo.root.join(".orchid/packets/l_bud-worker.md")).unwrap();
+    assert!(packet.contains("## Bud Instructions"));
+    assert!(packet.contains("Diagnose the runner failure."));
+    assert!(packet.contains("Do not call Orchid lifecycle commands."));
+
+    let status = repo.run(&["status", "--agent-id", "agent_123"]);
+    assert_eq!(status["lease_id"], "l_bud");
+    assert_eq!(status["kind"], "bud");
+    assert_eq!(status["packet"], ".orchid/packets/l_bud-worker.md");
+
+    let validator_packet = repo.run(&["packet", "--lease", "l_bud", "--role", "validator"]);
+    assert_eq!(
+        validator_packet["packet"],
+        ".orchid/packets/l_bud-validator.md"
+    );
+    let status = repo.run(&["status", "--agent-id", "agent_123"]);
+    assert_eq!(status["packet"], ".orchid/packets/l_bud-worker.md");
+}
+
+#[test]
+fn bud_enforces_scope_and_parallel_guards() {
+    let repo = Repo::new();
+    let instructions = repo.root.join("bud-instructions.md");
+    fs::write(&instructions, "Work.\n").unwrap();
+    let missing_scope = repo.run_fail(&[
+        "bud",
+        "--title",
+        "Missing scope",
+        "--instructions",
+        instructions.to_str().unwrap(),
+    ]);
+    assert_eq!(missing_scope["code"], "scope_required");
+
+    repo.run(&[
+        "bud",
+        "--title",
+        "First",
+        "--scope",
+        "src/feature/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_bud_one",
+    ]);
+    let overlap = repo.run_fail(&[
+        "bud",
+        "--title",
+        "Overlap",
+        "--scope",
+        "src/feature/file.rs",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_bud_two",
+        "--allow-parallel",
+    ]);
+    assert_eq!(overlap["code"], "scope_conflict");
+    let serial = repo.run_fail(&[
+        "bud",
+        "--title",
+        "Serial",
+        "--scope",
+        "src/other/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_bud_three",
+        "--serial",
+    ]);
+    assert_eq!(serial["code"], "serial_blocked");
+    let parallel_required = repo.run_fail(&[
+        "bud",
+        "--title",
+        "Parallel required",
+        "--scope",
+        "src/other/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_bud_four",
+    ]);
+    assert_eq!(parallel_required["code"], "parallel_not_confirmed");
+
+    let duplicate_id = repo.run_fail(&[
+        "bud",
+        "--title",
+        "Duplicate id",
+        "--scope",
+        "src/other/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_bud_one",
+        "--allow-parallel",
+    ]);
+    assert_eq!(duplicate_id["code"], "lease_id_already_exists");
 }
 
 #[test]
@@ -403,6 +590,84 @@ fn next_moves_through_dispatch_wait_validate_and_recover() {
     let payload = repo.run(&["next", "--spec", "example", "--older-than", "30m"]);
     assert_eq!(payload["phase"], "recover");
     assert_eq!(payload["stale"][0]["id"], "l_test");
+}
+
+#[test]
+fn bud_packet_complete_git_and_cleanup_lifecycle_work() {
+    let repo = Repo::new();
+    repo.init_git();
+    let instructions = repo.root.join("bud-instructions.md");
+    fs::write(&instructions, "Change feature work only.\n").unwrap();
+    let payload = repo.run(&[
+        "bud",
+        "--title",
+        "Feature bud",
+        "--scope",
+        "src/feature/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_bud",
+    ]);
+    fs::write(
+        repo.root.join("src/feature/work.txt"),
+        "changed during bud\n",
+    )
+    .unwrap();
+    let touched = repo.run(&["git-touched", "--lease", "l_bud"]);
+    assert_eq!(
+        touched["stage"],
+        serde_json::json!(["src/feature/work.txt"])
+    );
+    let stage = repo.run(&["git-stage-plan", "--lease", "l_bud"]);
+    assert_eq!(
+        stage["pathspecs"],
+        serde_json::json!(["src/feature/work.txt"])
+    );
+
+    fs::write(
+        repo.root.join(payload["report"].as_str().unwrap()),
+        "+++\nlease_id = \"l_bud\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
+    )
+    .unwrap();
+    let report = repo.run(&["report-check", ".orchid/reports/l_bud.md"]);
+    assert_eq!(report["lease_id"], "l_bud");
+    assert_eq!(report["task"], "bud:l_bud");
+    let complete = repo.run(&["complete", "--lease", "l_bud", "--verified-by", "mayor"]);
+    assert_eq!(complete["kind"], "bud");
+    let lease_json: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_bud.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lease_json["status"], "completed");
+    assert_eq!(lease_json["verified_by"], "mayor");
+
+    let close = repo.run(&["close", "--lease", "l_bud"]);
+    assert!(close["deleted"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(".orchid/buds/l_bud.md".to_string())));
+
+    let repo = Repo::new();
+    let instructions = repo.root.join("bud-instructions.md");
+    fs::write(&instructions, "Cleanup bud.\n").unwrap();
+    repo.run(&[
+        "bud",
+        "--title",
+        "Cleanup bud",
+        "--scope",
+        "src/feature/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_cleanup",
+    ]);
+    repo.run(&["complete", "--lease", "l_cleanup", "--verified-by", "mayor"]);
+    let cleanup = repo.run(&["cleanup", "--completed"]);
+    assert!(cleanup["deleted"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(".orchid/buds/l_cleanup.md".to_string())));
 }
 
 #[test]
@@ -721,8 +986,17 @@ fn security_lock_and_help_contracts() {
     let help = repo.run_help(&["lease"]);
     assert!(help.contains("Task target: SPEC with TASK_ID"));
     assert!(help.contains("Lease owner label"));
+    assert!(help.contains("--agent-id"));
     assert!(help.contains("--serial"));
     assert!(help.contains("--allow-parallel"));
+    let help = repo.run_help(&["bud"]);
+    assert!(help.contains("Short title for the bud delegation"));
+    assert!(help.contains("--instructions"));
+    assert!(help.contains("--scope"));
+    let help = repo.run_help(&["lease-attach-agent"]);
+    assert!(help.contains("Discovery-only runtime agent id to attach"));
+    let help = repo.run_help(&["status"]);
+    assert!(help.contains("Find the lease attached to a discovery-only agent id"));
     let help = repo.run_help(&["next"]);
     assert!(help.contains("Include recommended action, queues, and blockers"));
     assert!(help.contains("--older-than"));

@@ -1,6 +1,6 @@
 ---
 name: orchid
-description: Coordinates scoped agent execution through the orchid CLI. Use when a repository has specs/SPEC_ID/tasks/*.md files and the user asks to implement, dispatch, validate, recover, complete, stage, commit/review, or clean up Orchid leases.
+description: Coordinates scoped agent execution through the orchid CLI. Use when a repository has specs/SPEC_ID/tasks/*.md files or needs a scoped bud delegation, and the user asks to implement, dispatch, validate, recover, complete, stage, commit/review, or clean up Orchid leases.
 ---
 
 # Orchid
@@ -43,9 +43,27 @@ Phase guide:
 Lease before dispatching:
 
 ```sh
-orchid lease SPEC_ID TASK_ID --owner worker:AGENT_ID --serial
+orchid lease SPEC_ID TASK_ID --owner worker:AGENT_ID --agent-id AGENT_ID --serial
 orchid packet --lease LEASE_ID --role worker
 ```
+
+For a scoped ephemeral delegation without durable spec files, create a bud and
+hand the returned packet path to the worker:
+
+```sh
+orchid bud --title "SHORT TITLE" --scope PATH --instructions PROMPT.md --agent-id AGENT_ID --serial
+```
+
+If the agent id becomes known after lease creation, attach it from the
+coordinator and then continue with the lease id returned by status:
+
+```sh
+orchid lease-attach-agent --lease LEASE_ID --agent-id AGENT_ID
+orchid status --agent-id AGENT_ID
+```
+
+Use `agent_id` only for discovery/recovery. Operational commands stay
+lease-based.
 
 Send spawned agents only the packet path and report path from Orchid's JSON
 output. Tell them they are not alone in the worktree and may only work or

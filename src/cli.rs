@@ -5,16 +5,16 @@ use serde_json::{Map, Value};
 
 use crate::core::{emit, json_fail, OrchResult, DEFAULT_STALE_AFTER};
 use crate::orchestration::{
-    self, BlockRequest, CleanupRequest, CloseRequest, CompleteRequest, LeaseRequest, NextRequest,
-    PacketRequest, PacketRoleKind, ReportCheckRequest,
+    self, AttachAgentRequest, BlockRequest, BudRequest, CleanupRequest, CloseRequest,
+    CompleteRequest, LeaseRequest, NextRequest, PacketRequest, PacketRoleKind, ReportCheckRequest,
 };
 use crate::paths::root_from_arg;
 
 #[derive(Parser)]
 #[command(
     name = "orchid",
-    about = "Coordinate scoped agent work from repo-local specs",
-    long_about = "Orchid coordinates scoped agent work from repo-local specs. It leases Markdown task files, creates fresh role packets, validates worker reports, checks Git scope, and emits JSON ACKs for orchestrators."
+    about = "Coordinate scoped agent work from repo-local specs and bud leases",
+    long_about = "Orchid coordinates scoped agent work from repo-local specs and runtime-only bud leases. It leases Markdown task files or ephemeral bud instructions, creates fresh role packets, validates worker reports, checks Git scope, and emits JSON ACKs for orchestrators."
 )]
 struct Cli {
     #[arg(long, help = "Repository root; defaults to the current directory")]
@@ -29,10 +29,14 @@ struct Cli {
 enum Command {
     #[command(about = "List ready task files")]
     Ready(ReadyArgs),
-    #[command(about = "Summarize specs, task states, and active leases")]
+    #[command(about = "Summarize specs, task states, active leases, or one agent lease")]
     Status(StatusArgs),
     #[command(about = "Reserve a task for one scoped worker")]
     Lease(LeaseArgs),
+    #[command(about = "Create a runtime-only bud lease and worker packet")]
+    Bud(BudArgs),
+    #[command(name = "lease-attach-agent", about = "Attach an agent id to a lease")]
+    LeaseAttachAgent(AttachAgentArgs),
     #[command(about = "List active lease runtime files")]
     Running,
     #[command(about = "Refresh a lease heartbeat timestamp")]
@@ -119,6 +123,8 @@ struct ReadyArgs {
 struct StatusArgs {
     #[arg(long, action = clap::ArgAction::Append, help = "Limit status to a spec id; repeatable")]
     spec: Vec<String>,
+    #[arg(long, help = "Find the lease attached to a discovery-only agent id")]
+    agent_id: Option<String>,
     #[arg(
         long,
         help = "Show status for the first open active spec by numerical prefix"
@@ -137,12 +143,46 @@ struct LeaseArgs {
     task_id: Option<String>,
     #[arg(long, help = "Lease owner label, such as worker:agent_123")]
     owner: String,
+    #[arg(long, help = "Discovery-only runtime agent id attached to this lease")]
+    agent_id: Option<String>,
     #[arg(long, help = "Override generated lease id for tests or recovery")]
     lease_id: Option<String>,
     #[arg(long, help = "Require no other active leases")]
     serial: bool,
     #[arg(long, help = "Allow a disjoint lease while other leases are active")]
     allow_parallel: bool,
+}
+
+#[derive(Args)]
+#[command(group = clap::ArgGroup::new("mode").args(["serial", "allow_parallel"]).multiple(false))]
+struct BudArgs {
+    #[arg(long, help = "Short title for the bud delegation")]
+    title: String,
+    #[arg(long, action = clap::ArgAction::Append, help = "Allowed write-scope path; repeatable; required")]
+    scope: Vec<String>,
+    #[arg(long, help = "Markdown instruction file to snapshot into .orchid/buds")]
+    instructions: String,
+    #[arg(
+        long,
+        help = "Lease owner label; defaults from --agent-id or worker:unassigned"
+    )]
+    owner: Option<String>,
+    #[arg(long, help = "Discovery-only runtime agent id attached to this lease")]
+    agent_id: Option<String>,
+    #[arg(long, help = "Override generated lease id for tests or recovery")]
+    lease_id: Option<String>,
+    #[arg(long, help = "Require no other active leases")]
+    serial: bool,
+    #[arg(long, help = "Allow a disjoint lease while other leases are active")]
+    allow_parallel: bool,
+}
+
+#[derive(Args)]
+struct AttachAgentArgs {
+    #[arg(long, help = "Lease id to update")]
+    lease: String,
+    #[arg(long, help = "Discovery-only runtime agent id to attach")]
+    agent_id: String,
 }
 
 #[derive(Args)]
@@ -309,6 +349,8 @@ fn run_command(root: &Path, command: &Command) -> OrchResult<Map<String, Value>>
         Command::Ready(args) => cmd_ready(root, args),
         Command::Status(args) => cmd_status(root, args),
         Command::Lease(args) => cmd_lease(root, args),
+        Command::Bud(args) => cmd_bud(root, args),
+        Command::LeaseAttachAgent(args) => cmd_lease_attach_agent(root, args),
         Command::Running => cmd_running(root),
         Command::Heartbeat { lease } => cmd_heartbeat(root, lease),
         Command::Stale { older_than } => cmd_stale(root, older_than),
@@ -345,6 +387,7 @@ fn cmd_status(root: &Path, args: &StatusArgs) -> OrchResult<Map<String, Value>> 
         root,
         &orchestration::StatusRequest {
             specs: args.spec.clone(),
+            agent_id: args.agent_id.clone(),
             all_open: args.all_open,
         },
     )
@@ -357,9 +400,36 @@ fn cmd_lease(root: &Path, args: &LeaseArgs) -> OrchResult<Map<String, Value>> {
             target: args.target.clone(),
             task_id: args.task_id.clone(),
             owner: args.owner.clone(),
+            agent_id: args.agent_id.clone(),
             lease_id: args.lease_id.clone(),
             serial: args.serial,
             allow_parallel: args.allow_parallel,
+        },
+    )
+}
+
+fn cmd_bud(root: &Path, args: &BudArgs) -> OrchResult<Map<String, Value>> {
+    orchestration::bud(
+        root,
+        &BudRequest {
+            title: args.title.clone(),
+            scope: args.scope.clone(),
+            instructions: args.instructions.clone(),
+            owner: args.owner.clone(),
+            agent_id: args.agent_id.clone(),
+            lease_id: args.lease_id.clone(),
+            serial: args.serial,
+            allow_parallel: args.allow_parallel,
+        },
+    )
+}
+
+fn cmd_lease_attach_agent(root: &Path, args: &AttachAgentArgs) -> OrchResult<Map<String, Value>> {
+    orchestration::lease_attach_agent(
+        root,
+        &AttachAgentRequest {
+            lease: args.lease.clone(),
+            agent_id: args.agent_id.clone(),
         },
     )
 }

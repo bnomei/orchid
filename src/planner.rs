@@ -362,6 +362,8 @@ mod tests {
             id: Value::String(lease_id.to_string()),
             task: Value::String("example/T001".to_string()),
             owner: Value::String("worker:agent_123".to_string()),
+            kind: "task".to_string(),
+            agent_id: None,
             mode: "single".to_string(),
             age: 0,
             stale: false,

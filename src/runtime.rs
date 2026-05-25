@@ -12,8 +12,8 @@ use crate::core::{
 };
 use crate::model::{CompactLease, LeaseId, LeaseRecord};
 use crate::paths::{
-    atomic_write_json, leases_dir, locks_dir, orch_dir, packets_dir, path_to_string, relpath,
-    repo_path, reports_dir, spec_research_root,
+    atomic_write_json, buds_dir, leases_dir, locks_dir, orch_dir, packets_dir, path_to_string,
+    relpath, repo_path, reports_dir, spec_research_root,
 };
 use crate::specs::safe_spec_id;
 
@@ -141,6 +141,8 @@ pub(crate) fn compact_lease(
         id: lease.id_value(),
         task: lease.task_value(),
         owner: lease.owner_value(),
+        kind: lease.kind().as_str().to_string(),
+        agent_id: lease.agent_id().map(str::to_string),
         mode: lease.mode(),
         age: elapsed_seconds(lease.heartbeat_or_started(), now),
         stale: lease_stale(lease, now, stale_after),
@@ -186,6 +188,7 @@ pub(crate) fn prune_empty_runtime_dirs(root: &Path) -> Vec<String> {
     for path in [
         reports_dir(root),
         packets_dir(root),
+        buds_dir(root),
         leases_dir(root),
         locks_dir(root),
         spec_research_root(root),
@@ -236,6 +239,18 @@ pub(crate) fn close_lease_files(
     }
     remove_if_exists(
         &reports_dir(root).join(format!("{lease_id}.md")),
+        root,
+        &mut deleted,
+    )?;
+    if let Some(instructions_path) = lease.instructions_path() {
+        remove_if_exists(
+            &repo_path(root, instructions_path, "instructions_path")?,
+            root,
+            &mut deleted,
+        )?;
+    }
+    remove_if_exists(
+        &buds_dir(root).join(format!("{lease_id}.md")),
         root,
         &mut deleted,
     )?;

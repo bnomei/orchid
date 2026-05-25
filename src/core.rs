@@ -6,12 +6,16 @@ pub(crate) const DEFAULT_STALE_AFTER: &str = "30m";
 #[derive(Debug, Copy, Clone)]
 pub(crate) enum ErrorCode {
     ActiveLeaseCloseRequiresForce,
+    AgentLeaseAmbiguous,
+    AgentLeaseNotFound,
+    AgentIdAlreadyAttached,
     CleanupModeRequired,
     HumanCheckpoint,
     InactiveSpec,
     InvalidDuration,
     InvalidJson,
     InvalidSpecId,
+    LeaseIdAlreadyExists,
     LeaseNotFound,
     ParallelNotConfirmed,
     PathOutsideRepo,
@@ -33,12 +37,16 @@ impl ErrorCode {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             ErrorCode::ActiveLeaseCloseRequiresForce => "active_lease_close_requires_force",
+            ErrorCode::AgentLeaseAmbiguous => "agent_lease_ambiguous",
+            ErrorCode::AgentLeaseNotFound => "agent_lease_not_found",
+            ErrorCode::AgentIdAlreadyAttached => "agent_id_already_attached",
             ErrorCode::CleanupModeRequired => "cleanup_mode_required",
             ErrorCode::HumanCheckpoint => "human_checkpoint",
             ErrorCode::InactiveSpec => "inactive_spec",
             ErrorCode::InvalidDuration => "invalid_duration",
             ErrorCode::InvalidJson => "invalid_json",
             ErrorCode::InvalidSpecId => "invalid_spec_id",
+            ErrorCode::LeaseIdAlreadyExists => "lease_id_already_exists",
             ErrorCode::LeaseNotFound => "lease_not_found",
             ErrorCode::ParallelNotConfirmed => "parallel_not_confirmed",
             ErrorCode::PathOutsideRepo => "path_outside_repo",

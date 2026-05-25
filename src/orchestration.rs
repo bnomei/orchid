@@ -13,7 +13,8 @@ use crate::gitstate::{
 };
 use crate::model::{ActiveLeaseRecordInput, LeaseId, LeaseMode, LeaseRecord, ReportFrontmatter};
 use crate::paths::{
-    atomic_write, ensure_runtime_dirs, packets_dir, relpath, repo_path, reports_dir,
+    atomic_write, buds_dir, ensure_runtime_dirs, leases_dir, packets_dir, relpath, repo_path,
+    reports_dir,
 };
 use crate::planner::{
     decide_next, BlockedTask, CleanupCandidate, NextInput, ReadyTask, ReportReady,
@@ -36,9 +37,26 @@ pub(crate) struct LeaseRequest {
     pub(crate) target: String,
     pub(crate) task_id: Option<String>,
     pub(crate) owner: String,
+    pub(crate) agent_id: Option<String>,
     pub(crate) lease_id: Option<String>,
     pub(crate) serial: bool,
     pub(crate) allow_parallel: bool,
+}
+
+pub(crate) struct BudRequest {
+    pub(crate) title: String,
+    pub(crate) scope: Vec<String>,
+    pub(crate) instructions: String,
+    pub(crate) owner: Option<String>,
+    pub(crate) agent_id: Option<String>,
+    pub(crate) lease_id: Option<String>,
+    pub(crate) serial: bool,
+    pub(crate) allow_parallel: bool,
+}
+
+pub(crate) struct AttachAgentRequest {
+    pub(crate) lease: String,
+    pub(crate) agent_id: String,
 }
 
 pub(crate) struct NextRequest {
@@ -56,6 +74,7 @@ pub(crate) struct ReadyRequest {
 
 pub(crate) struct StatusRequest {
     pub(crate) specs: Vec<String>,
+    pub(crate) agent_id: Option<String>,
     pub(crate) all_open: bool,
 }
 
@@ -90,7 +109,7 @@ pub(crate) struct CleanupRequest {
     pub(crate) completed: bool,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 pub(crate) enum PacketRoleKind {
     Worker,
     Validator,
@@ -184,6 +203,21 @@ pub(crate) fn ready(root: &Path, request: &ReadyRequest) -> OrchResult<Map<Strin
 }
 
 pub(crate) fn status(root: &Path, request: &StatusRequest) -> OrchResult<Map<String, Value>> {
+    if let Some(agent_id) = request
+        .agent_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        if !request.specs.is_empty() || request.all_open {
+            return Err(OrchError::coded(
+                "agent status cannot combine with spec selectors",
+                ErrorCode::ScopeSelectorConflict,
+            )
+            .detail("agent_id", agent_id));
+        }
+        return status_for_agent(root, agent_id);
+    }
+
     let (tasks, _) = if specs_arg(&request.specs).is_some() || request.all_open {
         select_tasks(root, specs_arg(&request.specs), request.all_open)?
     } else {
@@ -244,6 +278,8 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
         .clone()
         .map(LeaseId::from_raw)
         .unwrap_or_else(|| lease_id_for(&task.path, &request.owner));
+    ensure_lease_id_available(root, lease_id.as_str())?;
+    ensure_agent_id_available(root, request.agent_id.as_deref(), None)?;
     let git_state = git_status_data(root)?;
     let lease_mode = if request.allow_parallel {
         LeaseMode::Parallel
@@ -257,6 +293,7 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
         lease_id: lease_id.clone(),
         lease_mode,
         owner: request.owner.clone(),
+        agent_id: request.agent_id.clone(),
         task: task_key(&task),
         task_path: relpath(&task.path, root),
         scope: task.scope(),
@@ -284,6 +321,153 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
         "report",
         lease.get("report_path").cloned().unwrap_or(Value::Null),
     );
+    if let Some(agent_id) = request
+        .agent_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        insert(&mut payload, "agent_id", agent_id);
+    }
+    Ok(payload)
+}
+
+pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, Value>> {
+    let _lock = runtime_lock(root)?;
+    let scope: Vec<String> = request
+        .scope
+        .iter()
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect();
+    if scope.is_empty() {
+        return Err(OrchError::coded(
+            "bud requires --scope",
+            ErrorCode::ScopeRequired,
+        ));
+    }
+    let instructions = fs::read_to_string(&request.instructions)?;
+    ensure_runtime_dirs(root)?;
+
+    let active = active_leases(root)?;
+    for lease in &active {
+        if scopes_overlap(&scope, &lease.scope()) {
+            return Err(OrchError::coded("scope conflict", ErrorCode::ScopeConflict)
+                .detail("lease_id", lease.id_value())
+                .detail("scope", string_values(lease.scope())));
+        }
+    }
+    if request.serial && !active.is_empty() {
+        return Err(OrchError::coded(
+            "serial lease blocked by active leases",
+            ErrorCode::SerialBlocked,
+        )
+        .detail("active_leases", compact_leases(active)?));
+    }
+    if !active.is_empty() && !request.allow_parallel {
+        return Err(OrchError::coded(
+            "active leases require --allow-parallel",
+            ErrorCode::ParallelNotConfirmed,
+        )
+        .detail("active_leases", compact_leases(active)?));
+    }
+
+    let owner = request
+        .owner
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            request
+                .agent_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .map(|agent_id| format!("worker:{agent_id}"))
+                .unwrap_or_else(|| "worker:unassigned".to_string())
+        });
+    ensure_agent_id_available(root, request.agent_id.as_deref(), None)?;
+    let lease_id = if let Some(lease_id) = request.lease_id.clone().map(LeaseId::from_raw) {
+        ensure_lease_id_available(root, lease_id.as_str())?;
+        lease_id
+    } else {
+        unique_bud_lease_id(root, &request.title, &owner)?
+    };
+    let lease_id_text = lease_id.as_str().to_string();
+    let git_state = git_status_data(root)?;
+    let lease_mode = if request.allow_parallel {
+        LeaseMode::Parallel
+    } else if request.serial {
+        LeaseMode::Serial
+    } else {
+        LeaseMode::Single
+    };
+    let started_at = now_iso();
+    let instructions_path = buds_dir(root).join(format!("{lease_id_text}.md"));
+    atomic_write(&instructions_path, &instructions)?;
+    let mut lease = LeaseRecord::new_active(ActiveLeaseRecordInput {
+        lease_id,
+        lease_mode,
+        owner: owner.clone(),
+        agent_id: request.agent_id.clone(),
+        task: format!("bud:{lease_id_text}"),
+        task_path: String::new(),
+        scope: scope.clone(),
+        started_at,
+        base_head: git_state
+            .get("head")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        baseline_changed: changed_paths_value(&git_state),
+        report_path: relpath(&reports_dir(root).join(format!("{lease_id_text}.md")), root),
+    });
+    lease.set("kind", "bud");
+    lease.set("title", request.title.clone());
+    lease.set("instructions_path", relpath(&instructions_path, root));
+    let packet = render_packet_for_lease(root, &mut lease, &lease_id_text, PacketRoleKind::Worker)?;
+    save_lease(root, &lease)?;
+
+    let mut payload = json_ok();
+    insert(&mut payload, "lease_id", lease_id_text);
+    insert(&mut payload, "kind", "bud");
+    insert(&mut payload, "lease_mode", lease_mode.as_str());
+    insert(&mut payload, "task", lease.task_value());
+    insert(&mut payload, "title", request.title.clone());
+    insert(&mut payload, "owner", owner);
+    if let Some(agent_id) = request
+        .agent_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        insert(&mut payload, "agent_id", agent_id);
+    }
+    insert(&mut payload, "scope", string_values(scope));
+    insert(&mut payload, "packet", packet);
+    insert(
+        &mut payload,
+        "report",
+        lease.get("report_path").cloned().unwrap_or(Value::Null),
+    );
+    insert(&mut payload, "status", "active");
+    Ok(payload)
+}
+
+pub(crate) fn lease_attach_agent(
+    root: &Path,
+    request: &AttachAgentRequest,
+) -> OrchResult<Map<String, Value>> {
+    let _lock = runtime_lock(root)?;
+    let mut lease = load_lease(root, &request.lease)?;
+    ensure_agent_id_available(root, Some(&request.agent_id), Some(&request.lease))?;
+    lease.set("agent_id", request.agent_id.clone());
+    if lease.get_str("owner") == Some("worker:unassigned") {
+        lease.set("owner", format!("worker:{}", request.agent_id));
+    }
+    save_lease(root, &lease)?;
+    let mut payload = json_ok();
+    insert(&mut payload, "lease_id", request.lease.clone());
+    insert(&mut payload, "agent_id", request.agent_id.clone());
+    insert(&mut payload, "kind", lease.kind().as_str());
+    insert(&mut payload, "status", lease.status().as_str());
     Ok(payload)
 }
 
@@ -372,6 +556,35 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
 pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map<String, Value>> {
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, &request.lease)?;
+    if lease.is_bud() {
+        let completed_at = now_iso();
+        let implemented_by = if request.implemented_by.is_empty() {
+            lease.get_str("owner").unwrap_or("").to_string()
+        } else {
+            request.implemented_by.clone()
+        };
+        lease.set("status", "completed");
+        lease.set("completed_at", completed_at);
+        lease.set("implemented_by", implemented_by);
+        lease.set("verified_by", request.verified_by.clone());
+        lease.set("verification_status", request.verification_status.clone());
+        if !request.report.is_empty() {
+            lease.set("report", request.report.clone());
+        }
+        if !request.commit.is_empty() {
+            lease.set("commit", request.commit.clone());
+        }
+        if !request.commit_review.is_empty() {
+            lease.set("commit_review", request.commit_review.clone());
+        }
+        save_lease(root, &lease)?;
+        let mut payload = json_ok();
+        insert(&mut payload, "lease_id", request.lease.clone());
+        insert(&mut payload, "kind", "bud");
+        insert(&mut payload, "task", lease.task_value());
+        return Ok(payload);
+    }
+
     let task_path = lease.task_path();
     let task = load_task(repo_path(root, task_path, "task_path")?, root)?;
     let mut frontmatter = task.frontmatter().clone();
@@ -588,42 +801,83 @@ pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<Str
     let _lock = runtime_lock(root)?;
     ensure_runtime_dirs(root)?;
     let mut lease = load_lease(root, &request.lease)?;
+    let packet = render_packet_for_lease(root, &mut lease, &request.lease, request.role)?;
+    save_lease(root, &lease)?;
+    let mut payload = json_ok();
+    insert(&mut payload, "lease_id", request.lease.clone());
+    insert(&mut payload, "role", request.role.as_str());
+    insert(&mut payload, "packet", packet);
+    Ok(payload)
+}
+
+fn render_packet_for_lease(
+    root: &Path,
+    lease: &mut LeaseRecord,
+    lease_id: &str,
+    role: PacketRoleKind,
+) -> OrchResult<String> {
+    let report_path = report_path_for_lease(root, lease)?;
+    let packet_path = repo_path(
+        root,
+        packets_dir(root).join(format!("{}-{}.md", lease_id, role.as_str())),
+        "packet_path",
+    )?;
+    let report_template = format!(
+        "+++\nlease_id = {}\nstatus = {}\ncommands_run = []\nresult = \"\"\n+++\n\n## Summary\n\n## Evidence\n\n## Notes\n",
+        quote_toml_string(lease_id),
+        quote_toml_string("ready_for_validation")
+    );
+    let packet = if lease.is_bud() {
+        render_bud_packet(root, lease, lease_id, role, &report_path, &report_template)?
+    } else {
+        render_task_packet(root, lease, lease_id, role, &report_path, &report_template)?
+    };
+    atomic_write(&packet_path, &packet)?;
+    let packet_rel = relpath(&packet_path, root);
+    lease.set("packet_path", packet_rel.clone());
+    if role == PacketRoleKind::Worker {
+        lease.set("worker_packet_path", packet_rel.clone());
+    }
+    Ok(packet_rel)
+}
+
+fn render_task_packet(
+    root: &Path,
+    lease: &LeaseRecord,
+    lease_id: &str,
+    role: PacketRoleKind,
+    report_path: &Path,
+    report_template: &str,
+) -> OrchResult<String> {
     let task_path = repo_path(root, lease.task_path(), "task_path")?;
     let task = load_task(&task_path, root)?;
     let spec_dir = task_path.parent().and_then(|p| p.parent()).unwrap_or(root);
     let policy = load_spec_policy(root, &task.spec_id)?;
-    let report_path = report_path_for_lease(root, &lease)?;
-    let packet_path = repo_path(
-        root,
-        packets_dir(root).join(format!("{}-{}.md", request.lease, request.role.as_str())),
-        "packet_path",
-    )?;
     let requirements = read_optional(&spec_dir.join("requirements.md"))?;
     let design = read_optional(&spec_dir.join("design.md"))?;
-    let report_template = format!(
-        "+++\nlease_id = {}\nstatus = {}\ncommands_run = []\nresult = \"\"\n+++\n\n## Summary\n\n## Evidence\n\n## Notes\n",
-        quote_toml_string(&request.lease),
-        quote_toml_string("ready_for_validation")
-    );
     let policy_text = if policy.is_empty() {
         "{}".to_string()
     } else {
         serde_json::to_string(&Value::Object(policy.into_map())).expect("json encoding")
     };
     let scope = lease.scope().join(", ");
-    let packet = [
-        format!("# {} Packet - {}", request.role.title(), request.lease),
+    Ok([
+        format!("# {} Packet - {}", role.title(), lease_id),
         String::new(),
-        request.role.note().to_string(),
+        role.note().to_string(),
         String::new(),
         "## Lease".to_string(),
         String::new(),
-        format!("- Lease: `{}`", request.lease),
+        format!("- Lease: `{lease_id}`"),
         format!("- Task: `{}`", lease.get_str("task").unwrap_or("")),
         format!("- Task path: `{}`", lease.task_path()),
         format!("- Owner: `{}`", lease.get_str("owner").unwrap_or("")),
+        lease
+            .agent_id()
+            .map(|agent_id| format!("- Agent id: `{agent_id}`"))
+            .unwrap_or_default(),
         format!("- Scope: `{scope}`"),
-        format!("- Report path: `{}`", relpath(&report_path, root)),
+        format!("- Report path: `{}`", relpath(report_path, root)),
         format!("- Spec policy: `{policy_text}`"),
         String::new(),
         "## Worker Report Contract".to_string(),
@@ -656,15 +910,64 @@ pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<Str
         },
         String::new(),
     ]
-    .join("\n");
-    atomic_write(&packet_path, &packet)?;
-    lease.set("packet_path", relpath(&packet_path, root));
-    save_lease(root, &lease)?;
-    let mut payload = json_ok();
-    insert(&mut payload, "lease_id", request.lease.clone());
-    insert(&mut payload, "role", request.role.as_str());
-    insert(&mut payload, "packet", relpath(&packet_path, root));
-    Ok(payload)
+    .join("\n"))
+}
+
+fn render_bud_packet(
+    root: &Path,
+    lease: &LeaseRecord,
+    lease_id: &str,
+    role: PacketRoleKind,
+    report_path: &Path,
+    report_template: &str,
+) -> OrchResult<String> {
+    let instructions_path = lease
+        .instructions_path()
+        .ok_or_else(|| OrchError::new("bud lease missing instructions_path"))?;
+    let instructions =
+        crate::paths::read_text(&repo_path(root, instructions_path, "instructions_path")?)?;
+    let scope = lease.scope().join(", ");
+    let agent_line = lease
+        .agent_id()
+        .map(|agent_id| format!("- Agent id: `{agent_id}`"))
+        .unwrap_or_default();
+    Ok([
+        format!("# {} Packet - {}", role.title(), lease_id),
+        String::new(),
+        role.note().to_string(),
+        String::new(),
+        "## Lease".to_string(),
+        String::new(),
+        format!("- Lease: `{lease_id}`"),
+        "- Kind: `bud`".to_string(),
+        format!("- Task: `{}`", lease.get_str("task").unwrap_or("")),
+        format!("- Title: `{}`", lease.title().unwrap_or("")),
+        format!("- Owner: `{}`", lease.get_str("owner").unwrap_or("")),
+        agent_line,
+        format!("- Scope: `{scope}`"),
+        format!("- Report path: `{}`", relpath(report_path, root)),
+        String::new(),
+        "## Worker Report Contract".to_string(),
+        String::new(),
+        "Write a Markdown report with TOML frontmatter to the report path. Minimal template:"
+            .to_string(),
+        String::new(),
+        "```md".to_string(),
+        report_template.trim_end().to_string(),
+        "```".to_string(),
+        String::new(),
+        "## Bud Instructions".to_string(),
+        String::new(),
+        instructions.trim_end().to_string(),
+        String::new(),
+        "## Lifecycle Boundary".to_string(),
+        String::new(),
+        "Do not call Orchid lifecycle commands.".to_string(),
+        "Read this packet, stay within scope, do the work, and write your report to the provided report path.".to_string(),
+        "The orchestrator owns report-check, git-touched, validation, complete, and close.".to_string(),
+        String::new(),
+    ]
+    .join("\n"))
 }
 
 pub(crate) fn report_check(
@@ -770,6 +1073,100 @@ fn compact_leases(leases: Vec<LeaseRecord>) -> OrchResult<Value> {
             })
             .collect::<OrchResult<Vec<_>>>()?,
     ))
+}
+
+fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value>> {
+    let matches = all_leases(root)?
+        .into_iter()
+        .filter(|lease| lease.agent_id() == Some(agent_id))
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        return Err(
+            OrchError::coded("agent lease not found", ErrorCode::AgentLeaseNotFound)
+                .detail("agent_id", agent_id),
+        );
+    }
+    if matches.len() > 1 {
+        let lease_ids = matches
+            .iter()
+            .filter_map(|lease| lease.id().map(str::to_string))
+            .collect::<Vec<_>>();
+        return Err(
+            OrchError::coded("agent lease ambiguous", ErrorCode::AgentLeaseAmbiguous)
+                .detail("agent_id", agent_id)
+                .detail("leases", string_values(lease_ids)),
+        );
+    }
+    let lease = &matches[0];
+    let mut payload = json_ok();
+    insert(&mut payload, "agent_id", agent_id);
+    insert(&mut payload, "lease_id", lease.id_value());
+    insert(&mut payload, "kind", lease.kind().as_str());
+    insert(&mut payload, "status", lease.status().as_str());
+    insert(&mut payload, "task", lease.task_value());
+    insert(&mut payload, "owner", lease.owner_value());
+    if let Some(title) = lease.title() {
+        insert(&mut payload, "title", title);
+    }
+    if let Some(packet_path) = lease.worker_packet_path().or_else(|| lease.packet_path()) {
+        insert(&mut payload, "packet", packet_path);
+    }
+    if let Some(report_path) = lease.report_path() {
+        insert(&mut payload, "report", report_path);
+    }
+    Ok(payload)
+}
+
+fn ensure_lease_id_available(root: &Path, lease_id: &str) -> OrchResult<()> {
+    if leases_dir(root).join(format!("{lease_id}.json")).exists() {
+        return Err(
+            OrchError::coded("lease id already exists", ErrorCode::LeaseIdAlreadyExists)
+                .detail("lease_id", lease_id),
+        );
+    }
+    Ok(())
+}
+
+fn unique_bud_lease_id(root: &Path, title: &str, owner: &str) -> OrchResult<LeaseId> {
+    for attempt in 0..1000 {
+        let seed = if attempt == 0 {
+            format!("bud:{title}")
+        } else {
+            format!("bud:{title}:{attempt}")
+        };
+        let candidate = lease_id_for(std::path::Path::new(&seed), owner);
+        if !leases_dir(root)
+            .join(format!("{}.json", candidate.as_str()))
+            .exists()
+        {
+            return Ok(candidate);
+        }
+    }
+    Err(OrchError::new("could not allocate bud lease id"))
+}
+
+fn ensure_agent_id_available(
+    root: &Path,
+    agent_id: Option<&str>,
+    except_lease: Option<&str>,
+) -> OrchResult<()> {
+    let Some(agent_id) = agent_id.filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    for lease in all_leases(root)? {
+        if lease.id() == except_lease {
+            continue;
+        }
+        if lease.agent_id() == Some(agent_id) {
+            return Err(OrchError::coded(
+                "agent id already attached",
+                ErrorCode::AgentIdAlreadyAttached,
+            )
+            .detail("agent_id", agent_id)
+            .detail("lease_id", lease.id_value()));
+        }
+    }
+    Ok(())
 }
 
 fn insert_non_empty(map: &mut Map<String, Value>, key: &str, value: Value) {

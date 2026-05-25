@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] - 2026-05-25
+
+### Added
+
+- Added `orchid bud`, a runtime-only one-shot delegation flow that creates a scoped lease, instruction snapshot, worker packet, report path, and Git baseline without creating durable spec files.
+- Added optional lease `agent_id` metadata, `lease-attach-agent`, and `status --agent-id` for discovery while keeping lifecycle commands lease-based.
+
 ## [0.1.6] - 2026-05-17
 
 ### Changed

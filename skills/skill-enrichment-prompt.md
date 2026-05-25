@@ -34,7 +34,8 @@ skill.
 For `skills/orchid/SKILL.md`, make the orchestration workflow concrete and safe
 for a shared Git worktree. It should follow repo conventions for validation,
 branching, commit messages, signing/signoff, and review. Cover phase
-observation, serial-by-default leases, packet handoff, reports as claims,
+observation, serial-by-default leases, bud delegation for scoped ephemeral work,
+agent-id lookup as discovery only, packet handoff, reports as claims,
 touched-file attribution, validation before completion, staging only approved
 pathspecs, stale-lease recovery, cleanup, and backoff for unavailable agents or
 flaky resources. The critical rule: spawned agents only work or review. They

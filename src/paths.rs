@@ -69,6 +69,10 @@ pub(crate) fn packets_dir(root: &Path) -> PathBuf {
     orch_dir(root).join("packets")
 }
 
+pub(crate) fn buds_dir(root: &Path) -> PathBuf {
+    orch_dir(root).join("buds")
+}
+
 pub(crate) fn reports_dir(root: &Path) -> PathBuf {
     orch_dir(root).join("reports")
 }
@@ -78,7 +82,12 @@ pub(crate) fn spec_research_root(root: &Path) -> PathBuf {
 }
 
 pub(crate) fn ensure_runtime_dirs(root: &Path) -> OrchResult<()> {
-    for path in [leases_dir(root), packets_dir(root), reports_dir(root)] {
+    for path in [
+        leases_dir(root),
+        packets_dir(root),
+        buds_dir(root),
+        reports_dir(root),
+    ] {
         fs::create_dir_all(path)?;
     }
     Ok(())
