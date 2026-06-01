@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
@@ -82,14 +82,28 @@ pub(crate) fn spec_research_root(root: &Path) -> PathBuf {
 }
 
 pub(crate) fn ensure_runtime_dirs(root: &Path) -> OrchResult<()> {
-    for path in [
-        leases_dir(root),
-        packets_dir(root),
-        buds_dir(root),
-        reports_dir(root),
+    for (label, path) in [
+        ("leases_dir", leases_dir(root)),
+        ("packets_dir", packets_dir(root)),
+        ("buds_dir", buds_dir(root)),
+        ("reports_dir", reports_dir(root)),
     ] {
-        fs::create_dir_all(path)?;
+        ensure_under_root(path.clone(), root, label)?;
+        fs::create_dir_all(&path)?;
+        ensure_runtime_dir(root, &path, label)?;
     }
+    Ok(())
+}
+
+fn ensure_runtime_dir(root: &Path, path: &Path, label: &str) -> OrchResult<()> {
+    let meta = fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(
+            OrchError::coded("path outside repo", ErrorCode::PathOutsideRepo)
+                .detail(label, path_to_string(path)),
+        );
+    }
+    ensure_under_root(path.to_path_buf(), root, label)?;
     Ok(())
 }
 
@@ -111,7 +125,33 @@ pub(crate) fn ensure_under_root(path: PathBuf, root: &Path, label: &str) -> Orch
                 .detail(label, path_to_string(&path)),
         );
     }
+    ensure_canonical_under_root(&path, &root, label)?;
     Ok(path)
+}
+
+fn ensure_canonical_under_root(path: &Path, root: &Path, label: &str) -> OrchResult<()> {
+    let root = fs::canonicalize(root)?;
+    let anchor = if fs::symlink_metadata(path).is_ok() {
+        fs::canonicalize(path)?
+    } else {
+        canonical_existing_ancestor(path)?
+    };
+    if !anchor.starts_with(&root) {
+        return Err(
+            OrchError::coded("path outside repo", ErrorCode::PathOutsideRepo)
+                .detail(label, path_to_string(path)),
+        );
+    }
+    Ok(())
+}
+
+fn canonical_existing_ancestor(path: &Path) -> OrchResult<PathBuf> {
+    for ancestor in path.ancestors().skip(1) {
+        if fs::symlink_metadata(ancestor).is_ok() {
+            return Ok(fs::canonicalize(ancestor)?);
+        }
+    }
+    Err(OrchError::new("I/O error").detail("message", "path has no existing ancestor"))
 }
 
 pub(crate) fn repo_path(root: &Path, value: impl AsRef<Path>, label: &str) -> OrchResult<PathBuf> {
@@ -132,14 +172,50 @@ pub(crate) fn atomic_write(path: &Path, data: &str) -> OrchResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_file_name(format!(
-        ".{}.{}.tmp",
+    let mut last_error = None;
+    for attempt in 0..100 {
+        let tmp = tmp_path(path, attempt);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(data.as_bytes()) {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(error.into());
+                }
+                if let Err(error) = file.sync_all() {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(error.into());
+                }
+                drop(file);
+                if let Err(error) = replace_file(&tmp, path) {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(error);
+                }
+                return Ok(());
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                last_error = Some(error);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| {
+            std::io::Error::new(ErrorKind::AlreadyExists, "temporary file already exists")
+        })
+        .into())
+}
+
+fn tmp_path(path: &Path, attempt: u32) -> PathBuf {
+    path.with_file_name(format!(
+        ".{}.{}.{}.tmp",
         path.file_name().and_then(|s| s.to_str()).unwrap_or("tmp"),
-        std::process::id()
-    ));
-    fs::write(&tmp, data)?;
-    replace_file(&tmp, path)?;
-    Ok(())
+        std::process::id(),
+        attempt
+    ))
 }
 
 fn replace_file(tmp: &Path, path: &Path) -> OrchResult<()> {

@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 
 use crate::core::{ErrorCode, OrchError, OrchResult};
 use crate::model::{LeaseRecord, Scope, SpecId, SpecPolicy, VerificationMode};
-use crate::paths::{read_text, relpath};
+use crate::paths::{read_text, relpath, repo_path};
 use crate::taskfile::{load_task, Task};
 
 pub(crate) const STATUSES: &[&str] = &[
@@ -67,7 +67,7 @@ pub(crate) fn active_spec_dirs(
     root: &Path,
     spec_names: Option<&[String]>,
 ) -> OrchResult<Vec<PathBuf>> {
-    let specs = root.join("specs");
+    let specs = repo_path(root, root.join("specs"), "specs_dir")?;
     if !specs.exists() {
         return Ok(Vec::new());
     }
@@ -82,7 +82,7 @@ pub(crate) fn active_spec_dirs(
                 )
                 .detail("spec", name));
             }
-            let spec_dir = specs.join(&name);
+            let spec_dir = repo_path(root, specs.join(&name), "spec_dir")?;
             if !spec_dir.is_dir() {
                 return Err(OrchError::coded("spec not found", ErrorCode::SpecNotFound)
                     .detail("spec", name));
@@ -96,6 +96,9 @@ pub(crate) fn active_spec_dirs(
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
+        .map(|path| repo_path(root, path, "spec_dir"))
+        .collect::<OrchResult<Vec<_>>>()?
+        .into_iter()
         .filter(|path| {
             path.file_name()
                 .and_then(|s| s.to_str())
@@ -112,12 +115,15 @@ pub(crate) fn active_spec_dirs(
 pub(crate) fn task_paths(root: &Path, spec_names: Option<&[String]>) -> OrchResult<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for spec_dir in active_spec_dirs(root, spec_names)? {
-        let task_dir = spec_dir.join("tasks");
+        let task_dir = repo_path(root, spec_dir.join("tasks"), "task_dir")?;
         if task_dir.exists() {
             let mut task_files: Vec<PathBuf> = fs::read_dir(task_dir)?
                 .filter_map(Result::ok)
                 .map(|entry| entry.path())
                 .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("md"))
+                .map(|path| repo_path(root, path, "task_path"))
+                .collect::<OrchResult<Vec<_>>>()?
+                .into_iter()
                 .collect();
             task_files.sort();
             paths.extend(task_files);
@@ -209,7 +215,7 @@ pub(crate) fn ensure_spec_dispatchable(root: &Path, spec_id: &str) -> OrchResult
 }
 
 pub(crate) fn inactive_spec_names(root: &Path) -> OrchResult<Vec<String>> {
-    let specs = root.join("specs");
+    let specs = repo_path(root, root.join("specs"), "specs_dir")?;
     if !specs.exists() {
         return Ok(Vec::new());
     }
@@ -217,6 +223,9 @@ pub(crate) fn inactive_spec_names(root: &Path) -> OrchResult<Vec<String>> {
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
+        .map(|path| repo_path(root, path, "spec_dir"))
+        .collect::<OrchResult<Vec<_>>>()?
+        .into_iter()
         .filter_map(|path| {
             path.file_name()
                 .and_then(|s| s.to_str())
@@ -229,7 +238,11 @@ pub(crate) fn inactive_spec_names(root: &Path) -> OrchResult<Vec<String>> {
 }
 
 pub(crate) fn load_spec_policy(root: &Path, spec_id: &str) -> OrchResult<SpecPolicy> {
-    let path = root.join("specs").join(spec_id).join("spec.toml");
+    let path = repo_path(
+        root,
+        root.join("specs").join(spec_id).join("spec.toml"),
+        "spec_policy_path",
+    )?;
     if !path.exists() {
         return Ok(SpecPolicy::empty());
     }

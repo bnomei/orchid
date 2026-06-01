@@ -33,8 +33,16 @@ impl Drop for RuntimeLock {
 }
 
 pub(crate) fn runtime_lock(root: &Path) -> OrchResult<RuntimeLock> {
-    let lock_dir = locks_dir(root);
+    let lock_dir = repo_path(root, locks_dir(root), "lock_dir")?;
     fs::create_dir_all(&lock_dir)?;
+    let lock_dir = repo_path(root, lock_dir, "lock_dir")?;
+    let meta = fs::symlink_metadata(&lock_dir)?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(
+            OrchError::coded("path outside repo", ErrorCode::PathOutsideRepo)
+                .detail("lock_dir", path_to_string(&lock_dir)),
+        );
+    }
     let path = lock_dir.join("state.lock");
     let mut file = OpenOptions::new()
         .create_new(true)
@@ -71,6 +79,7 @@ pub(crate) fn all_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
+    repo_path(root, &path, "leases_dir")?;
     let mut lease_paths: Vec<PathBuf> = fs::read_dir(path)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -84,6 +93,7 @@ pub(crate) fn all_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
             continue;
         };
         validate_lease_id(expected_lease_id)?;
+        let lease_path = repo_path(root, &lease_path, "lease_path")?;
         let Ok(raw) = fs::read_to_string(&lease_path) else {
             continue;
         };
@@ -100,7 +110,11 @@ pub(crate) fn all_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
 
 pub(crate) fn load_lease(root: &Path, lease_id: &str) -> OrchResult<LeaseRecord> {
     validate_lease_id(lease_id)?;
-    let path = leases_dir(root).join(format!("{lease_id}.json"));
+    let path = repo_path(
+        root,
+        leases_dir(root).join(format!("{lease_id}.json")),
+        "lease_path",
+    )?;
     if !path.exists() {
         return Err(
             OrchError::coded("lease not found", ErrorCode::LeaseNotFound)
@@ -140,10 +154,12 @@ pub(crate) fn save_lease(root: &Path, lease: &LeaseRecord) -> OrchResult<()> {
         .id()
         .ok_or_else(|| OrchError::new("lease missing lease_id"))?;
     validate_lease_id(lease_id)?;
-    atomic_write_json(
-        &leases_dir(root).join(format!("{lease_id}.json")),
-        lease.raw(),
-    )
+    let path = repo_path(
+        root,
+        leases_dir(root).join(format!("{lease_id}.json")),
+        "lease_path",
+    )?;
+    atomic_write_json(&path, lease.raw())
 }
 
 pub(crate) fn lease_stale(lease: &LeaseRecord, now: DateTime<Utc>, stale_after: TimeDelta) -> bool {
@@ -191,26 +207,28 @@ pub(crate) fn report_path_for_lease(root: &Path, lease: &LeaseRecord) -> OrchRes
 }
 
 fn remove_if_exists(path: &Path, root: &Path, deleted: &mut Vec<String>) -> OrchResult<()> {
+    let path = repo_path(root, path, "delete_path")?;
     if path.exists() {
-        fs::remove_file(path)?;
-        deleted.push(relpath(path, root));
+        fs::remove_file(&path)?;
+        deleted.push(relpath(&path, root));
     }
     Ok(())
 }
 
 fn remove_tree_if_exists(path: &Path, root: &Path, deleted: &mut Vec<String>) -> OrchResult<()> {
+    let path = repo_path(root, path, "delete_path")?;
     if path.exists() {
-        if path.is_dir() {
-            fs::remove_dir_all(path)?;
+        if fs::symlink_metadata(&path)?.is_dir() {
+            fs::remove_dir_all(&path)?;
         } else {
-            fs::remove_file(path)?;
+            fs::remove_file(&path)?;
         }
-        deleted.push(relpath(path, root));
+        deleted.push(relpath(&path, root));
     }
     Ok(())
 }
 
-pub(crate) fn prune_empty_runtime_dirs(root: &Path) -> Vec<String> {
+pub(crate) fn prune_empty_runtime_dirs(root: &Path) -> OrchResult<Vec<String>> {
     let mut removed = Vec::new();
     for path in [
         reports_dir(root),
@@ -221,11 +239,12 @@ pub(crate) fn prune_empty_runtime_dirs(root: &Path) -> Vec<String> {
         spec_research_root(root),
         orch_dir(root),
     ] {
+        let path = repo_path(root, path, "runtime_dir")?;
         if path.is_dir() && fs::remove_dir(&path).is_ok() {
             removed.push(relpath(&path, root));
         }
     }
-    removed
+    Ok(removed)
 }
 
 pub(crate) fn close_lease_files(
@@ -245,6 +264,7 @@ pub(crate) fn close_lease_files(
 
     let packet_dir = packets_dir(root);
     if packet_dir.exists() {
+        repo_path(root, &packet_dir, "packet_dir")?;
         let mut packets: Vec<PathBuf> = fs::read_dir(packet_dir)?
             .filter_map(Result::ok)
             .map(|entry| entry.path())
@@ -272,7 +292,7 @@ pub(crate) fn close_lease_files(
         root,
         &mut deleted,
     )?;
-    Ok((deleted, prune_empty_runtime_dirs(root)))
+    Ok((deleted, prune_empty_runtime_dirs(root)?))
 }
 
 pub(crate) fn clean_spec_research(
@@ -281,7 +301,7 @@ pub(crate) fn clean_spec_research(
 ) -> OrchResult<(Vec<String>, Vec<String>)> {
     let mut deleted = Vec::new();
     remove_tree_if_exists(&spec_research_dir(root, spec_id)?, root, &mut deleted)?;
-    Ok((deleted, prune_empty_runtime_dirs(root)))
+    Ok((deleted, prune_empty_runtime_dirs(root)?))
 }
 
 pub(crate) fn spec_research_dir(root: &Path, spec_id: &str) -> OrchResult<PathBuf> {

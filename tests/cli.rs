@@ -450,6 +450,186 @@ fn invalid_lease_ids_are_rejected_before_runtime_file_access() {
 }
 
 #[test]
+#[cfg(unix)]
+fn symlinked_repo_task_paths_are_rejected_before_outside_write() {
+    let repo = Repo::new();
+    let outside_spec = repo.root.parent().unwrap().join("outside/evil");
+    let outside_task_dir = outside_spec.join("tasks");
+    fs::create_dir_all(&outside_task_dir).unwrap();
+    let outside_task = outside_task_dir.join("T001.md");
+    let task_text = "+++\nid = \"T001\"\ntitle = \"outside\"\nstatus = \"todo\"\nscope = [\"src/evil/\"]\ndepends = []\ncovers = []\nverification_mode = \"mayor\"\nverification_status = \"pending\"\n+++\n\n## Context\n";
+    fs::write(&outside_task, task_text).unwrap();
+    std::os::unix::fs::symlink(&outside_spec, repo.root.join("specs/evil")).unwrap();
+
+    let blocked = repo.run_fail(&["block", "evil", "T001", "--reason", "outside-write"]);
+    assert_eq!(blocked["code"], "path_outside_repo");
+    assert_eq!(fs::read_to_string(outside_task).unwrap(), task_text);
+}
+
+#[test]
+#[cfg(unix)]
+fn atomic_write_rejects_preexisting_temp_symlink() {
+    let repo = Repo::new();
+    let outside_tmp_target = repo.root.parent().unwrap().join("outside-temp-target");
+    fs::write(&outside_tmp_target, "keep me\n").unwrap();
+    let tmp_name = format!(".l_test.json.{}.0.tmp", std::process::id());
+    fs::create_dir_all(repo.root.join(".orchid/leases")).unwrap();
+    std::os::unix::fs::symlink(
+        &outside_tmp_target,
+        repo.root.join(".orchid/leases").join(tmp_name),
+    )
+    .unwrap();
+
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_test",
+    ]);
+    assert_eq!(fs::read_to_string(outside_tmp_target).unwrap(), "keep me\n");
+}
+
+#[test]
+#[cfg(unix)]
+fn symlinked_runtime_dirs_are_rejected_before_outside_delete() {
+    let repo = Repo::new();
+    let orch = repo.root.join(".orchid");
+    let leases = orch.join("leases");
+    fs::create_dir_all(&leases).unwrap();
+    fs::write(
+        leases.join("l_link.json"),
+        serde_json::json!({
+            "lease_id": "l_link",
+            "status": "completed"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let outside_reports = repo.root.parent().unwrap().join("outside-reports");
+    fs::create_dir_all(&outside_reports).unwrap();
+    let outside_report = outside_reports.join("l_link.md");
+    fs::write(&outside_report, "keep me\n").unwrap();
+    std::os::unix::fs::symlink(&outside_reports, orch.join("reports")).unwrap();
+
+    let cleanup = repo.run_fail(&["cleanup", "--completed"]);
+    assert_eq!(cleanup["code"], "path_outside_repo");
+    assert_eq!(fs::read_to_string(outside_report).unwrap(), "keep me\n");
+}
+
+#[test]
+#[cfg(unix)]
+fn symlinked_orchid_root_is_rejected_before_lock_creation() {
+    let repo = Repo::new();
+    let outside_orchid = repo.root.parent().unwrap().join("outside-orchid");
+    fs::create_dir_all(&outside_orchid).unwrap();
+    std::os::unix::fs::symlink(&outside_orchid, repo.root.join(".orchid")).unwrap();
+
+    let cleanup = repo.run_fail(&["cleanup", "--completed"]);
+    assert_eq!(cleanup["code"], "path_outside_repo");
+    assert!(!outside_orchid.join("locks/state.lock").exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn symlinked_lease_dir_is_rejected_for_direct_lease_reads() {
+    let repo = Repo::new();
+    let orch = repo.root.join(".orchid");
+    fs::create_dir_all(&orch).unwrap();
+    let outside_leases = repo.root.parent().unwrap().join("outside-leases");
+    fs::create_dir_all(&outside_leases).unwrap();
+    fs::write(
+        outside_leases.join("l_link.json"),
+        serde_json::json!({
+            "lease_id": "l_link",
+            "status": "active",
+            "task": "example/T001"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&outside_leases, orch.join("leases")).unwrap();
+
+    let heartbeat = repo.run_fail(&["heartbeat", "l_link"]);
+    assert_eq!(heartbeat["code"], "path_outside_repo");
+}
+
+#[test]
+#[cfg(unix)]
+fn symlinked_lease_files_are_rejected_for_aggregate_reads() {
+    let repo = Repo::new();
+    let leases = repo.root.join(".orchid/leases");
+    fs::create_dir_all(&leases).unwrap();
+    let outside_lease = repo.root.parent().unwrap().join("outside-l_link.json");
+    fs::write(
+        &outside_lease,
+        serde_json::json!({
+            "lease_id": "l_link",
+            "status": "active",
+            "task": "example/T001"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&outside_lease, leases.join("l_link.json")).unwrap();
+
+    let running = repo.run_fail(&["running"]);
+    assert_eq!(running["code"], "path_outside_repo");
+}
+
+#[test]
+#[cfg(unix)]
+fn symlinked_spec_directories_are_rejected_before_enumeration() {
+    let repo = Repo::new();
+    let outside_spec = repo.root.parent().unwrap().join("outside-enum");
+    fs::create_dir_all(outside_spec.join("tasks")).unwrap();
+    std::os::unix::fs::symlink(&outside_spec, repo.root.join("specs/evil-enum")).unwrap();
+
+    let ready = repo.run_fail(&["ready", "--all-open"]);
+    assert_eq!(ready["code"], "path_outside_repo");
+}
+
+#[test]
+#[cfg(unix)]
+fn symlinked_spec_research_root_is_rejected_before_create() {
+    let repo = Repo::new();
+    let orch = repo.root.join(".orchid");
+    fs::create_dir_all(&orch).unwrap();
+    let outside_research = repo.root.parent().unwrap().join("outside-research");
+    fs::create_dir_all(&outside_research).unwrap();
+    std::os::unix::fs::symlink(&outside_research, orch.join("spec-research")).unwrap();
+
+    let path = repo.run_fail(&["research-path", "example", "--create"]);
+    assert_eq!(path["code"], "path_outside_repo");
+    assert!(!outside_research.join("example").exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn symlinked_spec_sidecars_are_rejected_before_packet_read() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_test",
+    ]);
+    let outside_requirements = repo.root.parent().unwrap().join("outside-requirements.md");
+    fs::write(&outside_requirements, "outside requirements\n").unwrap();
+    let requirements = repo.root.join("specs/example/requirements.md");
+    fs::remove_file(&requirements).unwrap();
+    std::os::unix::fs::symlink(&outside_requirements, requirements).unwrap();
+
+    let packet = repo.run_fail(&["packet", "--lease", "l_test", "--role", "worker"]);
+    assert_eq!(packet["code"], "path_outside_repo");
+}
+
+#[test]
 fn lease_agent_metadata_attach_and_status_lookup_work() {
     let repo = Repo::new();
     repo.run(&[

@@ -401,7 +401,11 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
         LeaseMode::Single
     };
     let started_at = now_iso();
-    let instructions_path = buds_dir(root).join(format!("{lease_id_text}.md"));
+    let instructions_path = repo_path(
+        root,
+        buds_dir(root).join(format!("{lease_id_text}.md")),
+        "instructions_path",
+    )?;
     atomic_write(&instructions_path, &instructions)?;
     let mut lease = LeaseRecord::new_active(ActiveLeaseRecordInput {
         lease_id,
@@ -721,10 +725,11 @@ pub(crate) fn research_path(
     request: &ResearchPathRequest,
 ) -> OrchResult<Map<String, Value>> {
     let spec_id = crate::specs::safe_spec_id(&request.spec)?;
-    let path = spec_research_dir(root, &spec_id)?;
+    let path = repo_path(root, spec_research_dir(root, &spec_id)?, "research_path")?;
     let mut created = false;
     if request.create {
         fs::create_dir_all(&path)?;
+        repo_path(root, &path, "research_path")?;
         created = true;
     }
     let mut payload = json_ok();
@@ -797,7 +802,7 @@ pub(crate) fn cleanup(root: &Path, request: &CleanupRequest) -> OrchResult<Map<S
     insert_non_empty(
         &mut payload,
         "pruned",
-        string_values(prune_empty_runtime_dirs(root)),
+        string_values(prune_empty_runtime_dirs(root)?),
     );
     Ok(payload)
 }
@@ -859,8 +864,12 @@ fn render_task_packet(
     let task = load_task(&task_path, root)?;
     let spec_dir = task_path.parent().and_then(|p| p.parent()).unwrap_or(root);
     let policy = load_spec_policy(root, &task.spec_id)?;
-    let requirements = read_optional(&spec_dir.join("requirements.md"))?;
-    let design = read_optional(&spec_dir.join("design.md"))?;
+    let requirements = read_optional(&repo_path(
+        root,
+        spec_dir.join("requirements.md"),
+        "requirements_path",
+    )?)?;
+    let design = read_optional(&repo_path(root, spec_dir.join("design.md"), "design_path")?)?;
     let policy_text = if policy.is_empty() {
         "{}".to_string()
     } else {
