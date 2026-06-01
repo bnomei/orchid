@@ -196,7 +196,10 @@ pub(crate) fn touched_for_lease(
 
 pub(crate) fn stage_plan_for_lease(root: &Path, lease: &LeaseRecord) -> OrchResult<StagePlan> {
     let data = touched_for_lease(root, lease)?;
-    let pathspecs: BTreeSet<String> = string_list(data.get("stage")).into_iter().collect();
+    let pathspecs: BTreeSet<String> = string_list(data.get("stage"))
+        .into_iter()
+        .map(|path| format!(":(literal){path}"))
+        .collect();
 
     let mut excluded = Map::new();
     if let Some(blocked_by) = data.get("blocked_by").and_then(Value::as_object) {

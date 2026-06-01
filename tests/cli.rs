@@ -932,7 +932,7 @@ fn bud_packet_complete_git_and_cleanup_lifecycle_work() {
     let stage = repo.run(&["git-stage-plan", "--lease", "l_bud"]);
     assert_eq!(
         stage["pathspecs"],
-        serde_json::json!(["src/feature/work.txt"])
+        serde_json::json!([":(literal)src/feature/work.txt"])
     );
 
     fs::write(
@@ -1042,7 +1042,7 @@ fn complete_updates_only_task_and_next_finds_stage_or_cleanup() {
     assert!(payload["stage"][0]["pathspecs"]
         .as_array()
         .unwrap()
-        .contains(&Value::String("src/feature/work.txt".to_string())));
+        .contains(&Value::String(":(literal)src/feature/work.txt".to_string())));
 }
 
 #[test]
@@ -1245,7 +1245,35 @@ fn git_touched_and_stage_plan_split_scope_and_baseline() {
     assert_eq!(payload["task"], "example/T001");
     assert_eq!(
         payload["pathspecs"],
-        serde_json::json!(["src/feature/work.txt"])
+        serde_json::json!([":(literal)src/feature/work.txt"])
+    );
+}
+
+#[test]
+fn git_stage_plan_literalizes_magic_pathspec_filenames() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.write_task_file("magic", "T001", "todo", ":(glob)*");
+    repo.run(&[
+        "lease",
+        "magic",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_magic",
+    ]);
+    fs::write(repo.root.join(":(glob)*"), "literal magic path\n").unwrap();
+    fs::write(repo.root.join(":!foo"), "literal exclude path\n").unwrap();
+    let stage = repo.run(&["git-stage-plan", "--lease", "l_magic"]);
+    assert_eq!(
+        stage["pathspecs"],
+        serde_json::json!([":(literal):(glob)*"])
+    );
+    assert_eq!(stage["safe_to_stage"], false);
+    assert_eq!(
+        stage["excluded"]["out_of_scope"],
+        serde_json::json!([":!foo"])
     );
 }
 
