@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1] - 2026-06-01
+
+### Security
+
+- Hardened lease-id handling so runtime commands reject unsafe IDs before touching lease, packet, report, or lock paths.
+- Rejected symlink escapes across repo, runtime, lease, spec, spec-research, sidecar, and atomic-write paths.
+- Bound report validation to the lease-derived report path to prevent cross-lease report spoofing.
+- Literalized Git stage-plan pathspecs so magic-looking filenames are not interpreted as Git pathspec operators.
+- Isolated untrusted task, spec, and bud packet Markdown behind dynamically sized fences before trusted lifecycle instructions.
+
 ## [0.2.0] - 2026-05-25
 
 ### Added
