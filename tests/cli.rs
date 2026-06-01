@@ -1046,6 +1046,48 @@ fn complete_updates_only_task_and_next_finds_stage_or_cleanup() {
 }
 
 #[test]
+fn report_check_rejects_report_path_that_claims_another_lease() {
+    let repo = Repo::new();
+    repo.write_task_file("example", "T005", "todo", "src/other/");
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_a",
+    ]);
+    repo.run(&[
+        "lease",
+        "example",
+        "T005",
+        "--owner",
+        "worker:agent_456",
+        "--lease-id",
+        "l_b",
+        "--allow-parallel",
+    ]);
+    fs::write(
+        repo.root.join(".orchid/reports/l_a.md"),
+        "+++\nlease_id = \"l_b\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
+    )
+    .unwrap();
+
+    let next = repo.run(&["next", "--spec", "example", "--explain"]);
+    assert_eq!(
+        next["cmds"][0],
+        serde_json::json!(["report-check", ".orchid/reports/l_a.md"])
+    );
+
+    let report = repo.run_fail(&["report-check", ".orchid/reports/l_a.md"]);
+    assert_eq!(report["code"], "report_lease_mismatch");
+    assert_eq!(report["lease_id"], "l_b");
+    assert_eq!(report["report"], ".orchid/reports/l_a.md");
+    assert_eq!(report["expected_report"], ".orchid/reports/l_b.md");
+}
+
+#[test]
 fn complete_writes_task_arrays_in_multiline_style() {
     let repo = Repo::new();
     let task_path = repo.root.join("specs/example/tasks/T001.md");

@@ -1000,6 +1000,15 @@ pub(crate) fn report_check(
         );
     }
     let lease = load_lease(root, lease_id)?;
+    let expected_report_path = report_path_for_lease(root, &lease)?;
+    if expected_report_path != report_path {
+        return Err(
+            OrchError::coded("report lease mismatch", ErrorCode::ReportLeaseMismatch)
+                .detail("report", relpath(&report_path, root))
+                .detail("expected_report", relpath(&expected_report_path, root))
+                .detail("lease_id", lease_id),
+        );
+    }
     if !report.status().is_valid() {
         return Err(
             OrchError::coded("invalid report status", ErrorCode::InvalidReportStatus)
