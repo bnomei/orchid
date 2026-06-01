@@ -320,6 +320,136 @@ fn lease_runtime_and_parallel_guards_match_python_contract() {
 }
 
 #[test]
+fn invalid_lease_ids_are_rejected_before_runtime_file_access() {
+    let repo = Repo::new();
+    let outside_lease = repo.root.parent().unwrap().join("outside-lease.json");
+    let outside_bud = repo.root.parent().unwrap().join("outside-bud.md");
+
+    let hyphenated = repo.run_fail(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l-unsafe",
+    ]);
+    assert_eq!(hyphenated["code"], "invalid_lease_id");
+
+    let lease = repo.run_fail(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "../../../outside-lease",
+    ]);
+    assert_eq!(lease["code"], "invalid_lease_id");
+    assert!(!outside_lease.exists());
+
+    let instructions = repo.root.join("bud-instructions.md");
+    fs::write(&instructions, "Do bud work.\n").unwrap();
+    let bud = repo.run_fail(&[
+        "bud",
+        "--title",
+        "Unsafe bud id",
+        "--scope",
+        "src/feature/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "../../../outside-bud",
+    ]);
+    assert_eq!(bud["code"], "invalid_lease_id");
+    assert!(!outside_bud.exists());
+    assert!(!repo.root.join(".orchid").exists());
+
+    let missing_instruction = repo.run_fail(&[
+        "bud",
+        "--title",
+        "Missing instructions loses to bad id",
+        "--scope",
+        "src/feature/",
+        "--instructions",
+        repo.root.join("missing.md").to_str().unwrap(),
+        "--lease-id",
+        "../../../outside-bud",
+    ]);
+    assert_eq!(missing_instruction["code"], "invalid_lease_id");
+
+    let lock_dir = repo.root.join(".orchid/locks");
+    fs::create_dir_all(&lock_dir).unwrap();
+    fs::write(lock_dir.join("state.lock"), "{}\n").unwrap();
+    let close = repo.run_fail(&["close", "--lease", "../../../outside-lease", "--force"]);
+    assert_eq!(close["code"], "invalid_lease_id");
+    assert!(lock_dir.join("state.lock").exists());
+    fs::remove_file(lock_dir.join("state.lock")).unwrap();
+
+    let lease_dir = repo.root.join(".orchid/leases");
+    fs::create_dir_all(&lease_dir).unwrap();
+    let task_one = repo.root.join("specs/example/tasks/T001.md");
+    let task_two = repo.root.join("specs/example/tasks/T002.md");
+    let task_one_before = fs::read_to_string(&task_one).unwrap();
+    let task_two_before = fs::read_to_string(&task_two).unwrap();
+    fs::write(
+        lease_dir.join("l_evil.json"),
+        serde_json::json!({
+            "lease_id": "l_evil",
+            "status": "completed",
+            "report_path": "specs/example/tasks/T001.md",
+            "instructions_path": "specs/example/tasks/T002.md"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let cleanup = repo.run(&["cleanup", "--completed"]);
+    assert_eq!(cleanup["closed"], serde_json::json!(["l_evil"]));
+    assert_eq!(fs::read_to_string(&task_one).unwrap(), task_one_before);
+    assert_eq!(fs::read_to_string(&task_two).unwrap(), task_two_before);
+    assert!(!lease_dir.join("l_evil.json").exists());
+
+    fs::create_dir_all(&lease_dir).unwrap();
+    fs::write(
+        lease_dir.join("l_victim.json"),
+        serde_json::json!({
+            "lease_id": "l_victim",
+            "status": "completed"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        lease_dir.join("aaa.json"),
+        serde_json::json!({
+            "lease_id": "l_victim",
+            "status": "completed"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let cleanup = repo.run_fail(&["cleanup", "--completed"]);
+    assert_eq!(cleanup["code"], "invalid_lease_id");
+    assert!(lease_dir.join("l_victim.json").exists());
+    fs::remove_file(lease_dir.join("aaa.json")).unwrap();
+    fs::remove_file(lease_dir.join("l_victim.json")).unwrap();
+
+    fs::create_dir_all(&lease_dir).unwrap();
+    fs::write(
+        lease_dir.join("malicious.json"),
+        serde_json::json!({
+            "lease_id": "../../../outside-lease",
+            "status": "completed"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let cleanup = repo.run_fail(&["cleanup", "--completed"]);
+    assert_eq!(cleanup["code"], "invalid_lease_id");
+    assert!(!outside_lease.exists());
+}
+
+#[test]
 fn lease_agent_metadata_attach_and_status_lookup_work() {
     let repo = Repo::new();
     repo.run(&[

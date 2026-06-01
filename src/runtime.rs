@@ -10,7 +10,7 @@ use crate::core::{
     elapsed_seconds, now_iso, parse_duration, parse_iso_datetime, utc_now, ErrorCode, OrchError,
     OrchResult, DEFAULT_STALE_AFTER,
 };
-use crate::model::{CompactLease, LeaseId, LeaseRecord};
+use crate::model::{validate_lease_id, CompactLease, LeaseId, LeaseRecord};
 use crate::paths::{
     atomic_write_json, buds_dir, leases_dir, locks_dir, orch_dir, packets_dir, path_to_string,
     relpath, repo_path, reports_dir, spec_research_root,
@@ -80,12 +80,17 @@ pub(crate) fn all_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
 
     let mut leases = Vec::new();
     for lease_path in lease_paths {
+        let Some(expected_lease_id) = lease_path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        validate_lease_id(expected_lease_id)?;
         let Ok(raw) = fs::read_to_string(&lease_path) else {
             continue;
         };
         let Ok(Value::Object(mut data)) = serde_json::from_str::<Value>(&raw) else {
             continue;
         };
+        bind_lease_record_id(&mut data, expected_lease_id)?;
         data.entry("_path".to_string())
             .or_insert_with(|| Value::String(relpath(&lease_path, root)));
         leases.push(LeaseRecord::from_map(data));
@@ -94,6 +99,7 @@ pub(crate) fn all_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
 }
 
 pub(crate) fn load_lease(root: &Path, lease_id: &str) -> OrchResult<LeaseRecord> {
+    validate_lease_id(lease_id)?;
     let path = leases_dir(root).join(format!("{lease_id}.json"));
     if !path.exists() {
         return Err(
@@ -105,15 +111,35 @@ pub(crate) fn load_lease(root: &Path, lease_id: &str) -> OrchResult<LeaseRecord>
     else {
         return Err(OrchError::new("invalid lease json").detail("lease_id", lease_id));
     };
+    bind_lease_record_id(&mut data, lease_id)?;
     data.entry("_path".to_string())
         .or_insert_with(|| Value::String(relpath(&path, root)));
     Ok(LeaseRecord::from_map(data))
+}
+
+fn bind_lease_record_id(
+    data: &mut serde_json::Map<String, Value>,
+    expected: &str,
+) -> OrchResult<()> {
+    match data.get("lease_id").and_then(Value::as_str) {
+        Some(actual) if actual == expected => Ok(()),
+        Some(actual) => Err(
+            OrchError::coded("invalid lease id", ErrorCode::InvalidLeaseId)
+                .detail("lease_id", actual)
+                .detail("expected_lease_id", expected),
+        ),
+        None => {
+            data.insert("lease_id".to_string(), Value::String(expected.to_string()));
+            Ok(())
+        }
+    }
 }
 
 pub(crate) fn save_lease(root: &Path, lease: &LeaseRecord) -> OrchResult<()> {
     let lease_id = lease
         .id()
         .ok_or_else(|| OrchError::new("lease missing lease_id"))?;
+    validate_lease_id(lease_id)?;
     atomic_write_json(
         &leases_dir(root).join(format!("{lease_id}.json")),
         lease.raw(),
@@ -156,6 +182,7 @@ pub(crate) fn report_path_for_lease(root: &Path, lease: &LeaseRecord) -> OrchRes
     let lease_id = lease
         .id()
         .ok_or_else(|| OrchError::new("lease missing lease_id"))?;
+    validate_lease_id(lease_id)?;
     repo_path(
         root,
         reports_dir(root).join(format!("{lease_id}.md")),
@@ -208,6 +235,7 @@ pub(crate) fn close_lease_files(
     let lease_id = lease
         .id()
         .ok_or_else(|| OrchError::new("lease missing lease_id"))?;
+    validate_lease_id(lease_id)?;
     let mut deleted = Vec::new();
     remove_if_exists(
         &leases_dir(root).join(format!("{lease_id}.json")),
@@ -234,21 +262,11 @@ pub(crate) fn close_lease_files(
         }
     }
 
-    if lease.report_path().is_some() {
-        remove_if_exists(&report_path_for_lease(root, lease)?, root, &mut deleted)?;
-    }
     remove_if_exists(
         &reports_dir(root).join(format!("{lease_id}.md")),
         root,
         &mut deleted,
     )?;
-    if let Some(instructions_path) = lease.instructions_path() {
-        remove_if_exists(
-            &repo_path(root, instructions_path, "instructions_path")?,
-            root,
-            &mut deleted,
-        )?;
-    }
     remove_if_exists(
         &buds_dir(root).join(format!("{lease_id}.md")),
         root,
@@ -288,7 +306,7 @@ pub(crate) fn lease_id_for(task_path: &Path, owner: &str) -> LeaseId {
         lease_id.push(hex_char(byte >> 4));
         lease_id.push(hex_char(byte & 0x0f));
     }
-    LeaseId::from_raw(lease_id)
+    LeaseId::from_generated(lease_id)
 }
 
 fn hex_char(value: u8) -> char {

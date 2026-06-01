@@ -11,7 +11,9 @@ use crate::core::{
 use crate::gitstate::{
     changed_paths_value, git_status_data, stage_plan_for_lease, touched_for_lease,
 };
-use crate::model::{ActiveLeaseRecordInput, LeaseId, LeaseMode, LeaseRecord, ReportFrontmatter};
+use crate::model::{
+    validate_lease_id, ActiveLeaseRecordInput, LeaseId, LeaseMode, LeaseRecord, ReportFrontmatter,
+};
 use crate::paths::{
     atomic_write, buds_dir, ensure_runtime_dirs, leases_dir, packets_dir, relpath, repo_path,
     reports_dir,
@@ -235,6 +237,7 @@ pub(crate) fn status(root: &Path, request: &StatusRequest) -> OrchResult<Map<Str
 }
 
 pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<String, Value>> {
+    let requested_lease_id = request.lease_id.clone().map(LeaseId::parse).transpose()?;
     let _lock = runtime_lock(root)?;
     ensure_runtime_dirs(root)?;
     let task = resolve_task(root, &request.target, request.task_id.as_deref())?;
@@ -273,11 +276,7 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
         .detail("active_leases", compact_leases(active)?));
     }
 
-    let lease_id = request
-        .lease_id
-        .clone()
-        .map(LeaseId::from_raw)
-        .unwrap_or_else(|| lease_id_for(&task.path, &request.owner));
+    let lease_id = requested_lease_id.unwrap_or_else(|| lease_id_for(&task.path, &request.owner));
     ensure_lease_id_available(root, lease_id.as_str())?;
     ensure_agent_id_available(root, request.agent_id.as_deref(), None)?;
     let git_state = git_status_data(root)?;
@@ -332,6 +331,7 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
 }
 
 pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, Value>> {
+    let requested_lease_id = request.lease_id.clone().map(LeaseId::parse).transpose()?;
     let _lock = runtime_lock(root)?;
     let scope: Vec<String> = request
         .scope
@@ -385,7 +385,7 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
                 .unwrap_or_else(|| "worker:unassigned".to_string())
         });
     ensure_agent_id_available(root, request.agent_id.as_deref(), None)?;
-    let lease_id = if let Some(lease_id) = request.lease_id.clone().map(LeaseId::from_raw) {
+    let lease_id = if let Some(lease_id) = requested_lease_id {
         ensure_lease_id_available(root, lease_id.as_str())?;
         lease_id
     } else {
@@ -455,6 +455,7 @@ pub(crate) fn lease_attach_agent(
     root: &Path,
     request: &AttachAgentRequest,
 ) -> OrchResult<Map<String, Value>> {
+    validate_lease_id(&request.lease)?;
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, &request.lease)?;
     ensure_agent_id_available(root, Some(&request.agent_id), Some(&request.lease))?;
@@ -554,6 +555,7 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
 }
 
 pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map<String, Value>> {
+    validate_lease_id(&request.lease)?;
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, &request.lease)?;
     if lease.is_bud() {
@@ -650,6 +652,7 @@ pub(crate) fn block(root: &Path, request: &BlockRequest) -> OrchResult<Map<Strin
 }
 
 pub(crate) fn heartbeat(root: &Path, lease_id: &str) -> OrchResult<Map<String, Value>> {
+    validate_lease_id(lease_id)?;
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, lease_id)?;
     let heartbeat_at = now_iso();
@@ -699,6 +702,7 @@ pub(crate) fn stale(root: &Path, older_than: &str) -> OrchResult<Map<String, Val
 }
 
 pub(crate) fn release(root: &Path, lease_id: &str, reason: &str) -> OrchResult<Map<String, Value>> {
+    validate_lease_id(lease_id)?;
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, lease_id)?;
     lease.set("status", "released");
@@ -747,6 +751,7 @@ pub(crate) fn research_clean(root: &Path, spec: &str) -> OrchResult<Map<String, 
 }
 
 pub(crate) fn close(root: &Path, request: &CloseRequest) -> OrchResult<Map<String, Value>> {
+    validate_lease_id(&request.lease)?;
     let _lock = runtime_lock(root)?;
     let lease = load_lease(root, &request.lease)?;
     if lease.status().is_active() && !request.force {
@@ -798,6 +803,7 @@ pub(crate) fn cleanup(root: &Path, request: &CleanupRequest) -> OrchResult<Map<S
 }
 
 pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<String, Value>> {
+    validate_lease_id(&request.lease)?;
     let _lock = runtime_lock(root)?;
     ensure_runtime_dirs(root)?;
     let mut lease = load_lease(root, &request.lease)?;
@@ -1012,6 +1018,7 @@ pub(crate) fn git_status(root: &Path) -> OrchResult<Map<String, Value>> {
 }
 
 pub(crate) fn git_touched(root: &Path, lease_id: &str) -> OrchResult<Map<String, Value>> {
+    validate_lease_id(lease_id)?;
     let lease = load_lease(root, lease_id)?;
     let data = touched_for_lease(root, &lease)?;
     let mut payload = json_ok();
@@ -1020,6 +1027,7 @@ pub(crate) fn git_touched(root: &Path, lease_id: &str) -> OrchResult<Map<String,
 }
 
 pub(crate) fn git_stage_plan(root: &Path, lease_id: &str) -> OrchResult<Map<String, Value>> {
+    validate_lease_id(lease_id)?;
     let lease = load_lease(root, lease_id)?;
     let mut payload = json_ok();
     payload.extend(stage_plan_for_lease(root, &lease)?.to_payload());
@@ -1118,6 +1126,7 @@ fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value
 }
 
 fn ensure_lease_id_available(root: &Path, lease_id: &str) -> OrchResult<()> {
+    validate_lease_id(lease_id)?;
     if leases_dir(root).join(format!("{lease_id}.json")).exists() {
         return Err(
             OrchError::coded("lease id already exists", ErrorCode::LeaseIdAlreadyExists)

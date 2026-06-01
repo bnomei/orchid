@@ -52,8 +52,21 @@ impl TaskId {
 pub(crate) struct LeaseId(String);
 
 impl LeaseId {
-    pub(crate) fn from_raw(value: impl Into<String>) -> Self {
-        Self(value.into())
+    pub(crate) fn parse(value: impl Into<String>) -> OrchResult<Self> {
+        let value = value.into();
+        if !is_safe_lease_id(&value) {
+            return Err(
+                OrchError::coded("invalid lease id", ErrorCode::InvalidLeaseId)
+                    .detail("lease_id", value),
+            );
+        }
+        Ok(Self(value))
+    }
+
+    pub(crate) fn from_generated(value: impl Into<String>) -> Self {
+        let value = value.into();
+        debug_assert!(is_safe_lease_id(&value));
+        Self(value)
     }
 
     pub(crate) fn as_str(&self) -> &str {
@@ -63,6 +76,18 @@ impl LeaseId {
     pub(crate) fn into_string(self) -> String {
         self.0
     }
+}
+
+pub(crate) fn validate_lease_id(value: &str) -> OrchResult<()> {
+    LeaseId::parse(value).map(|_| ())
+}
+
+fn is_safe_lease_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
