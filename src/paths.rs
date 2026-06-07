@@ -8,12 +8,11 @@ use serde::Serialize;
 use crate::core::{ErrorCode, OrchError, OrchResult};
 
 pub(crate) fn root_from_arg(value: Option<&str>) -> OrchResult<PathBuf> {
-    let path = if let Some(value) = value {
-        expand_home(value)
-    } else {
-        env::current_dir()?
-    };
-    abs_clean(path)
+    if let Some(value) = value {
+        return abs_clean(expand_home(value));
+    }
+    let path = abs_clean(env::current_dir()?)?;
+    Ok(discover_orchid_root(&path).unwrap_or(path))
 }
 
 fn expand_home(value: &str) -> PathBuf {
@@ -51,6 +50,18 @@ fn clean_path(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+pub(crate) fn discover_orchid_root(path: &Path) -> Option<PathBuf> {
+    let start = if path.is_file() {
+        path.parent().unwrap_or(path)
+    } else {
+        path
+    };
+    start
+        .ancestors()
+        .find(|ancestor| fs::symlink_metadata(ancestor.join(".orchid")).is_ok())
+        .map(Path::to_path_buf)
 }
 
 pub(crate) fn orch_dir(root: &Path) -> PathBuf {

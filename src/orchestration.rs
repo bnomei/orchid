@@ -1,5 +1,6 @@
+use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use chrono::{TimeZone, Utc};
 use serde_json::{Map, Value};
@@ -15,8 +16,8 @@ use crate::model::{
     validate_lease_id, ActiveLeaseRecordInput, LeaseId, LeaseMode, LeaseRecord, ReportFrontmatter,
 };
 use crate::paths::{
-    atomic_write, buds_dir, ensure_runtime_dirs, leases_dir, packets_dir, relpath, repo_path,
-    reports_dir,
+    atomic_write, buds_dir, ensure_runtime_dirs, leases_dir, packets_dir, path_to_string, relpath,
+    repo_path, reports_dir,
 };
 use crate::planner::{
     decide_next, BlockedTask, CleanupCandidate, NextInput, ReadyTask, ReportReady,
@@ -1066,27 +1067,118 @@ fn markdown_fence_for(content: &str) -> String {
     "`".repeat(longest.max(3) + 1)
 }
 
+struct ResolvedReportPath {
+    path: PathBuf,
+    rel: String,
+}
+
+fn report_path_from_request(root: &Path, value: &str) -> OrchResult<ResolvedReportPath> {
+    let repo_result = repo_path(root, value, "report_path");
+    match repo_result {
+        Ok(path) => {
+            let rel = relpath(&path, root);
+            Ok(ResolvedReportPath { path, rel })
+        }
+        Err(error) if error.code == ErrorCode::PathOutsideRepo.as_str() => {
+            let path = abs_clean_arg(Path::new(value))?;
+            if let Some((path, rel)) = external_orchid_report_path(&path)? {
+                return Ok(ResolvedReportPath { path, rel });
+            }
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn abs_clean_arg(path: &Path) -> OrchResult<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+    Ok(clean_path(&absolute))
+}
+
+fn clean_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn external_orchid_report_path(path: &Path) -> OrchResult<Option<(PathBuf, String)>> {
+    let Ok(path) = fs::canonicalize(path) else {
+        return Ok(None);
+    };
+    if let Some(rel) = orchid_report_relpath(&path) {
+        return Ok(Some((path.clone(), rel)));
+    }
+    Ok(None)
+}
+
+fn orchid_report_relpath(path: &Path) -> Option<String> {
+    for ancestor in path.ancestors() {
+        if ancestor.file_name()? != "reports" {
+            continue;
+        }
+        let orchid_dir = ancestor.parent()?;
+        if orchid_dir.file_name()? != ".orchid" {
+            continue;
+        }
+        let root = orchid_dir.parent()?;
+        let rel = path.strip_prefix(root).ok()?;
+        if is_orchid_report_path(rel) {
+            return Some(path_to_string(rel));
+        }
+    }
+    None
+}
+
+fn is_orchid_report_path(path: &Path) -> bool {
+    let mut components = path.components();
+    let is_report_path = matches!(
+        (components.next(), components.next(), components.next()),
+        (
+            Some(Component::Normal(first)),
+            Some(Component::Normal(second)),
+            Some(Component::Normal(_))
+        ) if first == ".orchid" && second == "reports"
+    );
+    is_report_path && components.next().is_none()
+}
+
 pub(crate) fn report_check(
     root: &Path,
     request: &ReportCheckRequest,
 ) -> OrchResult<Map<String, Value>> {
-    let report_path = repo_path(root, &request.report, "report_path")?;
-    let (meta, _) = split_frontmatter(&crate::paths::read_text(&report_path)?, &report_path)?;
+    let report_path = report_path_from_request(root, &request.report)?;
+    let (meta, _) = split_frontmatter(
+        &crate::paths::read_text(&report_path.path)?,
+        &report_path.path,
+    )?;
     let report = ReportFrontmatter::from_map(meta);
     let lease_id = report.lease_id();
     if lease_id.is_empty() {
         return Err(
             OrchError::coded("report missing lease_id", ErrorCode::ReportMissingLeaseId)
-                .detail("report", relpath(&report_path, root)),
+                .detail("report", report_path.rel),
         );
     }
     let lease = load_lease(root, lease_id)?;
     let expected_report_path = report_path_for_lease(root, &lease)?;
-    if expected_report_path != report_path {
+    let expected_report = relpath(&expected_report_path, root);
+    if expected_report != report_path.rel {
         return Err(
             OrchError::coded("report lease mismatch", ErrorCode::ReportLeaseMismatch)
-                .detail("report", relpath(&report_path, root))
-                .detail("expected_report", relpath(&expected_report_path, root))
+                .detail("report", report_path.rel)
+                .detail("expected_report", expected_report)
                 .detail("lease_id", lease_id),
         );
     }
@@ -1099,7 +1191,7 @@ pub(crate) fn report_check(
     let mut payload = json_ok();
     insert(&mut payload, "lease_id", lease_id);
     insert(&mut payload, "task", lease.task_value());
-    insert(&mut payload, "report", relpath(&report_path, root));
+    insert(&mut payload, "report", report_path.rel);
     insert(&mut payload, "status", report.status().as_str());
     insert(&mut payload, "next", report.status().next_action());
     Ok(payload)

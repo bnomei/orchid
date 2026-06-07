@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.2] - 2026-06-07
+
+### Fixed
+
+- Inferred the Orchid runtime root from the current directory by walking up to the nearest ancestor `.orchid`, so commands run from nested package directories still use the repository runtime state.
+- Preserved explicit `--root` arguments without upward runtime discovery, preventing nested projects from accidentally operating on a parent Orchid runtime.
+- Allowed `report-check` to validate reports addressed through external `.orchid/reports/<lease>.md` paths, including sibling worktree-relative report paths.
+
 ## [0.3.1] - 2026-06-01
 
 ### Security

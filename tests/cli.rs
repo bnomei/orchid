@@ -39,8 +39,12 @@ impl Repo {
     }
 
     fn run_from_cwd(&self, args: &[&str]) -> Value {
+        self.run_in(&self.root, args)
+    }
+
+    fn run_in(&self, cwd: &Path, args: &[&str]) -> Value {
         let output = Command::new(env!("CARGO_BIN_EXE_orchid"))
-            .current_dir(&self.root)
+            .current_dir(cwd)
             .args(args)
             .output()
             .expect("run orchid");
@@ -1097,6 +1101,119 @@ fn report_check_rejects_report_path_that_claims_another_lease() {
     assert_eq!(report["lease_id"], "l_b");
     assert_eq!(report["report"], ".orchid/reports/l_a.md");
     assert_eq!(report["expected_report"], ".orchid/reports/l_b.md");
+}
+
+#[test]
+fn root_discovery_walks_up_to_orchid_runtime_from_subdir() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--agent-id",
+        "agent_123",
+        "--lease-id",
+        "l_test",
+    ]);
+    let package_dir = repo.root.join("crates/example/src");
+    fs::create_dir_all(&package_dir).unwrap();
+
+    let payload = repo.run_in(&package_dir, &["status", "--agent-id", "agent_123"]);
+    assert_eq!(payload["lease_id"], "l_test");
+}
+
+#[test]
+fn explicit_root_does_not_walk_up_to_parent_orchid_runtime() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_parent",
+    ]);
+
+    let nested = repo.root.join("nested-project");
+    copy_dir(&repo.root.join("specs"), &nested.join("specs"));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_orchid"))
+        .arg("--root")
+        .arg(&nested)
+        .args(["ready", "--spec", "example"])
+        .output()
+        .expect("run orchid");
+    assert!(
+        output.status.success(),
+        "orchid failed\nstdout:{}\nstderr:{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&output.stdout).expect("json stdout");
+    assert_eq!(payload["ready"][0]["task"], "example/T001");
+}
+
+#[test]
+fn report_check_accepts_report_from_external_orchid_reports_dir() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_test",
+    ]);
+
+    let worktree = repo.root.parent().unwrap().join("other-worktree");
+    fs::create_dir_all(worktree.join(".orchid/reports")).unwrap();
+    let report_path = worktree.join(".orchid/reports/l_test.md");
+    fs::write(
+        &report_path,
+        "+++\nlease_id = \"l_test\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
+    )
+    .unwrap();
+
+    let payload = repo.run(&["report-check", report_path.to_str().unwrap()]);
+    assert_eq!(payload["lease_id"], "l_test");
+    assert_eq!(payload["report"], ".orchid/reports/l_test.md");
+    assert_eq!(payload["next"], "validation");
+
+    let relative_report_path = Path::new("..").join("other-worktree/.orchid/reports/l_test.md");
+    let payload = repo.run_from_cwd(&["report-check", relative_report_path.to_str().unwrap()]);
+    assert_eq!(payload["lease_id"], "l_test");
+    assert_eq!(payload["report"], ".orchid/reports/l_test.md");
+    assert_eq!(payload["next"], "validation");
+}
+
+#[test]
+fn report_check_rejects_external_report_outside_orchid_reports_dir() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_test",
+    ]);
+
+    let outside = repo.root.parent().unwrap().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let report_path = outside.join("l_test.md");
+    fs::write(
+        &report_path,
+        "+++\nlease_id = \"l_test\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
+    )
+    .unwrap();
+
+    let payload = repo.run_fail(&["report-check", report_path.to_str().unwrap()]);
+    assert_eq!(payload["code"], "path_outside_repo");
 }
 
 #[test]
