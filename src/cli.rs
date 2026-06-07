@@ -19,7 +19,7 @@ use crate::paths::root_from_arg;
 struct Cli {
     #[arg(long, help = "Repository root; defaults to the current directory")]
     root: Option<String>,
-    #[arg(long, help = "Pretty-print JSON output")]
+    #[arg(long, global = true, help = "Pretty-print JSON output")]
     pretty: bool,
     #[command(subcommand)]
     command: Command,

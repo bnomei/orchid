@@ -38,6 +38,22 @@ impl Repo {
         serde_json::from_slice(&output.stdout).expect("json stdout")
     }
 
+    fn run_stdout(&self, args: &[&str]) -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_orchid"))
+            .arg("--root")
+            .arg(&self.root)
+            .args(args)
+            .output()
+            .expect("run orchid");
+        assert!(
+            output.status.success(),
+            "orchid failed\nstdout:{}\nstderr:{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("utf8 stdout")
+    }
+
     fn run_from_cwd(&self, args: &[&str]) -> Value {
         self.run_in(&self.root, args)
     }
@@ -231,6 +247,18 @@ fn canonical_binary_json_contracts_are_stable() {
 }
 
 #[test]
+fn pretty_can_be_passed_after_subcommand() {
+    let repo = Repo::new();
+    let stdout = repo.run_stdout(&["--pretty", "lint"]);
+
+    assert_eq!(stdout, "{\n  \"tasks\": 3\n}\n");
+
+    let stdout = repo.run_stdout(&["lint", "--pretty"]);
+
+    assert_eq!(stdout, "{\n  \"tasks\": 3\n}\n");
+}
+
+#[test]
 fn ready_requires_scope_and_reports_blocked_tasks() {
     let repo = Repo::new();
     let payload = repo.run_from_cwd(&["ready", "--spec", "example"]);
@@ -271,6 +299,55 @@ fn all_open_selects_first_open_numerical_spec_and_skips_inactive() {
         "worker:agent_123",
     ]);
     assert_eq!(payload["code"], "inactive_spec");
+}
+
+#[test]
+fn numeric_spec_selector_resolves_unique_active_prefix() {
+    let repo = Repo::new();
+    repo.write_task_file("003", "T001", "todo", "src/exact/");
+    repo.write_task_file("003-prefix", "T001", "todo", "src/prefix/");
+    repo.write_task_file("003alpha", "T001", "todo", "src/alpha/");
+    repo.write_task_file("003.foo", "T001", "todo", "src/dot/");
+
+    let payload = repo.run(&["ready", "--spec", "003", "--explain"]);
+    assert_eq!(payload["ready"][0]["task"], "003-prefix/T001");
+
+    let lease = repo.run(&[
+        "lease",
+        "003",
+        "T001",
+        "--owner",
+        "worker:agent_003",
+        "--lease-id",
+        "l_003",
+    ]);
+    assert_eq!(lease["task"], "003-prefix/T001");
+}
+
+#[test]
+fn numeric_spec_selector_rejects_ambiguous_prefix() {
+    let repo = Repo::new();
+    repo.write_task_file("003", "T001", "todo", "src/exact/");
+    repo.write_task_file("003-first", "T001", "todo", "src/first/");
+    repo.write_task_file("003-second", "T001", "todo", "src/second/");
+
+    let payload = repo.run_fail(&["ready", "--spec", "003", "--explain"]);
+    assert_eq!(payload["code"], "spec_selector_ambiguous");
+    assert_eq!(
+        payload["matches"],
+        serde_json::json!(["003-first", "003-second"])
+    );
+
+    let payload = repo.run_fail(&[
+        "lease",
+        "003",
+        "T001",
+        "--owner",
+        "worker:agent_003",
+        "--lease-id",
+        "l_003",
+    ]);
+    assert_eq!(payload["code"], "spec_selector_ambiguous");
 }
 
 #[test]

@@ -38,18 +38,6 @@ pub(crate) fn spec_is_inactive(name: &str) -> bool {
             .any(|prefix| name.starts_with(prefix))
 }
 
-pub(crate) fn spec_selector_name(value: &str) -> String {
-    if value.starts_with("specs/") {
-        Path::new(value)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(value)
-            .to_string()
-    } else {
-        value.to_string()
-    }
-}
-
 pub(crate) fn safe_spec_id(value: &str) -> OrchResult<String> {
     SpecId::parse(value).map(SpecId::into_string)
 }
@@ -63,6 +51,80 @@ fn numerical_spec_key(name: &str) -> (u8, u64, String) {
     }
 }
 
+fn numeric_spec_selector_matches(name: &str, selector: &str) -> bool {
+    name.strip_prefix(selector)
+        .is_some_and(|rest| rest.starts_with('-'))
+}
+
+fn active_spec_names(root: &Path, specs: &Path) -> OrchResult<Vec<String>> {
+    if !specs.exists() {
+        return Ok(Vec::new());
+    }
+    let mut names: Vec<String> = fs::read_dir(specs)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .map(|path| repo_path(root, path, "spec_dir"))
+        .collect::<OrchResult<Vec<_>>>()?
+        .into_iter()
+        .filter_map(|path| {
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
+        .filter(|name| !spec_is_inactive(name))
+        .collect();
+    names.sort_by_key(|name| numerical_spec_key(name));
+    Ok(names)
+}
+
+fn resolve_spec_selector(root: &Path, specs: &Path, selector: &str) -> OrchResult<String> {
+    let name = safe_spec_id(selector)?;
+    if spec_is_inactive(&name) {
+        return Err(
+            OrchError::coded("inactive spec is not dispatchable", ErrorCode::InactiveSpec)
+                .detail("spec", name),
+        );
+    }
+
+    let is_numeric_selector = !name.is_empty() && name.chars().all(|ch| ch.is_ascii_digit());
+    if !is_numeric_selector {
+        let exact_dir = repo_path(root, specs.join(&name), "spec_dir")?;
+        if exact_dir.is_dir() {
+            return Ok(name);
+        }
+        return Err(
+            OrchError::coded("spec not found", ErrorCode::SpecNotFound).detail("spec", name)
+        );
+    }
+
+    let matches: Vec<String> = active_spec_names(root, specs)?
+        .into_iter()
+        .filter(|candidate| numeric_spec_selector_matches(candidate, &name))
+        .collect();
+    match matches.as_slice() {
+        [resolved] => Ok(resolved.clone()),
+        [] => Err(OrchError::coded("spec not found", ErrorCode::SpecNotFound).detail("spec", name)),
+        _ => Err(
+            OrchError::coded("spec selector ambiguous", ErrorCode::SpecSelectorAmbiguous)
+                .detail("spec", name)
+                .detail(
+                    "matches",
+                    Value::Array(matches.into_iter().map(Value::String).collect()),
+                ),
+        ),
+    }
+}
+
+fn resolve_spec_selectors(root: &Path, spec_names: &[String]) -> OrchResult<Vec<String>> {
+    let specs = repo_path(root, root.join("specs"), "specs_dir")?;
+    let mut resolved = Vec::new();
+    for spec_name in spec_names {
+        resolved.push(resolve_spec_selector(root, &specs, spec_name)?);
+    }
+    Ok(resolved)
+}
+
 pub(crate) fn active_spec_dirs(
     root: &Path,
     spec_names: Option<&[String]>,
@@ -73,20 +135,8 @@ pub(crate) fn active_spec_dirs(
     }
     if let Some(spec_names) = spec_names {
         let mut dirs = Vec::new();
-        for spec_name in spec_names {
-            let name = spec_selector_name(spec_name);
-            if spec_is_inactive(&name) {
-                return Err(OrchError::coded(
-                    "inactive spec is not dispatchable",
-                    ErrorCode::InactiveSpec,
-                )
-                .detail("spec", name));
-            }
+        for name in resolve_spec_selectors(root, spec_names)? {
             let spec_dir = repo_path(root, specs.join(&name), "spec_dir")?;
-            if !spec_dir.is_dir() {
-                return Err(OrchError::coded("spec not found", ErrorCode::SpecNotFound)
-                    .detail("spec", name));
-            }
             dirs.push(spec_dir);
         }
         return Ok(dirs);
@@ -167,11 +217,8 @@ pub(crate) fn select_tasks(
     }
     if let Some(spec_names) = spec_names {
         if !spec_names.is_empty() {
-            let tasks = load_tasks(root, Some(spec_names))?;
-            let selected = spec_names
-                .iter()
-                .map(|spec| spec_selector_name(spec))
-                .collect();
+            let selected = resolve_spec_selectors(root, spec_names)?;
+            let tasks = load_tasks(root, Some(&selected))?;
             return Ok((tasks, selected));
         }
     }
@@ -266,11 +313,12 @@ pub(crate) fn resolve_task(root: &Path, target: &str, task_id: Option<&str>) -> 
     }
     if task_id.is_none() && target.contains('/') {
         let mut parts = target.splitn(2, '/');
-        let spec = parts.next().unwrap_or("");
+        let spec = parts.next().unwrap_or("").to_string();
         let task = parts.next().unwrap_or("");
+        let resolved = resolve_spec_selectors(root, &[spec])?;
         return load_task(
             root.join("specs")
-                .join(spec)
+                .join(&resolved[0])
                 .join("tasks")
                 .join(format!("{task}.md")),
             root,
@@ -282,18 +330,10 @@ pub(crate) fn resolve_task(root: &Path, target: &str, task_id: Option<&str>) -> 
             ErrorCode::TaskIdRequired,
         ));
     };
-    let spec_name = if target.starts_with("specs/") {
-        Path::new(target)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(target)
-            .to_string()
-    } else {
-        target.to_string()
-    };
+    let resolved = resolve_spec_selectors(root, &[target.to_string()])?;
     load_task(
         root.join("specs")
-            .join(spec_name)
+            .join(&resolved[0])
             .join("tasks")
             .join(format!("{task_id}.md")),
         root,

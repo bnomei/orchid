@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.3] - 2026-06-07
+
+### Added
+
+- Resolved numeric spec selectors like `--spec 003` to the unique active `003-*` spec directory, including lease targets such as `orchid lease 003 T001`.
+
+### Fixed
+
+- Accepted global `--pretty` after subcommands, so both `orchid --pretty lint` and `orchid lint --pretty` pretty-print JSON output.
+
 ## [0.3.2] - 2026-06-07
 
 ### Fixed
