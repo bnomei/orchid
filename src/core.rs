@@ -178,6 +178,13 @@ pub(crate) fn emit(payload: &Map<String, Value>, pretty: bool) {
     }
 }
 
+pub(crate) fn emit_markdown(markdown: &str) {
+    print!("{markdown}");
+    if !markdown.ends_with('\n') {
+        println!();
+    }
+}
+
 pub(crate) fn string_list(value: Option<&Value>) -> Vec<String> {
     match value {
         None | Some(Value::Null) => Vec::new(),

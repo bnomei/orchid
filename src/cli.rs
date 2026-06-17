@@ -1,9 +1,13 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde_json::{Map, Value};
 
-use crate::core::{emit, json_fail, OrchResult, DEFAULT_STALE_AFTER};
+use crate::core::{emit, emit_markdown, json_fail, now_iso, OrchResult, DEFAULT_STALE_AFTER};
+use crate::goal::{
+    self, GoalContract, GoalDirection, GoalId, GoalInitRequest, GoalState, GoalStatus,
+};
 use crate::orchestration::{
     self, AttachAgentRequest, BlockRequest, BudRequest, CleanupRequest, CloseRequest,
     CompleteRequest, LeaseRequest, NextRequest, PacketRequest, PacketRoleKind, ReportCheckRequest,
@@ -107,6 +111,69 @@ enum Command {
     Block(BlockArgs),
     #[command(about = "Validate spec and task-file structure")]
     Lint,
+    #[command(about = "Run a branch-local goal improvement loop")]
+    Goal(GoalArgs),
+}
+
+#[derive(Args)]
+struct GoalArgs {
+    #[command(subcommand)]
+    command: Option<GoalCommand>,
+}
+
+#[derive(Subcommand)]
+enum GoalCommand {
+    #[command(about = "Initialize a branch-local goal contract")]
+    Init(GoalInitArgs),
+    #[command(about = "Show current goal status")]
+    Status,
+    #[command(about = "Finish the current goal without creating a pull request")]
+    Finish,
+}
+
+#[derive(Args)]
+struct GoalInitArgs {
+    #[arg(long, help = "Stable goal id; defaults from the current branch")]
+    id: Option<String>,
+    #[arg(long, help = "Goal statement for the improvement loop")]
+    goal: String,
+    #[arg(long, help = "Evaluator command")]
+    evaluator: Option<String>,
+    #[arg(long, help = "Primary metric name")]
+    metric: String,
+    #[arg(long, value_enum, help = "Metric direction")]
+    direction: GoalDirectionArg,
+    #[arg(long, help = "Minimum metric delta required to keep a cycle")]
+    min_delta: f64,
+    #[arg(long, help = "Initial hypothesis to try")]
+    hypothesis: String,
+    #[arg(long, help = "Maximum improvement cycles")]
+    max_iterations: u32,
+    #[arg(long, help = "Maximum duration, such as 30m, 2h, or 1d")]
+    max_duration: String,
+    #[arg(long, action = clap::ArgAction::Append, help = "Protected path that blocks automatic decisions; repeatable")]
+    protected_surface: Vec<PathBuf>,
+    #[arg(long, action = clap::ArgAction::Append, help = "Goal work scope path; repeatable")]
+    scope: Vec<PathBuf>,
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum GoalDirectionArg {
+    #[value(name = "lower-is-better")]
+    LowerIsBetter,
+    #[value(name = "higher-is-better")]
+    HigherIsBetter,
+    Target,
+}
+
+impl From<GoalDirectionArg> for GoalDirection {
+    fn from(value: GoalDirectionArg) -> Self {
+        match value {
+            GoalDirectionArg::LowerIsBetter => GoalDirection::LowerIsBetter,
+            GoalDirectionArg::HigherIsBetter => GoalDirection::HigherIsBetter,
+            GoalDirectionArg::Target => GoalDirection::Target,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -342,28 +409,34 @@ pub fn run() -> i32 {
         }
     };
 
-    let result: OrchResult<Map<String, Value>> = match run_command(&root, &cli.command) {
-        Ok(payload) => Ok(payload),
+    let result: OrchResult<CommandOutput> = match run_command(&root, &cli.command) {
+        Ok(output) => Ok(output),
         Err(error) => {
             let mut payload = json_fail(&error.message, Some(&error.code));
             payload.extend(error.details);
-            Ok(payload)
+            Ok(CommandOutput::Json(payload))
         }
     };
 
     match result {
-        Ok(payload) => {
-            let ok = payload
-                .get("ok")
-                .and_then(Value::as_bool)
-                .unwrap_or_else(|| !payload.contains_key("error"));
-            emit(&payload, cli.pretty);
-            if ok {
-                0
-            } else {
-                1
+        Ok(output) => match output {
+            CommandOutput::Json(payload) => {
+                let ok = payload
+                    .get("ok")
+                    .and_then(Value::as_bool)
+                    .unwrap_or_else(|| !payload.contains_key("error"));
+                emit(&payload, cli.pretty);
+                if ok {
+                    0
+                } else {
+                    1
+                }
             }
-        }
+            CommandOutput::Markdown(markdown) => {
+                emit_markdown(&markdown);
+                0
+            }
+        },
         Err(error) => {
             let mut payload = json_fail(&error.message, Some(&error.code));
             payload.extend(error.details);
@@ -373,31 +446,212 @@ pub fn run() -> i32 {
     }
 }
 
-fn run_command(root: &Path, command: &Command) -> OrchResult<Map<String, Value>> {
-    match command {
-        Command::Ready(args) => cmd_ready(root, args),
-        Command::Status(args) => cmd_status(root, args),
-        Command::Lease(args) => cmd_lease(root, args),
-        Command::Bud(args) => cmd_bud(root, args),
-        Command::LeaseAttachAgent(args) => cmd_lease_attach_agent(root, args),
-        Command::Running => cmd_running(root),
-        Command::Heartbeat { lease } => cmd_heartbeat(root, lease),
-        Command::Stale { older_than } => cmd_stale(root, older_than),
-        Command::Release { lease, reason } => cmd_release(root, lease, reason),
-        Command::Close(args) => cmd_close(root, args),
-        Command::Cleanup(args) => cmd_cleanup(root, args),
-        Command::Next(args) => cmd_next(root, args),
-        Command::ResearchPath(args) => cmd_research_path(root, args),
-        Command::ResearchClean { spec } => cmd_research_clean(root, spec),
-        Command::Packet(args) => cmd_packet(root, args),
-        Command::ReportCheck { report } => cmd_report_check(root, report),
-        Command::GitStatus => cmd_git_status(root),
-        Command::GitTouched { lease } => cmd_git_touched(root, lease),
-        Command::GitStagePlan { lease } => cmd_git_stage_plan(root, lease),
-        Command::Complete(args) => cmd_complete(root, args),
-        Command::Block(args) => cmd_block(root, args),
-        Command::Lint => cmd_lint(root),
+enum CommandOutput {
+    Json(Map<String, Value>),
+    Markdown(String),
+}
+
+impl From<Map<String, Value>> for CommandOutput {
+    fn from(value: Map<String, Value>) -> Self {
+        Self::Json(value)
     }
+}
+
+fn run_command(root: &Path, command: &Command) -> OrchResult<CommandOutput> {
+    match command {
+        Command::Ready(args) => cmd_ready(root, args).map(Into::into),
+        Command::Status(args) => cmd_status(root, args).map(Into::into),
+        Command::Lease(args) => cmd_lease(root, args).map(Into::into),
+        Command::Bud(args) => cmd_bud(root, args).map(Into::into),
+        Command::LeaseAttachAgent(args) => cmd_lease_attach_agent(root, args).map(Into::into),
+        Command::Running => cmd_running(root).map(Into::into),
+        Command::Heartbeat { lease } => cmd_heartbeat(root, lease).map(Into::into),
+        Command::Stale { older_than } => cmd_stale(root, older_than).map(Into::into),
+        Command::Release { lease, reason } => cmd_release(root, lease, reason).map(Into::into),
+        Command::Close(args) => cmd_close(root, args).map(Into::into),
+        Command::Cleanup(args) => cmd_cleanup(root, args).map(Into::into),
+        Command::Next(args) => cmd_next(root, args).map(Into::into),
+        Command::ResearchPath(args) => cmd_research_path(root, args).map(Into::into),
+        Command::ResearchClean { spec } => cmd_research_clean(root, spec).map(Into::into),
+        Command::Packet(args) => cmd_packet(root, args).map(Into::into),
+        Command::ReportCheck { report } => cmd_report_check(root, report).map(Into::into),
+        Command::GitStatus => cmd_git_status(root).map(Into::into),
+        Command::GitTouched { lease } => cmd_git_touched(root, lease).map(Into::into),
+        Command::GitStagePlan { lease } => cmd_git_stage_plan(root, lease).map(Into::into),
+        Command::Complete(args) => cmd_complete(root, args).map(Into::into),
+        Command::Block(args) => cmd_block(root, args).map(Into::into),
+        Command::Lint => cmd_lint(root).map(Into::into),
+        Command::Goal(args) => cmd_goal(root, args).map(CommandOutput::Markdown),
+    }
+}
+
+fn cmd_goal(root: &Path, args: &GoalArgs) -> OrchResult<String> {
+    match &args.command {
+        Some(GoalCommand::Init(args)) => cmd_goal_init(root, args),
+        Some(GoalCommand::Status) => cmd_goal_status(root),
+        Some(GoalCommand::Finish) => cmd_goal_finish(root),
+        None => cmd_goal_current(root),
+    }
+}
+
+fn cmd_goal_init(root: &Path, args: &GoalInitArgs) -> OrchResult<String> {
+    let goal_id = match args.id.as_deref() {
+        Some(raw) => GoalId::explicit(raw)?,
+        None => GoalId::sanitize(&current_branch(root).unwrap_or_else(|| "goal".to_string()))?,
+    };
+    let request = GoalInitRequest::new(
+        goal_id.clone(),
+        args.goal.clone(),
+        args.evaluator
+            .clone()
+            .unwrap_or_else(|| "just goal-eval".to_string()),
+        args.metric.clone(),
+        args.direction.into(),
+        args.min_delta,
+        args.max_iterations,
+        args.max_duration.clone(),
+        args.hypothesis.clone(),
+        args.protected_surface.clone(),
+        args.scope.clone(),
+    )?;
+    let (contract, mut state) = request.into_contract_and_state(now_iso());
+    state.status = GoalStatus::Ready;
+    contract.write(root)?;
+    state.write(root, &goal_id)?;
+    Ok(render_goal_ready(&contract, &state, root)?)
+}
+
+fn cmd_goal_current(root: &Path) -> OrchResult<String> {
+    match read_current_goal(root)? {
+        Some((contract, state)) => Ok(render_goal_ready(&contract, &state, root)?),
+        None => Ok(render_goal_setup()),
+    }
+}
+
+fn cmd_goal_status(root: &Path) -> OrchResult<String> {
+    match read_current_goal(root)? {
+        Some((contract, state)) => Ok(render_goal_status(&contract, &state)),
+        None => Ok("# Goal Status\n\nNo current goal is initialized.\n".to_string()),
+    }
+}
+
+fn cmd_goal_finish(root: &Path) -> OrchResult<String> {
+    match read_current_goal(root)? {
+        Some((contract, state)) => Ok(render_goal_finish(&contract, &state)),
+        None => Ok("# Goal Finish\n\nNo current goal is initialized.\n".to_string()),
+    }
+}
+
+fn read_current_goal(root: &Path) -> OrchResult<Option<(GoalContract, GoalState)>> {
+    let current_path = root.join(".orchid/goal-current");
+    if !current_path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&current_path)?;
+    let goal_id = GoalId::explicit(raw.trim())?;
+    let contract = GoalContract::read(root, &goal_id)?;
+    let state = GoalState::read(root, &goal_id)?;
+    Ok(Some((contract, state)))
+}
+
+fn current_branch(root: &Path) -> Option<String> {
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("rev-parse")
+        .arg("--abbrev-ref")
+        .arg("HEAD")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!branch.is_empty() && branch != "HEAD").then_some(branch)
+}
+
+fn render_goal_setup() -> String {
+    "# Goal Setup\n\nNo current goal is initialized.\n\nRun `orchid goal init` with `--goal`, `--metric`, `--direction`, `--min-delta`, `--hypothesis`, `--max-iterations`, and `--max-duration`.\n".to_string()
+}
+
+fn render_goal_ready(
+    contract: &GoalContract,
+    state: &GoalState,
+    root: &Path,
+) -> OrchResult<String> {
+    let report_path = goal::report_path(root, &contract.goal_id, &state.cycle)?;
+    Ok(format!(
+        "# Goal Ready\n\n- Goal: `{}`\n- Cycle: `{}`\n- Metric: `{}`\n- Direction: `{}`\n- Baseline: `{}`\n- Budget: `{}/{}` iterations, max duration `{}`\n- Next hypothesis: {}\n- Report path: `{}`\n\nWrite the cycle report at the report path, then run `orchid goal finish` when ready to evaluate or stop.\n",
+        contract.goal_id.as_str(),
+        state.cycle,
+        contract.primary_metric,
+        contract.direction.as_str(),
+        optional_f64(state.baseline_value),
+        state.iterations_completed,
+        contract.max_iterations,
+        contract.max_duration,
+        state.next_hypothesis,
+        report_path.display(),
+    ))
+}
+
+fn render_goal_status(contract: &GoalContract, state: &GoalState) -> String {
+    format!(
+        "# Goal Status\n\n- Goal: `{}`\n- Reason: `{}`\n- Best result: `{}` at `{}`\n- Budget: `{}/{}` iterations, exhausted: `{}`\n- Kept cycles: `{}`\n- Discarded cycles: `{}`\n- Branch state: current goal files are local under `.orchid/goals/{}`\n\nNo pull request was created.\n",
+        contract.goal_id.as_str(),
+        goal_status_label(state.status),
+        optional_f64(state.best_value),
+        optional_string(state.best_commit.as_deref()),
+        state.iterations_completed,
+        contract.max_iterations,
+        state.budget_exhausted,
+        0,
+        0,
+        contract.goal_id.as_str(),
+    )
+}
+
+fn render_goal_finish(contract: &GoalContract, state: &GoalState) -> String {
+    format!(
+        "# Goal Finish\n\n- Goal: `{}`\n- Reason: `{}`\n- Best result: `{}` at `{}`\n- Budget: `{}/{}` iterations, exhausted: `{}`\n- Kept cycles: `{}`\n- Discarded cycles: `{}`\n- Branch state: finish requested without PR creation\n\nNo pull request was created.\n",
+        contract.goal_id.as_str(),
+        state
+            .budget_exhausted_reason
+            .as_deref()
+            .unwrap_or_else(|| goal_status_label(state.status)),
+        optional_f64(state.best_value),
+        optional_string(state.best_commit.as_deref()),
+        state.iterations_completed,
+        contract.max_iterations,
+        state.budget_exhausted,
+        0,
+        0,
+    )
+}
+
+fn goal_status_label(status: GoalStatus) -> &'static str {
+    match status {
+        GoalStatus::Setup => "setup",
+        GoalStatus::Baseline => "baseline",
+        GoalStatus::Ready => "ready",
+        GoalStatus::Running => "running",
+        GoalStatus::Evaluate => "evaluate",
+        GoalStatus::Keep => "keep",
+        GoalStatus::Discard => "discard",
+        GoalStatus::Blocked => "blocked",
+        GoalStatus::Done => "done",
+        GoalStatus::Stopped => "stopped",
+    }
+}
+
+fn optional_f64(value: Option<f64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "pending".to_string())
+}
+
+fn optional_string(value: Option<&str>) -> &str {
+    value.unwrap_or("pending")
 }
 
 fn cmd_ready(root: &Path, args: &ReadyArgs) -> OrchResult<Map<String, Value>> {

@@ -88,6 +88,21 @@ pub(crate) fn reports_dir(root: &Path) -> PathBuf {
     orch_dir(root).join("reports")
 }
 
+#[allow(dead_code)]
+pub(crate) fn goal_current_path(root: &Path) -> PathBuf {
+    orch_dir(root).join("goal-current")
+}
+
+#[allow(dead_code)]
+pub(crate) fn goals_dir(root: &Path) -> PathBuf {
+    orch_dir(root).join("goals")
+}
+
+#[allow(dead_code)]
+pub(crate) fn goal_dir(root: &Path, goal_id: &str) -> PathBuf {
+    goals_dir(root).join(goal_id)
+}
+
 pub(crate) fn spec_research_root(root: &Path) -> PathBuf {
     orch_dir(root).join("spec-research")
 }

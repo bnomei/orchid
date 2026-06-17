@@ -1,6 +1,7 @@
 mod cli;
 mod core;
 mod gitstate;
+mod goal;
 mod model;
 mod orchestration;
 mod paths;
