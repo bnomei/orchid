@@ -1,13 +1,11 @@
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde_json::{Map, Value};
 
-use crate::core::{emit, emit_markdown, json_fail, now_iso, OrchResult, DEFAULT_STALE_AFTER};
-use crate::goal::{
-    self, GoalContract, GoalDirection, GoalId, GoalInitRequest, GoalState, GoalStatus,
-};
+use crate::core::{emit, emit_markdown, json_fail, OrchResult, DEFAULT_STALE_AFTER};
+use crate::gitstate;
+use crate::goal::{self, GoalDirection, GoalId, GoalInitRequest};
 use crate::orchestration::{
     self, AttachAgentRequest, BlockRequest, BudRequest, CleanupRequest, CloseRequest,
     CompleteRequest, LeaseRequest, NextRequest, PacketRequest, PacketRoleKind, ReportCheckRequest,
@@ -497,10 +495,12 @@ fn cmd_goal(root: &Path, args: &GoalArgs) -> OrchResult<String> {
 fn cmd_goal_init(root: &Path, args: &GoalInitArgs) -> OrchResult<String> {
     let goal_id = match args.id.as_deref() {
         Some(raw) => GoalId::explicit(raw)?,
-        None => GoalId::sanitize(&current_branch(root).unwrap_or_else(|| "goal".to_string()))?,
+        None => GoalId::sanitize(
+            &gitstate::current_branch(root)?.unwrap_or_else(|| "goal".to_string()),
+        )?,
     };
     let request = GoalInitRequest::new(
-        goal_id.clone(),
+        goal_id,
         args.goal.clone(),
         args.evaluator
             .clone()
@@ -514,144 +514,28 @@ fn cmd_goal_init(root: &Path, args: &GoalInitArgs) -> OrchResult<String> {
         args.protected_surface.clone(),
         args.scope.clone(),
     )?;
-    let (contract, mut state) = request.into_contract_and_state(now_iso());
-    state.status = GoalStatus::Ready;
-    contract.write(root)?;
-    state.write(root, &goal_id)?;
-    Ok(render_goal_ready(&contract, &state, root)?)
+    goal::init_goal(root, request)
 }
 
 fn cmd_goal_current(root: &Path) -> OrchResult<String> {
-    match read_current_goal(root)? {
-        Some((contract, state)) => Ok(render_goal_ready(&contract, &state, root)?),
-        None => Ok(render_goal_setup()),
+    match goal::current_goal(root)? {
+        Some((contract, state)) => goal::render_goal_prompt(root, &contract, &state),
+        None => Ok(goal::render_no_goal_prompt()),
     }
 }
 
 fn cmd_goal_status(root: &Path) -> OrchResult<String> {
-    match read_current_goal(root)? {
-        Some((contract, state)) => Ok(render_goal_status(&contract, &state)),
+    match goal::current_goal(root)? {
+        Some((contract, state)) => Ok(goal::render_goal_status(&contract, &state)),
         None => Ok("# Goal Status\n\nNo current goal is initialized.\n".to_string()),
     }
 }
 
 fn cmd_goal_finish(root: &Path) -> OrchResult<String> {
-    match read_current_goal(root)? {
-        Some((contract, state)) => Ok(render_goal_finish(&contract, &state)),
+    match goal::current_goal(root)? {
+        Some((contract, state)) => Ok(goal::render_goal_finish(&contract, &state)),
         None => Ok("# Goal Finish\n\nNo current goal is initialized.\n".to_string()),
     }
-}
-
-fn read_current_goal(root: &Path) -> OrchResult<Option<(GoalContract, GoalState)>> {
-    let current_path = root.join(".orchid/goal-current");
-    if !current_path.exists() {
-        return Ok(None);
-    }
-    let raw = std::fs::read_to_string(&current_path)?;
-    let goal_id = GoalId::explicit(raw.trim())?;
-    let contract = GoalContract::read(root, &goal_id)?;
-    let state = GoalState::read(root, &goal_id)?;
-    Ok(Some((contract, state)))
-}
-
-fn current_branch(root: &Path) -> Option<String> {
-    let output = ProcessCommand::new("git")
-        .arg("-C")
-        .arg(root)
-        .arg("rev-parse")
-        .arg("--abbrev-ref")
-        .arg("HEAD")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!branch.is_empty() && branch != "HEAD").then_some(branch)
-}
-
-fn render_goal_setup() -> String {
-    "# Goal Setup\n\nNo current goal is initialized.\n\nRun `orchid goal init` with `--goal`, `--metric`, `--direction`, `--min-delta`, `--hypothesis`, `--max-iterations`, and `--max-duration`.\n".to_string()
-}
-
-fn render_goal_ready(
-    contract: &GoalContract,
-    state: &GoalState,
-    root: &Path,
-) -> OrchResult<String> {
-    let report_path = goal::report_path(root, &contract.goal_id, &state.cycle)?;
-    Ok(format!(
-        "# Goal Ready\n\n- Goal: `{}`\n- Cycle: `{}`\n- Metric: `{}`\n- Direction: `{}`\n- Baseline: `{}`\n- Budget: `{}/{}` iterations, max duration `{}`\n- Next hypothesis: {}\n- Report path: `{}`\n\nWrite the cycle report at the report path, then run `orchid goal finish` when ready to evaluate or stop.\n",
-        contract.goal_id.as_str(),
-        state.cycle,
-        contract.primary_metric,
-        contract.direction.as_str(),
-        optional_f64(state.baseline_value),
-        state.iterations_completed,
-        contract.max_iterations,
-        contract.max_duration,
-        state.next_hypothesis,
-        report_path.display(),
-    ))
-}
-
-fn render_goal_status(contract: &GoalContract, state: &GoalState) -> String {
-    format!(
-        "# Goal Status\n\n- Goal: `{}`\n- Reason: `{}`\n- Best result: `{}` at `{}`\n- Budget: `{}/{}` iterations, exhausted: `{}`\n- Kept cycles: `{}`\n- Discarded cycles: `{}`\n- Branch state: current goal files are local under `.orchid/goals/{}`\n\nNo pull request was created.\n",
-        contract.goal_id.as_str(),
-        goal_status_label(state.status),
-        optional_f64(state.best_value),
-        optional_string(state.best_commit.as_deref()),
-        state.iterations_completed,
-        contract.max_iterations,
-        state.budget_exhausted,
-        0,
-        0,
-        contract.goal_id.as_str(),
-    )
-}
-
-fn render_goal_finish(contract: &GoalContract, state: &GoalState) -> String {
-    format!(
-        "# Goal Finish\n\n- Goal: `{}`\n- Reason: `{}`\n- Best result: `{}` at `{}`\n- Budget: `{}/{}` iterations, exhausted: `{}`\n- Kept cycles: `{}`\n- Discarded cycles: `{}`\n- Branch state: finish requested without PR creation\n\nNo pull request was created.\n",
-        contract.goal_id.as_str(),
-        state
-            .budget_exhausted_reason
-            .as_deref()
-            .unwrap_or_else(|| goal_status_label(state.status)),
-        optional_f64(state.best_value),
-        optional_string(state.best_commit.as_deref()),
-        state.iterations_completed,
-        contract.max_iterations,
-        state.budget_exhausted,
-        0,
-        0,
-    )
-}
-
-fn goal_status_label(status: GoalStatus) -> &'static str {
-    match status {
-        GoalStatus::Setup => "setup",
-        GoalStatus::Baseline => "baseline",
-        GoalStatus::Ready => "ready",
-        GoalStatus::Running => "running",
-        GoalStatus::Evaluate => "evaluate",
-        GoalStatus::Keep => "keep",
-        GoalStatus::Discard => "discard",
-        GoalStatus::Blocked => "blocked",
-        GoalStatus::Done => "done",
-        GoalStatus::Stopped => "stopped",
-    }
-}
-
-fn optional_f64(value: Option<f64>) -> String {
-    value
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "pending".to_string())
-}
-
-fn optional_string(value: Option<&str>) -> &str {
-    value.unwrap_or("pending")
 }
 
 fn cmd_ready(root: &Path, args: &ReadyArgs) -> OrchResult<Map<String, Value>> {

@@ -259,6 +259,183 @@ fn pretty_can_be_passed_after_subcommand() {
 }
 
 #[test]
+fn bare_goal_without_current_goal_renders_init_markdown() {
+    let repo = Repo::new();
+    let stdout = repo.run_stdout(&["goal"]);
+
+    assert!(stdout.starts_with("# Goal Setup"));
+    assert!(stdout.contains("Run `orchid goal init`"));
+    assert!(serde_json::from_str::<Value>(&stdout).is_err());
+}
+
+#[test]
+fn goal_init_without_evaluator_creates_files_and_setup_state() {
+    let repo = Repo::new();
+    let stdout = repo.run_stdout(&[
+        "goal",
+        "init",
+        "--id",
+        "search-ranking-proof",
+        "--goal",
+        "Reduce search ranking p95",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "5",
+        "--hypothesis",
+        "cache normalized query features",
+        "--max-iterations",
+        "10",
+        "--max-duration",
+        "10h",
+    ]);
+
+    assert!(stdout.starts_with("# Goal Setup"));
+    assert!(stdout.contains("just goal-eval"));
+    assert_eq!(
+        fs::read_to_string(repo.root.join(".orchid/goal-current")).unwrap(),
+        "search-ranking-proof\n"
+    );
+    assert!(repo
+        .root
+        .join(".orchid/goals/search-ranking-proof/goal.toml")
+        .exists());
+    let state: Value = serde_json::from_str(
+        &fs::read_to_string(
+            repo.root
+                .join(".orchid/goals/search-ranking-proof/state.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state["status"], "setup");
+    assert_eq!(state["next_hypothesis"], "cache normalized query features");
+
+    let stdout = repo.run_stdout(&["goal"]);
+    assert!(stdout.starts_with("# Goal Setup"));
+    assert!(stdout.contains("Make `just goal-eval` run successfully"));
+}
+
+#[test]
+fn goal_init_defaults_id_from_sanitized_branch_leaf() {
+    let repo = Repo::new();
+    repo.init_git();
+    git(&repo.root, &["checkout", "-b", "loop/search-ranking-proof"]);
+
+    repo.run_stdout(&[
+        "goal",
+        "init",
+        "--goal",
+        "Reduce search ranking p95",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "5",
+        "--hypothesis",
+        "cache normalized query features",
+        "--max-iterations",
+        "10",
+        "--max-duration",
+        "10h",
+    ]);
+
+    assert_eq!(
+        fs::read_to_string(repo.root.join(".orchid/goal-current")).unwrap(),
+        "search-ranking-proof\n"
+    );
+    assert!(repo
+        .root
+        .join(".orchid/goals/search-ranking-proof/goal.toml")
+        .exists());
+}
+
+#[test]
+fn goal_init_with_valid_evaluator_records_baseline_and_renders_ready_markdown() {
+    let repo = Repo::new();
+    repo.init_git();
+    let stdout = repo.run_stdout(&[
+        "goal",
+        "init",
+        "--id",
+        "ready-goal",
+        "--goal",
+        "Reduce search ranking p95",
+        "--evaluator",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":118.5,\"delta\":1.5,\"reason\":\"baseline\"}'",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "5",
+        "--hypothesis",
+        "cache normalized query features",
+        "--max-iterations",
+        "10",
+        "--max-duration",
+        "10h",
+    ]);
+
+    assert!(stdout.starts_with("# Goal Ready"));
+    assert!(stdout.contains("- Goal: `ready-goal`"));
+    assert!(stdout.contains("- Cycle: `C001`"));
+    assert!(stdout.contains("- Metric: `p95_ms`"));
+    assert!(stdout.contains("- Baseline: `120` at `"));
+    assert!(stdout.contains(".orchid/goals/ready-goal/reports/C001.md"));
+    assert!(serde_json::from_str::<Value>(&stdout).is_err());
+
+    let state: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/goals/ready-goal/state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state["status"], "ready");
+    assert_eq!(state["baseline_value"], 120.0);
+    assert!(state["baseline_commit"].as_str().is_some());
+}
+
+#[test]
+fn bare_goal_renders_running_prompt_for_missing_cycle_report() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run_stdout(&[
+        "goal",
+        "init",
+        "--id",
+        "running-goal",
+        "--goal",
+        "Reduce search ranking p95",
+        "--evaluator",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":118.5,\"delta\":1.5,\"reason\":\"baseline\"}'",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "5",
+        "--hypothesis",
+        "cache normalized query features",
+        "--max-iterations",
+        "10",
+        "--max-duration",
+        "10h",
+    ]);
+    let state_path = repo.root.join(".orchid/goals/running-goal/state.json");
+    let mut state: Value = serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+    state["status"] = Value::String("running".to_string());
+    fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+    let stdout = repo.run_stdout(&["goal"]);
+
+    assert!(stdout.starts_with("# Goal Running"));
+    assert!(stdout.contains("- Expected report path: `"));
+    assert!(stdout.contains(".orchid/goals/running-goal/reports/C001.md"));
+}
+
+#[test]
 fn ready_requires_scope_and_reports_blocked_tasks() {
     let repo = Repo::new();
     let payload = repo.run_from_cwd(&["ready", "--spec", "example"]);

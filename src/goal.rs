@@ -4,12 +4,14 @@ use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::core::{now_iso, parse_duration, OrchError, OrchResult};
+use crate::gitstate;
 use crate::paths::{
     atomic_write, atomic_write_json, goal_current_path, goal_dir, path_to_string, read_text,
     repo_path,
@@ -508,6 +510,203 @@ pub(crate) fn report_path(root: &Path, goal_id: &GoalId, cycle: &str) -> OrchRes
             .join(format!("{cycle}.md")),
         "goal_report_path",
     )
+}
+
+pub(crate) fn init_goal(root: &Path, request: GoalInitRequest) -> OrchResult<String> {
+    let goal_id = request.goal_id.clone();
+    let (contract, mut state) = request.into_contract_and_state(now_iso());
+    match baseline_evaluator(root, &contract) {
+        Ok((commit, value)) => {
+            state.status = GoalStatus::Ready;
+            state.baseline_commit = commit.clone();
+            state.baseline_value = Some(value);
+            state.best_commit = commit;
+            state.best_value = Some(value);
+        }
+        Err(_) => {
+            state.status = GoalStatus::Setup;
+        }
+    }
+    state.updated_at = now_iso();
+    contract.write(root)?;
+    state.write(root, &goal_id)?;
+    render_goal_prompt(root, &contract, &state)
+}
+
+pub(crate) fn current_goal(root: &Path) -> OrchResult<Option<(GoalContract, GoalState)>> {
+    let current_path = goal_current_path(root);
+    if !current_path.exists() {
+        return Ok(None);
+    }
+    let raw = read_text(&current_path)?;
+    let goal_id = GoalId::explicit(raw.trim())?;
+    let contract = GoalContract::read(root, &goal_id)?;
+    let state = GoalState::read(root, &goal_id)?;
+    Ok(Some((contract, state)))
+}
+
+pub(crate) fn render_goal_prompt(
+    root: &Path,
+    contract: &GoalContract,
+    state: &GoalState,
+) -> OrchResult<String> {
+    match state.status {
+        GoalStatus::Setup | GoalStatus::Baseline => Ok(render_goal_setup_for_contract(contract)),
+        GoalStatus::Ready => render_goal_ready(root, contract, state),
+        GoalStatus::Running => render_goal_running(root, contract, state),
+        GoalStatus::Blocked => Ok(render_goal_blocked(contract, state)),
+        GoalStatus::Done | GoalStatus::Stopped => Ok(render_goal_finish(contract, state)),
+        GoalStatus::Evaluate | GoalStatus::Keep | GoalStatus::Discard => {
+            render_goal_running(root, contract, state)
+        }
+    }
+}
+
+pub(crate) fn render_no_goal_prompt() -> String {
+    "# Goal Setup\n\nNo current goal is initialized.\n\nRun `orchid goal init` with `--goal`, `--metric`, `--direction`, `--min-delta`, `--hypothesis`, `--max-iterations`, and `--max-duration`.\n".to_string()
+}
+
+pub(crate) fn render_goal_status(contract: &GoalContract, state: &GoalState) -> String {
+    format!(
+        "# Goal Status\n\n- Goal: `{}`\n- Reason: `{}`\n- Best result: `{}` at `{}`\n- Budget: `{}/{}` iterations, exhausted: `{}`\n- Kept cycles: `{}`\n- Discarded cycles: `{}`\n- Branch state: current goal files are local under `.orchid/goals/{}`\n\nNo pull request was created.\n",
+        contract.goal_id.as_str(),
+        goal_status_label(state.status),
+        optional_f64(state.best_value),
+        optional_string(state.best_commit.as_deref()),
+        state.iterations_completed,
+        contract.max_iterations,
+        state.budget_exhausted,
+        0,
+        0,
+        contract.goal_id.as_str(),
+    )
+}
+
+pub(crate) fn render_goal_finish(contract: &GoalContract, state: &GoalState) -> String {
+    format!(
+        "# Goal Finish\n\n- Goal: `{}`\n- Reason: `{}`\n- Best result: `{}` at `{}`\n- Budget: `{}/{}` iterations, exhausted: `{}`\n- Kept cycles: `{}`\n- Discarded cycles: `{}`\n- Branch state: finish requested without PR creation\n\nNo pull request was created.\n",
+        contract.goal_id.as_str(),
+        state
+            .budget_exhausted_reason
+            .as_deref()
+            .unwrap_or_else(|| goal_status_label(state.status)),
+        optional_f64(state.best_value),
+        optional_string(state.best_commit.as_deref()),
+        state.iterations_completed,
+        contract.max_iterations,
+        state.budget_exhausted,
+        0,
+        0,
+    )
+}
+
+fn baseline_evaluator(root: &Path, contract: &GoalContract) -> OrchResult<(Option<String>, f64)> {
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&contract.evaluator)
+        .current_dir(root)
+        .output()
+        .map_err(OrchError::from)?;
+    if !output.status.success() {
+        return Err(OrchError::new("goal evaluator failed")
+            .detail("evaluator", contract.evaluator.clone())
+            .detail(
+                "stderr",
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result = EvaluatorResult::parse_json(&stdout)?;
+    if result.metric != contract.primary_metric {
+        return Err(OrchError::new("evaluator metric mismatch")
+            .detail("expected", contract.primary_metric.clone())
+            .detail("actual", result.metric));
+    }
+    Ok((gitstate::head_commit(root)?, result.baseline))
+}
+
+fn render_goal_setup_for_contract(contract: &GoalContract) -> String {
+    format!(
+        "# Goal Setup\n\n- Goal: `{}`\n- Evaluator: `{}`\n- Metric: `{}`\n\nMake `{}` run successfully from the repository root and print valid evaluator JSON with `status`, `recommendation`, `metric`, `baseline`, `candidate`, `delta`, and `reason` fields.\n\nAfter the evaluator works, run `orchid goal init` again with the same flags or run `orchid goal` to continue from the current state.\n",
+        contract.goal_id.as_str(),
+        contract.evaluator,
+        contract.primary_metric,
+        contract.evaluator,
+    )
+}
+
+fn render_goal_ready(
+    root: &Path,
+    contract: &GoalContract,
+    state: &GoalState,
+) -> OrchResult<String> {
+    let report_path = report_path(root, &contract.goal_id, &state.cycle)?;
+    Ok(format!(
+        "# Goal Ready\n\n- Goal: `{}`\n- Cycle: `{}`\n- Metric: `{}`\n- Direction: `{}`\n- Baseline: `{}` at `{}`\n- Budget: `{}/{}` iterations, max duration `{}`\n- Next hypothesis: {}\n- Recent results: `{}`\n- Report path: `{}`\n\nImplement one focused attempt, then write a Markdown report at the report path with TOML frontmatter containing `cycle`, `status`, and `next_hypothesis`.\n",
+        contract.goal_id.as_str(),
+        state.cycle,
+        contract.primary_metric,
+        contract.direction.as_str(),
+        optional_f64(state.baseline_value),
+        optional_string(state.baseline_commit.as_deref()),
+        state.iterations_completed,
+        contract.max_iterations,
+        contract.max_duration,
+        state.next_hypothesis,
+        optional_string(state.last_report.as_deref()),
+        report_path.display(),
+    ))
+}
+
+fn render_goal_running(
+    root: &Path,
+    contract: &GoalContract,
+    state: &GoalState,
+) -> OrchResult<String> {
+    let report_path = report_path(root, &contract.goal_id, &state.cycle)?;
+    Ok(format!(
+        "# Goal Running\n\n- Goal: `{}`\n- Cycle: `{}`\n- Expected report path: `{}`\n\nWrite the cycle report before asking Orchid to evaluate this attempt.\n",
+        contract.goal_id.as_str(),
+        state.cycle,
+        report_path.display(),
+    ))
+}
+
+fn render_goal_blocked(contract: &GoalContract, state: &GoalState) -> String {
+    format!(
+        "# Goal Blocked\n\n- Goal: `{}`\n- Cycle: `{}`\n- Reason: `{}`\n",
+        contract.goal_id.as_str(),
+        state.cycle,
+        state
+            .budget_exhausted_reason
+            .as_deref()
+            .unwrap_or("blocked"),
+    )
+}
+
+fn goal_status_label(status: GoalStatus) -> &'static str {
+    match status {
+        GoalStatus::Setup => "setup",
+        GoalStatus::Baseline => "baseline",
+        GoalStatus::Ready => "ready",
+        GoalStatus::Running => "running",
+        GoalStatus::Evaluate => "evaluate",
+        GoalStatus::Keep => "keep",
+        GoalStatus::Discard => "discard",
+        GoalStatus::Blocked => "blocked",
+        GoalStatus::Done => "done",
+        GoalStatus::Stopped => "stopped",
+    }
+}
+
+fn optional_f64(value: Option<f64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "pending".to_string())
+}
+
+fn optional_string(value: Option<&str>) -> &str {
+    value.unwrap_or("pending")
 }
 
 fn safe_goal_dir(root: &Path, goal_id: &GoalId) -> OrchResult<PathBuf> {

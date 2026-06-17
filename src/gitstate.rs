@@ -38,6 +38,21 @@ fn git_text(root: &Path, args: &[&str], check: bool) -> OrchResult<String> {
         .to_string())
 }
 
+pub(crate) fn current_branch(root: &Path) -> OrchResult<Option<String>> {
+    if !git_available(root) {
+        return Ok(None);
+    }
+    let branch = git_text(root, &["rev-parse", "--abbrev-ref", "HEAD"], true)?;
+    Ok((!branch.is_empty() && branch != "HEAD").then_some(branch))
+}
+
+pub(crate) fn head_commit(root: &Path) -> OrchResult<Option<String>> {
+    if !git_available(root) {
+        return Ok(None);
+    }
+    Ok(Some(git_text(root, &["rev-parse", "HEAD"], true)?))
+}
+
 fn git_available(root: &Path) -> bool {
     git(root, &["rev-parse", "--show-toplevel"], true).is_ok()
 }
