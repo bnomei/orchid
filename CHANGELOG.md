@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-06-17
+
+### Added
+
+- Added first-class worker execution metadata with `worker_reasoning_effort` and
+  optional `worker_model` task fields, lease snapshots, packet trusted lines,
+  and JSON ACKs for coordinator spawn decisions.
+- Added `--worker-reasoning-effort` and `--worker-model` overrides for `lease`
+  and `bud`.
+- Added `--brief` for compact `ready` and `next` output.
+
+### Changed
+
+- Made detailed `ready` and `next` ACKs the default, so coordinators see worker
+  effort/model before spawning subagents.
+- Updated bundled `make-specs` and `orchid` skills to author, validate, and use
+  worker execution metadata from ACKs.
+
+### Fixed
+
+- Rejected invalid worker reasoning effort and model values during lint,
+  readiness, leasing, and bud creation.
+
 ## [0.3.3] - 2026-06-07
 
 ### Added

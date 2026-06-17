@@ -7,6 +7,8 @@ pub(crate) struct ReportReady {
     pub(crate) lease_id: String,
     pub(crate) task: String,
     pub(crate) report: String,
+    pub(crate) worker_reasoning_effort: String,
+    pub(crate) worker_model: Option<String>,
 }
 
 impl ReportReady {
@@ -15,6 +17,16 @@ impl ReportReady {
         map.insert("lease_id".to_string(), Value::String(self.lease_id.clone()));
         map.insert("task".to_string(), Value::String(self.task.clone()));
         map.insert("report".to_string(), Value::String(self.report.clone()));
+        map.insert(
+            "worker_reasoning_effort".to_string(),
+            Value::String(self.worker_reasoning_effort.clone()),
+        );
+        if let Some(worker_model) = &self.worker_model {
+            map.insert(
+                "worker_model".to_string(),
+                Value::String(worker_model.clone()),
+            );
+        }
         map
     }
 }
@@ -41,6 +53,8 @@ pub(crate) struct ReadyTask {
     pub(crate) task: String,
     pub(crate) scope: Vec<String>,
     pub(crate) verify: String,
+    pub(crate) worker_reasoning_effort: String,
+    pub(crate) worker_model: Option<String>,
 }
 
 impl ReadyTask {
@@ -52,6 +66,16 @@ impl ReadyTask {
             Value::Array(self.scope.iter().cloned().map(Value::String).collect()),
         );
         map.insert("verify".to_string(), Value::String(self.verify.clone()));
+        map.insert(
+            "worker_reasoning_effort".to_string(),
+            Value::String(self.worker_reasoning_effort.clone()),
+        );
+        if let Some(worker_model) = &self.worker_model {
+            map.insert(
+                "worker_model".to_string(),
+                Value::String(worker_model.clone()),
+            );
+        }
         map
     }
 }
@@ -364,6 +388,8 @@ mod tests {
             owner: Value::String("worker:agent_123".to_string()),
             kind: "task".to_string(),
             agent_id: None,
+            worker_reasoning_effort: "medium".to_string(),
+            worker_model: None,
             mode: "single".to_string(),
             age: 0,
             stale: false,
@@ -375,6 +401,8 @@ mod tests {
             lease_id: "l_report".to_string(),
             task: "example/T001".to_string(),
             report: "reports/example/T001.md".to_string(),
+            worker_reasoning_effort: "medium".to_string(),
+            worker_model: None,
         }
     }
 
@@ -392,6 +420,8 @@ mod tests {
             task: "example/T001".to_string(),
             scope: vec!["src/feature/".to_string()],
             verify: "validator".to_string(),
+            worker_reasoning_effort: "medium".to_string(),
+            worker_model: None,
         }
     }
 

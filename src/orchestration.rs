@@ -13,7 +13,8 @@ use crate::gitstate::{
     changed_paths_value, git_status_data, stage_plan_for_lease, touched_for_lease,
 };
 use crate::model::{
-    validate_lease_id, ActiveLeaseRecordInput, LeaseId, LeaseMode, LeaseRecord, ReportFrontmatter,
+    validate_lease_id, ActiveLeaseRecordInput, LeaseId, LeaseMode, LeaseRecord, ReasoningEffort,
+    ReportFrontmatter,
 };
 use crate::paths::{
     atomic_write, buds_dir, ensure_runtime_dirs, leases_dir, packets_dir, path_to_string, relpath,
@@ -41,6 +42,8 @@ pub(crate) struct LeaseRequest {
     pub(crate) task_id: Option<String>,
     pub(crate) owner: String,
     pub(crate) agent_id: Option<String>,
+    pub(crate) worker_reasoning_effort: Option<String>,
+    pub(crate) worker_model: String,
     pub(crate) lease_id: Option<String>,
     pub(crate) serial: bool,
     pub(crate) allow_parallel: bool,
@@ -52,6 +55,8 @@ pub(crate) struct BudRequest {
     pub(crate) instructions: String,
     pub(crate) owner: Option<String>,
     pub(crate) agent_id: Option<String>,
+    pub(crate) worker_reasoning_effort: Option<String>,
+    pub(crate) worker_model: String,
     pub(crate) lease_id: Option<String>,
     pub(crate) serial: bool,
     pub(crate) allow_parallel: bool,
@@ -194,6 +199,11 @@ pub(crate) fn ready(root: &Path, request: &ReadyRequest) -> OrchResult<Map<Strin
                     insert(&mut item, "task", task_key(task));
                     insert(&mut item, "scope", string_values(task.scope()));
                     insert(&mut item, "verify", task.verification_mode());
+                    insert_worker_execution_metadata(
+                        &mut item,
+                        &task.worker_reasoning_effort(),
+                        optional_task_worker_model(task),
+                    );
                     Value::Object(item)
                 })
                 .collect(),
@@ -248,6 +258,12 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
             .detail("task", task_key(&task))
             .detail("status", task.status()));
     }
+    require_valid_task_worker_execution_metadata(&task)?;
+    let worker_reasoning_effort = resolve_worker_reasoning_effort_for_task(
+        &task,
+        request.worker_reasoning_effort.as_deref(),
+    )?;
+    let worker_model = resolve_worker_model(&request.worker_model, task.worker_model());
     let active = active_leases(root)?;
     for lease in &active {
         if lease.task_path() == relpath(&task.path, root) {
@@ -308,6 +324,8 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
             &reports_dir(root).join(format!("{}.md", lease_id.as_str())),
             root,
         ),
+        worker_reasoning_effort: worker_reasoning_effort.clone(),
+        worker_model: worker_model.clone(),
     });
     save_lease(root, &lease)?;
 
@@ -320,6 +338,11 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
         &mut payload,
         "report",
         lease.get("report_path").cloned().unwrap_or(Value::Null),
+    );
+    insert_worker_execution_metadata(
+        &mut payload,
+        &worker_reasoning_effort,
+        worker_model.as_deref(),
     );
     if let Some(agent_id) = request
         .agent_id
@@ -346,6 +369,9 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
             ErrorCode::ScopeRequired,
         ));
     }
+    let worker_reasoning_effort =
+        resolve_worker_reasoning_effort_value(request.worker_reasoning_effort.as_deref())?;
+    let worker_model = normalize_optional_string(&request.worker_model);
     let instructions = fs::read_to_string(&request.instructions)?;
     ensure_runtime_dirs(root)?;
 
@@ -424,6 +450,8 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
             .to_string(),
         baseline_changed: changed_paths_value(&git_state),
         report_path: relpath(&reports_dir(root).join(format!("{lease_id_text}.md")), root),
+        worker_reasoning_effort: worker_reasoning_effort.clone(),
+        worker_model: worker_model.clone(),
     });
     lease.set("kind", "bud");
     lease.set("title", request.title.clone());
@@ -445,6 +473,11 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
     {
         insert(&mut payload, "agent_id", agent_id);
     }
+    insert_worker_execution_metadata(
+        &mut payload,
+        &worker_reasoning_effort,
+        worker_model.as_deref(),
+    );
     insert(&mut payload, "scope", string_values(scope));
     insert(&mut payload, "packet", packet);
     insert(
@@ -501,6 +534,11 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
                 lease_id: lease.id().unwrap_or("").to_string(),
                 task: lease.get_str("task").unwrap_or("").to_string(),
                 report: relpath(&report, root),
+                worker_reasoning_effort: lease
+                    .worker_reasoning_effort()
+                    .unwrap_or(ReasoningEffort::Medium.as_str())
+                    .to_string(),
+                worker_model: lease.worker_model().map(str::to_string),
             });
         }
     }
@@ -524,6 +562,8 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
             task: task_key(task),
             scope: task.scope(),
             verify: task.verification_mode().to_string(),
+            worker_reasoning_effort: task.worker_reasoning_effort(),
+            worker_model: optional_task_worker_model(task).map(str::to_string),
         })
         .collect();
     let blocked = blocked
@@ -819,6 +859,13 @@ pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<Str
     insert(&mut payload, "lease_id", request.lease.clone());
     insert(&mut payload, "role", request.role.as_str());
     insert(&mut payload, "packet", packet);
+    insert_worker_execution_metadata(
+        &mut payload,
+        lease
+            .worker_reasoning_effort()
+            .unwrap_or(ReasoningEffort::Medium.as_str()),
+        lease.worker_model(),
+    );
     Ok(payload)
 }
 
@@ -895,6 +942,18 @@ fn render_task_packet(
             "- Owner: {}",
             packet_inline_code(lease.get_str("owner").unwrap_or(""))
         ),
+        format!(
+            "- Worker reasoning effort: {}",
+            packet_inline_code(
+                lease
+                    .worker_reasoning_effort()
+                    .unwrap_or(ReasoningEffort::Medium.as_str())
+            )
+        ),
+        lease
+            .worker_model()
+            .map(|model| format!("- Worker model: {}", packet_inline_code(model)))
+            .unwrap_or_default(),
         lease
             .agent_id()
             .map(|agent_id| format!("- Agent id: {}", packet_inline_code(agent_id)))
@@ -982,6 +1041,18 @@ fn render_bud_packet(
             "- Owner: {}",
             packet_inline_code(lease.get_str("owner").unwrap_or(""))
         ),
+        format!(
+            "- Worker reasoning effort: {}",
+            packet_inline_code(
+                lease
+                    .worker_reasoning_effort()
+                    .unwrap_or(ReasoningEffort::Medium.as_str())
+            )
+        ),
+        lease
+            .worker_model()
+            .map(|model| format!("- Worker model: {}", packet_inline_code(model)))
+            .unwrap_or_default(),
         agent_line,
         format!("- Scope: {}", packet_inline_code(&scope)),
         format!(
@@ -1194,6 +1265,13 @@ pub(crate) fn report_check(
     insert(&mut payload, "report", report_path.rel);
     insert(&mut payload, "status", report.status().as_str());
     insert(&mut payload, "next", report.status().next_action());
+    insert_worker_execution_metadata(
+        &mut payload,
+        lease
+            .worker_reasoning_effort()
+            .unwrap_or(ReasoningEffort::Medium.as_str()),
+        lease.worker_model(),
+    );
     Ok(payload)
 }
 
@@ -1246,6 +1324,12 @@ pub(crate) fn lint(root: &Path) -> OrchResult<Map<String, Value>> {
         }
         if !crate::model::VerificationMode::parse(task.verification_mode()).is_dispatchable() {
             errors.push(error_item(&key, "invalid verification_mode"));
+        }
+        if !task.worker_reasoning_effort_model().is_valid() {
+            errors.push(error_item(&key, "invalid worker_reasoning_effort"));
+        }
+        if !task.worker_model_is_valid() {
+            errors.push(error_item(&key, "invalid worker_model"));
         }
         for dep in task.depends() {
             if dep != "-" && task_by_ref(&tasks, &task.spec_id, &dep).is_none() {
@@ -1304,6 +1388,13 @@ fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value
     insert(&mut payload, "status", lease.status().as_str());
     insert(&mut payload, "task", lease.task_value());
     insert(&mut payload, "owner", lease.owner_value());
+    insert_worker_execution_metadata(
+        &mut payload,
+        lease
+            .worker_reasoning_effort()
+            .unwrap_or(ReasoningEffort::Medium.as_str()),
+        lease.worker_model(),
+    );
     if let Some(title) = lease.title() {
         insert(&mut payload, "title", title);
     }
@@ -1367,6 +1458,83 @@ fn ensure_agent_id_available(
         }
     }
     Ok(())
+}
+
+fn resolve_worker_reasoning_effort_for_task(
+    task: &crate::taskfile::Task,
+    requested: Option<&str>,
+) -> OrchResult<String> {
+    let effort = match requested.and_then(|raw| nonempty_trimmed(raw).map(str::to_string)) {
+        Some(raw) => ReasoningEffort::parse(&raw),
+        None => task.worker_reasoning_effort_model(),
+    };
+    require_valid_worker_reasoning_effort(effort)
+}
+
+fn require_valid_task_worker_execution_metadata(task: &crate::taskfile::Task) -> OrchResult<()> {
+    require_valid_worker_reasoning_effort(task.worker_reasoning_effort_model())?;
+    if task.worker_model_is_valid() {
+        return Ok(());
+    }
+    Err(
+        OrchError::coded("invalid worker_model", ErrorCode::InvalidWorkerModel)
+            .detail("task", task_key(task)),
+    )
+}
+
+fn resolve_worker_reasoning_effort_value(requested: Option<&str>) -> OrchResult<String> {
+    let effort = match requested.and_then(|raw| nonempty_trimmed(raw).map(str::to_string)) {
+        Some(raw) => ReasoningEffort::parse(&raw),
+        None => ReasoningEffort::Medium,
+    };
+    require_valid_worker_reasoning_effort(effort)
+}
+
+fn require_valid_worker_reasoning_effort(effort: ReasoningEffort) -> OrchResult<String> {
+    if effort.is_valid() {
+        return Ok(effort.as_str().to_string());
+    }
+    Err(OrchError::coded(
+        "invalid reasoning effort",
+        ErrorCode::InvalidReasoningEffort,
+    )
+    .detail("worker_reasoning_effort", effort.as_str()))
+}
+
+fn resolve_worker_model(requested: &str, task_model: &str) -> Option<String> {
+    normalize_optional_string(requested).or_else(|| normalize_optional_string(task_model))
+}
+
+fn normalize_optional_string(value: &str) -> Option<String> {
+    nonempty_trimmed(value).map(str::to_string)
+}
+
+fn nonempty_trimmed(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn optional_task_worker_model(task: &crate::taskfile::Task) -> Option<&str> {
+    nonempty_trimmed(task.worker_model())
+}
+
+fn insert_worker_execution_metadata(
+    map: &mut Map<String, Value>,
+    worker_reasoning_effort: &str,
+    worker_model: Option<&str>,
+) {
+    insert(
+        map,
+        "worker_reasoning_effort",
+        worker_reasoning_effort.to_string(),
+    );
+    if let Some(worker_model) = worker_model.and_then(nonempty_trimmed) {
+        insert(map, "worker_model", worker_model);
+    }
 }
 
 fn insert_non_empty(map: &mut Map<String, Value>, key: &str, value: Value) {

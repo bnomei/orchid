@@ -19,8 +19,8 @@ Think in this loop:
 Start by observing only the user-authorized scope:
 
 ```sh
-orchid next --spec SPEC_ID --explain
-orchid ready --spec SPEC_ID --explain
+orchid next --spec SPEC_ID
+orchid ready --spec SPEC_ID
 orchid status --spec SPEC_ID
 ```
 
@@ -30,7 +30,8 @@ stop and report. Do not broaden scope on your own.
 
 Phase guide:
 
-- `dispatch`: lease one ready task and create a worker packet.
+- `dispatch`: inspect `next`/`ready` worker metadata, spawn the correctly sized
+  worker, then lease one ready task and create the packet.
 - `wait`: poll `orchid status --spec SPEC_ID` with backoff; do not ask workers
   for routine progress.
 - `validate`: check the report, touched files, and task-specific evidence.
@@ -40,18 +41,29 @@ Phase guide:
 
 ## Command Flow
 
-Lease before dispatching:
+Inspect before spawning. `next`/`ready` surface the candidate task's
+`worker_reasoning_effort` and non-empty `worker_model`; use that to decide the
+worker settings before creating an agent. Their detailed ACKs are the default;
+use `--brief` only for compact machine polling.
+
+After spawning the worker with those settings, lease and create the packet:
 
 ```sh
 orchid lease SPEC_ID TASK_ID --owner worker:AGENT_ID --agent-id AGENT_ID --serial
 orchid packet --lease LEASE_ID --role worker
 ```
 
-For a scoped ephemeral delegation without durable spec files, create a bud and
-hand the returned packet path to the worker:
+For a scoped ephemeral delegation without durable spec files, choose the worker
+effort before spawning, then pass the same metadata to `bud`:
 
 ```sh
-orchid bud --title "SHORT TITLE" --scope PATH --instructions PROMPT.md --agent-id AGENT_ID --serial
+orchid bud \
+  --title "SHORT TITLE" \
+  --scope PATH \
+  --instructions PROMPT.md \
+  --worker-reasoning-effort medium \
+  --agent-id AGENT_ID \
+  --serial
 ```
 
 If the agent id becomes known after lease creation, attach it from the
@@ -65,10 +77,17 @@ orchid status --agent-id AGENT_ID
 Use `agent_id` only for discovery/recovery. Operational commands stay
 lease-based.
 
-Send spawned agents only the packet path and report path from Orchid's JSON
-output. Tell them they are not alone in the worktree and may only work or
-review. They must not stage files, commit, edit task state, close leases, or
-take over final handoff.
+Do not wait until packet handoff to discover worker effort. `next` and `ready`
+are the place to decide which agent to spawn; lease and packet ACKs repeat the
+metadata so you can validate the handoff. Spawned agents should receive only the
+packet path and report path from Orchid's JSON output, plus
+`worker_reasoning_effort` and non-empty `worker_model` when the ACK includes
+them. Default absent worker effort to `medium`; raise it before spawning when
+the task has architecture, security, migration, concurrency, or
+unclear-invariant risk, but do not lower explicit task or user-requested effort.
+Tell workers they are not alone in the worktree and may only work or review.
+They must not stage files, commit, edit task state, close leases, or take over
+final handoff.
 
 Default to `--serial` in a shared worktree. Use `--allow-parallel` only after
 checking active leases and confirming the scopes and likely behavior do not
@@ -115,7 +134,8 @@ orchid cleanup --completed
   leasing when they are unclear.
 - Do not hand-edit `.orchid` runtime files or task state during routine work.
 - Do not read generated packets during normal orchestration; packets are
-  worker/validator input, and ACKs carry the coordinator details.
+  worker/validator input, and ACKs carry the coordinator details, including
+  worker execution metadata.
 - Workers and validators may read packets, repo code, and reports, but they
   must not stage, commit, edit task state, close leases, or own final handoff.
 - Account for active leases before dispatching, staging, or cleaning up.

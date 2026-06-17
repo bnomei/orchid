@@ -10,7 +10,7 @@ use crate::core::{
     elapsed_seconds, now_iso, parse_duration, parse_iso_datetime, utc_now, ErrorCode, OrchError,
     OrchResult, DEFAULT_STALE_AFTER,
 };
-use crate::model::{validate_lease_id, CompactLease, LeaseId, LeaseRecord};
+use crate::model::{validate_lease_id, CompactLease, LeaseId, LeaseRecord, ReasoningEffort};
 use crate::paths::{
     atomic_write_json, buds_dir, leases_dir, locks_dir, orch_dir, packets_dir, path_to_string,
     relpath, repo_path, reports_dir, spec_research_root,
@@ -185,6 +185,11 @@ pub(crate) fn compact_lease(
         owner: lease.owner_value(),
         kind: lease.kind().as_str().to_string(),
         agent_id: lease.agent_id().map(str::to_string),
+        worker_reasoning_effort: lease
+            .worker_reasoning_effort()
+            .unwrap_or(ReasoningEffort::Medium.as_str())
+            .to_string(),
+        worker_model: lease.worker_model().map(str::to_string),
         mode: lease.mode(),
         age: elapsed_seconds(lease.heartbeat_or_started(), now),
         stale: lease_stale(lease, now, stale_after),

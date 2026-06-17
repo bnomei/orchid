@@ -205,6 +205,50 @@ impl VerificationMode {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum ReasoningEffort {
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Unknown(String),
+}
+
+impl ReasoningEffort {
+    pub(crate) fn parse(raw: &str) -> Self {
+        match raw {
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            "xhigh" => Self::XHigh,
+            _ => Self::Unknown(raw.to_string()),
+        }
+    }
+
+    pub(crate) fn from_value(value: Option<&Value>) -> Self {
+        match value {
+            None => Self::Medium,
+            Some(Value::String(raw)) if raw.is_empty() => Self::Unknown(raw.clone()),
+            Some(Value::String(raw)) => Self::parse(raw),
+            Some(other) => Self::Unknown(other.to_string()),
+        }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Unknown(raw) => raw,
+        }
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        !matches!(self, Self::Unknown(_))
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum LeaseStatus {
     Active,
     Completed,
@@ -296,6 +340,8 @@ pub(crate) struct ActiveLeaseRecordInput {
     pub(crate) base_head: String,
     pub(crate) baseline_changed: Value,
     pub(crate) report_path: String,
+    pub(crate) worker_reasoning_effort: String,
+    pub(crate) worker_model: Option<String>,
 }
 
 impl LeaseRecord {
@@ -322,6 +368,14 @@ impl LeaseRecord {
         insert(&mut data, "baseline_changed", input.baseline_changed);
         insert(&mut data, "packet_path", "");
         insert(&mut data, "report_path", input.report_path);
+        insert(
+            &mut data,
+            "worker_reasoning_effort",
+            input.worker_reasoning_effort,
+        );
+        if let Some(worker_model) = input.worker_model.filter(|value| !value.is_empty()) {
+            insert(&mut data, "worker_model", worker_model);
+        }
         Self { data }
     }
 
@@ -408,6 +462,16 @@ impl LeaseRecord {
         self.get_str("report_path").filter(|path| !path.is_empty())
     }
 
+    pub(crate) fn worker_reasoning_effort(&self) -> Option<&str> {
+        self.get_str("worker_reasoning_effort")
+            .filter(|value| !value.is_empty())
+    }
+
+    pub(crate) fn worker_model(&self) -> Option<&str> {
+        self.get_str("worker_model")
+            .filter(|value| !value.is_empty())
+    }
+
     pub(crate) fn heartbeat_or_started(&self) -> Option<&Value> {
         self.get("heartbeat_at").or_else(|| self.get("started_at"))
     }
@@ -435,6 +499,8 @@ pub(crate) struct CompactLease {
     pub(crate) owner: Value,
     pub(crate) kind: String,
     pub(crate) agent_id: Option<String>,
+    pub(crate) worker_reasoning_effort: String,
+    pub(crate) worker_model: Option<String>,
     pub(crate) mode: String,
     pub(crate) age: i64,
     pub(crate) stale: bool,
@@ -451,6 +517,14 @@ impl CompactLease {
         }
         if let Some(agent_id) = &self.agent_id {
             insert(&mut map, "agent_id", agent_id.clone());
+        }
+        insert(
+            &mut map,
+            "worker_reasoning_effort",
+            self.worker_reasoning_effort.clone(),
+        );
+        if let Some(worker_model) = &self.worker_model {
+            insert(&mut map, "worker_model", worker_model.clone());
         }
         insert(&mut map, "age", self.age);
         if self.mode != "single" {

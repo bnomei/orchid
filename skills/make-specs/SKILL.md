@@ -54,10 +54,16 @@ Use active numeric folders for dispatchable specs. Use `DRAFT-`, `TBD-`,
 7. Write `spec.toml` for policy Orchid should carry in packets, influenced by
    repo validation, review, and commit/signing conventions.
 8. Split work into one task file per isolated implementation slice.
-9. Give each task a narrow `scope`, explicit dependencies, DoD, and validation.
-10. Keep requirements, design, policy, and task `covers` fields aligned.
-11. Leave task status as `todo`; Orchid updates completion fields later.
-12. Run `orchid lint`, fix errors, and re-run until green.
+9. Give each task a narrow `scope`, explicit dependencies, DoD, validation, and
+   `worker_reasoning_effort`.
+10. Default normal implementation tasks to `worker_reasoning_effort = "medium"`;
+    use `"low"` only for mechanical low-risk edits, and `"high"` or `"xhigh"`
+    for architecture, data migrations, security, concurrency, unclear
+    invariants, or broad behavioral risk. Set `worker_model` only when a model
+    override is required; blank or omitted models are not emitted in ACKs.
+11. Keep requirements, design, policy, and task `covers` fields aligned.
+12. Leave task status as `todo`; Orchid updates completion fields later.
+13. Run `orchid lint`, fix errors, and re-run until green.
 
 ## Task Template
 
@@ -71,6 +77,8 @@ depends = []
 covers = ["R001"]
 verification_mode = "validator"
 verification_status = "pending"
+worker_reasoning_effort = "medium"
+worker_model = ""
 +++
 
 ## Context
@@ -92,6 +100,9 @@ The focused command or check for this task.
 - Prefer tracer-bullet slices and red-green validation loops for risky work.
 - Make scopes concrete enough for touched-file checks.
 - Use dependencies when one task must wait for another.
+- Choose `worker_reasoning_effort` deliberately; use medium as the normal
+  default and escalate only when task risk justifies it. Legacy task files may
+  omit the field; Orchid treats omission as `medium`.
 - Put durable facts in the spec, not in temporary research notes.
 - Do not ask workers to infer requirements from broad planning documents.
 - Do not mark tasks `done`; completion belongs to `orchid complete`.

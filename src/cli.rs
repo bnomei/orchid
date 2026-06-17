@@ -110,13 +110,20 @@ enum Command {
 }
 
 #[derive(Args)]
+#[command(group = clap::ArgGroup::new("detail").args(["explain", "brief"]).multiple(false))]
 struct ReadyArgs {
     #[arg(long, action = clap::ArgAction::Append, help = "Limit ready queue to a spec id; repeatable")]
     spec: Vec<String>,
     #[arg(long, help = "Select the first open active spec by numerical prefix")]
     all_open: bool,
-    #[arg(long, help = "Include blocked tasks and selection details")]
+    #[arg(
+        long,
+        hide = true,
+        help = "Include blocked tasks and selection details; default behavior"
+    )]
     explain: bool,
+    #[arg(long, help = "Omit blocked tasks and selection details")]
+    brief: bool,
 }
 
 #[derive(Args)]
@@ -145,6 +152,17 @@ struct LeaseArgs {
     owner: String,
     #[arg(long, help = "Discovery-only runtime agent id attached to this lease")]
     agent_id: Option<String>,
+    #[arg(
+        long,
+        help = "Override worker reasoning effort: low, medium, high, or xhigh"
+    )]
+    worker_reasoning_effort: Option<String>,
+    #[arg(
+        long,
+        default_value = "",
+        help = "Override worker model for this lease"
+    )]
+    worker_model: String,
     #[arg(long, help = "Override generated lease id for tests or recovery")]
     lease_id: Option<String>,
     #[arg(long, help = "Require no other active leases")]
@@ -169,6 +187,10 @@ struct BudArgs {
     owner: Option<String>,
     #[arg(long, help = "Discovery-only runtime agent id attached to this lease")]
     agent_id: Option<String>,
+    #[arg(long, help = "Worker reasoning effort: low, medium, high, or xhigh")]
+    worker_reasoning_effort: Option<String>,
+    #[arg(long, default_value = "", help = "Worker model override for this bud")]
+    worker_model: String,
     #[arg(long, help = "Override generated lease id for tests or recovery")]
     lease_id: Option<String>,
     #[arg(long, help = "Require no other active leases")]
@@ -206,6 +228,7 @@ struct CleanupArgs {
 }
 
 #[derive(Args)]
+#[command(group = clap::ArgGroup::new("detail").args(["explain", "brief"]).multiple(false))]
 struct NextArgs {
     #[arg(long, action = clap::ArgAction::Append, help = "Limit next action to a spec id; repeatable")]
     spec: Vec<String>,
@@ -213,8 +236,14 @@ struct NextArgs {
     all_open: bool,
     #[arg(long, default_value = DEFAULT_STALE_AFTER, help = "Minimum lease age for recover/stale decisions")]
     older_than: String,
-    #[arg(long, help = "Include recommended action, queues, and blockers")]
+    #[arg(
+        long,
+        hide = true,
+        help = "Include recommended action, queues, and blockers; default behavior"
+    )]
     explain: bool,
+    #[arg(long, help = "Omit secondary queues and blockers")]
+    brief: bool,
 }
 
 #[derive(Args)]
@@ -377,7 +406,7 @@ fn cmd_ready(root: &Path, args: &ReadyArgs) -> OrchResult<Map<String, Value>> {
         &orchestration::ReadyRequest {
             specs: args.spec.clone(),
             all_open: args.all_open,
-            explain: args.explain,
+            explain: args.explain || !args.brief,
         },
     )
 }
@@ -401,6 +430,8 @@ fn cmd_lease(root: &Path, args: &LeaseArgs) -> OrchResult<Map<String, Value>> {
             task_id: args.task_id.clone(),
             owner: args.owner.clone(),
             agent_id: args.agent_id.clone(),
+            worker_reasoning_effort: args.worker_reasoning_effort.clone(),
+            worker_model: args.worker_model.clone(),
             lease_id: args.lease_id.clone(),
             serial: args.serial,
             allow_parallel: args.allow_parallel,
@@ -417,6 +448,8 @@ fn cmd_bud(root: &Path, args: &BudArgs) -> OrchResult<Map<String, Value>> {
             instructions: args.instructions.clone(),
             owner: args.owner.clone(),
             agent_id: args.agent_id.clone(),
+            worker_reasoning_effort: args.worker_reasoning_effort.clone(),
+            worker_model: args.worker_model.clone(),
             lease_id: args.lease_id.clone(),
             serial: args.serial,
             allow_parallel: args.allow_parallel,
@@ -490,7 +523,7 @@ fn cmd_next(root: &Path, args: &NextArgs) -> OrchResult<Map<String, Value>> {
             specs: args.spec.clone(),
             all_open: args.all_open,
             older_than: args.older_than.clone(),
-            explain: args.explain,
+            explain: args.explain || !args.brief,
         },
     )
 }

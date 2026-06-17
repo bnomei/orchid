@@ -5,7 +5,8 @@
       "scope": [
         "src/feature/"
       ],
-      "verify": "validator"
+      "verify": "validator",
+      "worker_reasoning_effort": "medium"
     }
   ],
   "blocked": [

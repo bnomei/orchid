@@ -120,8 +120,9 @@ cargo build --release
 The skills call the same CLI shown below. You can also drive Orchid manually:
 
 ```sh
-orchid ready --spec example --explain
-orchid lease example T001 --owner worker:agent_123 --serial
+orchid ready --spec example
+orchid next --spec example
+orchid lease example T001 --owner worker:agent_123 --agent-id agent_123 --serial
 orchid packet --lease l_123 --role worker
 ```
 
@@ -132,35 +133,45 @@ one worker at a time.
 
 1. Write a spec under `specs/<spec-id>/`.
 2. Ask Orchid what phase the spec is in.
-3. Lease exactly one ready task.
-4. Generate a packet and hand that packet path to a worker.
-5. Check the worker report and touched files.
-6. Complete the lease after validation.
-7. Stage only the paths Orchid says belong to the lease.
-8. Close completed runtime files.
+3. Inspect the next ready task's worker metadata from Orchid's JSON ACK.
+4. Spawn the worker with that `worker_reasoning_effort` and optional model.
+5. Lease exactly one ready task to that worker and generate the packet.
+6. Validate the lease or packet ACK repeats the expected worker metadata.
+7. Check the worker report and touched files.
+8. Complete the lease after validation.
+9. Stage only the paths Orchid says belong to the lease.
+10. Close completed runtime files.
 
 Inspect the queue and choose the next action:
 
 ```sh
-orchid ready --spec example --explain
+orchid ready --spec example
 orchid next --spec example
 orchid status --spec example
 ```
 
 `next` reports a phase such as `dispatch`, `wait`, `validate`, `stage`,
-`cleanup`, `recover`, `blocked`, or `done`. With `--explain`, it also includes
-the relevant queue or runtime detail. Use `status` for a cheap count of task
-state and active leases.
+`cleanup`, `recover`, `blocked`, or `done`. By default, `ready` and `next`
+include dispatch detail, blocked tasks, and the candidate task's
+`worker_reasoning_effort` plus non-empty `worker_model`. This is the decision
+point for spawning: pick the worker effort from `next` or `ready` before
+creating the agent. Use `--brief` only when a caller needs the compact legacy
+payload. Use `status` for a cheap count of task state and active leases.
 
-Lease one task before handing it to an agent, then generate the packet:
+After spawning the worker with the effort/model from `next` or `ready`, lease
+the task to that agent and generate the packet:
 
 ```sh
-orchid lease example T001 --owner worker:agent_123 --agent-id agent_123
+orchid lease example T001 --owner worker:agent_123 --agent-id agent_123 --serial
 orchid packet --lease l_123 --role worker
 ```
 
-The lease records owner, scope, Git baseline, report path, and heartbeat data
-under `.orchid/`.
+The lease records owner, scope, worker execution metadata, Git baseline, report
+path, and heartbeat data under `.orchid/`. The lease and packet ACKs repeat
+`worker_reasoning_effort` and non-empty `worker_model` so the coordinator can
+validate that the spawned worker matches the task. If the mayor raises effort
+for risk, do it before spawning; do not lower explicit task or user-requested
+effort.
 
 For scoped ephemeral work that should keep Orchid's lease, scope, packet, Git,
 and report rails without creating durable spec files, create a bud:
@@ -171,15 +182,18 @@ orchid bud \
   --scope src/research \
   --scope src/config.rs \
   --instructions /tmp/bud.md \
+  --worker-reasoning-effort medium \
   --agent-id agent_123
 ```
 
 `bud` writes only runtime files under `.orchid/`: a lease, instruction snapshot,
-and worker packet. It returns JSON with the `lease_id`, `packet`, and `report`
-paths. It does not create `specs/` files and does not pre-create the report
-file. Point the worker at the packet path; the worker reads the packet and
-writes the report. The coordinator still owns `report-check`, `git-touched`,
-validation, `complete`, and `close`.
+and worker packet. It returns JSON with the `lease_id`, `packet`, `report`,
+`worker_reasoning_effort`, and non-empty `worker_model`. It does not create
+`specs/` files and does not pre-create the report file. For buds, choose the
+worker effort before spawning and pass the same value to `bud`; its ACK echoes
+that metadata for validation. The worker reads the packet and writes the report.
+The coordinator still owns `report-check`, `git-touched`, validation,
+`complete`, and `close`.
 
 If the orchestrator only learns the runtime agent id after creating a lease,
 attach it later:
@@ -266,6 +280,8 @@ depends = []
 covers = ["R001"]
 verification_mode = "validator"
 verification_status = "pending"
+worker_reasoning_effort = "medium"
+worker_model = ""
 +++
 
 ## Context
@@ -283,15 +299,24 @@ Name the focused command or check for this slice.
 
 `scope` is the safety boundary Orchid uses for overlap checks, touched-file
 attribution, and staging plans. `verification_mode` must be `mayor`,
-`required`, or `validator`.
+`required`, or `validator`. `worker_reasoning_effort` must be `low`, `medium`,
+`high`, or `xhigh`; omitted legacy values default to `medium`. Omit or leave
+`worker_model` blank unless a task needs a specific model override; only
+non-empty values are snapshotted into leases and emitted in ACKs.
 
 ## Agent Contract
 
-The packet generated by `orchid packet` contains the lease details, task file,
-requirements, design, and a report template. Workers should edit only inside
-the task scope, run focused validation, and write the report path returned by
-the lease or packet command. Workers and reviewers should not stage files,
-commit, edit task state, close leases, or take over final handoff.
+The packet generated by `orchid packet` contains the lease details, worker
+execution metadata, task file, requirements, design, and a report template.
+Workers should edit only inside the task scope, run focused validation, and
+write the report path returned by the lease or packet command. Workers and
+reviewers should not stage files, commit, edit task state, close leases, or
+take over final handoff.
+
+Coordinators should follow Orchid's JSON ACKs rather than reading task files or
+generated packets during orchestration. ACKs surface `worker_reasoning_effort`
+and non-empty `worker_model` so the coordinator can choose the worker spawn
+settings directly from trusted lease metadata.
 
 Reports use TOML frontmatter:
 

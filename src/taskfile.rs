@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Number, Value};
 
 use crate::core::{string_list, value_to_string, OrchError, OrchResult};
-use crate::model::{TaskId, TaskStatus};
+use crate::model::{ReasoningEffort, TaskId, TaskStatus};
 use crate::paths::{atomic_write, path_to_string, read_text, repo_path};
 
 const FRONTMATTER: &str = "+++";
@@ -17,6 +17,8 @@ const TASK_FIELD_ORDER: &[&str] = &[
     "covers",
     "verification_mode",
     "verification_status",
+    "worker_reasoning_effort",
+    "worker_model",
     "test_strategy",
     "slice",
     "reuse_targets",
@@ -92,6 +94,27 @@ impl TaskFrontmatter {
             .and_then(Value::as_str)
             .unwrap_or("")
     }
+
+    pub(crate) fn worker_reasoning_effort_model(&self) -> ReasoningEffort {
+        ReasoningEffort::from_value(self.raw.get("worker_reasoning_effort"))
+    }
+
+    pub(crate) fn worker_reasoning_effort(&self) -> String {
+        self.worker_reasoning_effort_model().as_str().to_string()
+    }
+
+    pub(crate) fn worker_model(&self) -> &str {
+        self.raw
+            .get("worker_model")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    }
+
+    pub(crate) fn worker_model_is_valid(&self) -> bool {
+        self.raw
+            .get("worker_model")
+            .is_none_or(|value| value.is_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -135,6 +158,22 @@ impl Task {
 
     pub(crate) fn verification_mode(&self) -> &str {
         self.frontmatter.verification_mode()
+    }
+
+    pub(crate) fn worker_reasoning_effort_model(&self) -> ReasoningEffort {
+        self.frontmatter.worker_reasoning_effort_model()
+    }
+
+    pub(crate) fn worker_reasoning_effort(&self) -> String {
+        self.frontmatter.worker_reasoning_effort()
+    }
+
+    pub(crate) fn worker_model(&self) -> &str {
+        self.frontmatter.worker_model()
+    }
+
+    pub(crate) fn worker_model_is_valid(&self) -> bool {
+        self.frontmatter.worker_model_is_valid()
     }
 }
 

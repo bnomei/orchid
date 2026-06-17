@@ -380,6 +380,10 @@ pub(crate) fn ready_tasks(
             reason = Some(format!("status:{}", task.status()));
         } else if !VerificationMode::parse(task.verification_mode()).is_dispatchable() {
             reason = Some("invalid verification_mode".to_string());
+        } else if !task.worker_reasoning_effort_model().is_valid() {
+            reason = Some("invalid worker_reasoning_effort".to_string());
+        } else if !task.worker_model_is_valid() {
+            reason = Some("invalid worker_model".to_string());
         } else {
             for dep in task.depends() {
                 match task_by_ref(&tasks, &task.spec_id, &dep) {
