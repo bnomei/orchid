@@ -2116,6 +2116,235 @@ fn git_touched_and_stage_plan_split_scope_and_baseline() {
 }
 
 #[test]
+fn git_status_exposes_porcelain_v2_status_records() {
+    let repo = Repo::new();
+    fs::write(repo.root.join("src/feature/mixed.txt"), "base\n").unwrap();
+    fs::write(repo.root.join("src/feature/rename-old.txt"), "rename\n").unwrap();
+    fs::write(repo.root.join("src/feature/delete.txt"), "delete\n").unwrap();
+    repo.init_git();
+
+    fs::write(repo.root.join("src/feature/mixed.txt"), "staged\n").unwrap();
+    git(&repo.root, &["add", "src/feature/mixed.txt"]);
+    fs::write(repo.root.join("src/feature/mixed.txt"), "unstaged\n").unwrap();
+    git(
+        &repo.root,
+        &[
+            "mv",
+            "src/feature/rename-old.txt",
+            "src/feature/rename-new.txt",
+        ],
+    );
+    fs::remove_file(repo.root.join("src/feature/delete.txt")).unwrap();
+    git(&repo.root, &["add", "src/feature/delete.txt"]);
+    fs::write(repo.root.join("src/feature/untracked.txt"), "new\n").unwrap();
+
+    let payload = repo.run(&["git-status"]);
+    let records = payload["records"].as_array().expect("status records");
+    let by_path = |path: &str| {
+        records
+            .iter()
+            .find(|record| record["path"] == path)
+            .unwrap_or_else(|| panic!("missing record for {path}"))
+    };
+
+    let mixed = by_path("src/feature/mixed.txt");
+    assert_eq!(mixed["kind"], "modified");
+    assert_eq!(mixed["index"], "M");
+    assert_eq!(mixed["worktree"], "M");
+    assert_eq!(mixed["staged"], true);
+    assert_eq!(mixed["unstaged"], true);
+
+    let renamed = by_path("src/feature/rename-new.txt");
+    assert_eq!(renamed["kind"], "renamed");
+    assert_eq!(renamed["orig_path"], "src/feature/rename-old.txt");
+    assert_eq!(
+        renamed["paths"],
+        serde_json::json!(["src/feature/rename-old.txt", "src/feature/rename-new.txt"])
+    );
+
+    let deleted = by_path("src/feature/delete.txt");
+    assert_eq!(deleted["kind"], "deleted");
+    assert_eq!(deleted["index"], "D");
+    assert_eq!(deleted["staged"], true);
+
+    let untracked = by_path("src/feature/untracked.txt");
+    assert_eq!(untracked["kind"], "untracked");
+    assert_eq!(untracked["untracked"], true);
+    assert_eq!(
+        payload["changed"]["untracked"],
+        serde_json::json!(["src/feature/untracked.txt"])
+    );
+}
+
+#[test]
+fn git_touched_and_stage_plan_use_status_records_for_safe_staging() {
+    let repo = Repo::new();
+    fs::write(repo.root.join("src/feature/mixed.txt"), "base\n").unwrap();
+    fs::write(repo.root.join("src/feature/rename-old.txt"), "rename\n").unwrap();
+    fs::write(repo.root.join("src/feature/delete.txt"), "delete\n").unwrap();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_records",
+    ]);
+
+    fs::write(repo.root.join("src/feature/mixed.txt"), "staged\n").unwrap();
+    git(&repo.root, &["add", "src/feature/mixed.txt"]);
+    fs::write(repo.root.join("src/feature/mixed.txt"), "unstaged\n").unwrap();
+    git(
+        &repo.root,
+        &[
+            "mv",
+            "src/feature/rename-old.txt",
+            "src/feature/rename-new.txt",
+        ],
+    );
+    fs::remove_file(repo.root.join("src/feature/delete.txt")).unwrap();
+    git(&repo.root, &["add", "src/feature/delete.txt"]);
+    fs::write(repo.root.join("src/feature/untracked.txt"), "new\n").unwrap();
+
+    let touched = repo.run(&["git-touched", "--lease", "l_records"]);
+    assert_eq!(
+        touched["stage"],
+        serde_json::json!([
+            "src/feature/delete.txt",
+            "src/feature/mixed.txt",
+            "src/feature/rename-new.txt",
+            "src/feature/rename-old.txt",
+            "src/feature/untracked.txt"
+        ])
+    );
+    let stage_records = touched["stage_records"].as_array().expect("stage records");
+    assert_eq!(stage_records.len(), 4);
+    assert!(stage_records
+        .iter()
+        .any(|record| record["kind"] == "renamed"
+            && record["orig_path"] == "src/feature/rename-old.txt"));
+    assert_eq!(touched.get("safe_to_stage"), None);
+
+    let plan = repo.run(&["git-stage-plan", "--lease", "l_records"]);
+    assert_eq!(
+        plan["pathspecs"],
+        serde_json::json!([
+            ":(literal)src/feature/delete.txt",
+            ":(literal)src/feature/mixed.txt",
+            ":(literal)src/feature/rename-new.txt",
+            ":(literal)src/feature/rename-old.txt",
+            ":(literal)src/feature/untracked.txt"
+        ])
+    );
+    assert_eq!(plan["records"].as_array().unwrap().len(), 4);
+}
+
+#[test]
+fn git_touched_blocks_cross_scope_renames() {
+    let repo = Repo::new();
+    fs::write(repo.root.join("src/other/move.txt"), "move\n").unwrap();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_cross_scope",
+    ]);
+
+    git(
+        &repo.root,
+        &["mv", "src/other/move.txt", "src/feature/move.txt"],
+    );
+
+    let touched = repo.run(&["git-touched", "--lease", "l_cross_scope"]);
+    assert_eq!(touched["safe_to_stage"], false);
+    assert_eq!(
+        touched["blocked_by"]["out_of_scope"],
+        serde_json::json!(["src/other/move.txt"])
+    );
+    assert!(touched.get("stage").is_none());
+    assert_eq!(
+        touched["blocked_by_records"]["out_of_scope"][0]["kind"],
+        "renamed"
+    );
+
+    let plan = repo.run(&["git-stage-plan", "--lease", "l_cross_scope"]);
+    assert_eq!(plan["safe_to_stage"], false);
+    assert_eq!(
+        plan["excluded"]["out_of_scope"],
+        serde_json::json!(["src/other/move.txt"])
+    );
+    assert!(plan.get("pathspecs").is_none());
+    assert_eq!(
+        plan["excluded_records"]["out_of_scope"][0]["orig_path"],
+        "src/other/move.txt"
+    );
+}
+
+#[test]
+fn git_status_forces_untracked_files_and_rename_detection() {
+    let repo = Repo::new();
+    fs::write(repo.root.join("src/feature/rename-old.txt"), "rename\n").unwrap();
+    repo.init_git();
+    git(&repo.root, &["config", "status.showUntrackedFiles", "no"]);
+    git(&repo.root, &["config", "status.renames", "false"]);
+
+    git(
+        &repo.root,
+        &[
+            "mv",
+            "src/feature/rename-old.txt",
+            "src/feature/rename-new.txt",
+        ],
+    );
+    fs::create_dir_all(repo.root.join("src/feature/newdir")).unwrap();
+    fs::write(repo.root.join("src/feature/newdir/untracked.txt"), "new\n").unwrap();
+
+    let payload = repo.run(&["git-status"]);
+    let records = payload["records"].as_array().expect("status records");
+    assert!(records.iter().any(|record| record["kind"] == "renamed"
+        && record["path"] == "src/feature/rename-new.txt"
+        && record["orig_path"] == "src/feature/rename-old.txt"));
+    assert!(records.iter().any(|record| record["kind"] == "untracked"
+        && record["path"] == "src/feature/newdir/untracked.txt"));
+}
+
+#[test]
+fn git_touched_stages_untracked_files_inside_new_directories() {
+    let repo = Repo::new();
+    repo.init_git();
+    git(&repo.root, &["config", "status.showUntrackedFiles", "no"]);
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_untracked_dir",
+    ]);
+
+    fs::create_dir_all(repo.root.join("src/feature/newdir")).unwrap();
+    fs::write(repo.root.join("src/feature/newdir/untracked.txt"), "new\n").unwrap();
+
+    let plan = repo.run(&["git-stage-plan", "--lease", "l_untracked_dir"]);
+    assert_eq!(
+        plan["pathspecs"],
+        serde_json::json!([":(literal)src/feature/newdir/untracked.txt"])
+    );
+    assert_eq!(plan["records"][0]["kind"], "untracked");
+    assert_eq!(
+        plan["records"][0]["path"],
+        "src/feature/newdir/untracked.txt"
+    );
+}
+
+#[test]
 #[cfg(unix)]
 fn git_stage_plan_literalizes_magic_pathspec_filenames() {
     let repo = Repo::new();

@@ -438,7 +438,9 @@ mod tests {
             task: "example/T001".to_string(),
             safe_to_stage,
             pathspecs: pathspecs.into_iter().map(str::to_string).collect(),
+            records: Vec::new(),
             excluded: Map::new(),
+            excluded_records: Map::new(),
         }
     }
 

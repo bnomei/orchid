@@ -339,6 +339,7 @@ pub(crate) struct ActiveLeaseRecordInput {
     pub(crate) started_at: String,
     pub(crate) base_head: String,
     pub(crate) baseline_changed: Value,
+    pub(crate) baseline_status: Value,
     pub(crate) report_path: String,
     pub(crate) worker_reasoning_effort: String,
     pub(crate) worker_model: Option<String>,
@@ -366,6 +367,7 @@ impl LeaseRecord {
         insert(&mut data, "heartbeat_at", input.started_at);
         insert(&mut data, "base_head", input.base_head);
         insert(&mut data, "baseline_changed", input.baseline_changed);
+        insert(&mut data, "baseline_status", input.baseline_status);
         insert(&mut data, "packet_path", "");
         insert(&mut data, "report_path", input.report_path);
         insert(
@@ -543,7 +545,9 @@ pub(crate) struct StagePlan {
     pub(crate) task: String,
     pub(crate) safe_to_stage: bool,
     pub(crate) pathspecs: Vec<String>,
+    pub(crate) records: Vec<Value>,
     pub(crate) excluded: Map<String, Value>,
+    pub(crate) excluded_records: Map<String, Value>,
 }
 
 impl StagePlan {
@@ -560,8 +564,17 @@ impl StagePlan {
                 Value::Array(self.pathspecs.iter().cloned().map(Value::String).collect()),
             );
         }
+        if !self.records.is_empty() {
+            map.insert("records".to_string(), Value::Array(self.records.clone()));
+        }
         if !self.excluded.is_empty() {
             map.insert("excluded".to_string(), Value::Object(self.excluded.clone()));
+        }
+        if !self.excluded_records.is_empty() {
+            map.insert(
+                "excluded_records".to_string(),
+                Value::Object(self.excluded_records.clone()),
+            );
         }
         map
     }
