@@ -515,6 +515,9 @@ fn bare_goal_evaluates_ready_report_and_records_keep_decision() {
         "printf '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"cycle:%s base:%s\",\"sample_count\":12}\\n' \"$ORCHID_GOAL_CYCLE\" \"$ORCHID_GOAL_BASELINE_VALUE\"",
         "10",
     );
+    let baseline_commit = git_stdout(&repo.root, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
     fs::write(repo.root.join("candidate.txt"), "candidate\n").unwrap();
     write_goal_report(
         &repo,
@@ -539,6 +542,9 @@ fn bare_goal_evaluates_ready_report_and_records_keep_decision() {
         git_stdout(&repo.root, &["log", "-1", "--pretty=%s"]).trim(),
         "goal(eval-goal): keep C001"
     );
+    let keep_commit = git_stdout(&repo.root, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
     assert_eq!(
         git_stdout(&repo.root, &["show", "--pretty=", "--name-only", "HEAD"]).trim(),
         "candidate.txt"
@@ -552,6 +558,16 @@ fn bare_goal_evaluates_ready_report_and_records_keep_decision() {
     let results = fs::read_to_string(goal_root.join("results.jsonl")).unwrap();
     assert!(results.contains("\"decision\":\"keep\""));
     assert!(results.contains("\"next_hypothesis\":\"precompute static rank weights\""));
+    let result: Value = serde_json::from_str(results.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        result["baseline_commit"].as_str(),
+        Some(baseline_commit.as_str())
+    );
+    assert_eq!(
+        result["candidate_commit"].as_str(),
+        Some(keep_commit.as_str())
+    );
+    assert_ne!(baseline_commit, keep_commit);
 }
 
 #[test]

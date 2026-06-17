@@ -702,10 +702,14 @@ fn evaluate_cycle_report(
     if report.status == GoalReportStatus::Blocked {
         next.status = GoalStatus::Blocked;
         next.budget_exhausted_reason = Some("report blocked".to_string());
+        let candidate_commit = gitstate::head_commit(root)?;
         append_cycle_result(
             root,
             contract,
-            &next,
+            &next.cycle,
+            next.baseline_commit.as_deref(),
+            candidate_commit.as_deref(),
+            &next.next_hypothesis,
             "blocked",
             None,
             Some("report blocked"),
@@ -721,10 +725,14 @@ fn evaluate_cycle_report(
             "protected surface changed: {}",
             protected_changes.join(", ")
         ));
+        let candidate_commit = gitstate::head_commit(root)?;
         append_cycle_result(
             root,
             contract,
-            &next,
+            &next.cycle,
+            next.baseline_commit.as_deref(),
+            candidate_commit.as_deref(),
+            &next.next_hypothesis,
             "blocked",
             None,
             next.budget_exhausted_reason.as_deref(),
@@ -750,16 +758,39 @@ fn evaluate_cycle_report(
         EvaluatorRecommendation::Done => GoalStatus::Done,
     };
     next.updated_at = now_iso();
-    append_cycle_result(
-        root,
-        contract,
-        &next,
-        recommendation_label(recommendation),
-        Some(&evaluator),
-        Some(&evaluator.reason),
-    )?;
+    let result_cycle = next.cycle.clone();
+    let result_baseline_commit = next.baseline_commit.clone();
+    let result_next_hypothesis = next.next_hypothesis.clone();
+    let result_reason = evaluator.reason.clone();
 
-    close_cycle(root, contract, &mut next, &evaluator)?;
+    if recommendation == EvaluatorRecommendation::Keep {
+        close_cycle(root, contract, &mut next, &evaluator)?;
+        append_cycle_result(
+            root,
+            contract,
+            &result_cycle,
+            result_baseline_commit.as_deref(),
+            next.best_commit.as_deref(),
+            &result_next_hypothesis,
+            recommendation_label(recommendation),
+            Some(&evaluator),
+            Some(&result_reason),
+        )?;
+    } else {
+        let candidate_commit = gitstate::head_commit(root)?;
+        append_cycle_result(
+            root,
+            contract,
+            &result_cycle,
+            result_baseline_commit.as_deref(),
+            candidate_commit.as_deref(),
+            &result_next_hypothesis,
+            recommendation_label(recommendation),
+            Some(&evaluator),
+            Some(&result_reason),
+        )?;
+        close_cycle(root, contract, &mut next, &evaluator)?;
+    }
 
     let budget = next.budget_decision(contract, crate::core::utc_now())?;
     if budget.exhausted && next.status != GoalStatus::Blocked {
@@ -883,31 +914,32 @@ fn discard_cycle(
 fn append_cycle_result(
     root: &Path,
     contract: &GoalContract,
-    state: &GoalState,
+    cycle: &str,
+    baseline_commit: Option<&str>,
+    candidate_commit: Option<&str>,
+    next_hypothesis: &str,
     decision: &str,
     evaluator: Option<&EvaluatorResult>,
     reason: Option<&str>,
 ) -> OrchResult<()> {
     let mut row = Map::new();
-    row.insert("cycle".to_string(), Value::String(state.cycle.clone()));
+    row.insert("cycle".to_string(), Value::String(cycle.to_string()));
     row.insert("decision".to_string(), Value::String(decision.to_string()));
     row.insert(
         "baseline_commit".to_string(),
-        state
-            .baseline_commit
-            .as_ref()
-            .map(|value| Value::String(value.clone()))
+        baseline_commit
+            .map(|value| Value::String(value.to_string()))
             .unwrap_or(Value::Null),
     );
     row.insert(
         "candidate_commit".to_string(),
-        gitstate::head_commit(root)?
-            .map(Value::String)
+        candidate_commit
+            .map(|value| Value::String(value.to_string()))
             .unwrap_or(Value::Null),
     );
     row.insert(
         "next_hypothesis".to_string(),
-        Value::String(state.next_hypothesis.clone()),
+        Value::String(next_hypothesis.to_string()),
     );
     if let Some(reason) = reason {
         row.insert("reason".to_string(), Value::String(reason.to_string()));
