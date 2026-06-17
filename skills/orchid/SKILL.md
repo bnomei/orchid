@@ -1,14 +1,16 @@
 ---
 name: orchid
-description: Coordinates scoped agent execution through the orchid CLI. Use when a repository has specs/SPEC_ID/tasks/*.md files or needs a scoped bud delegation, and the user asks to implement, dispatch, validate, recover, complete, stage, commit/review, or clean up Orchid leases.
+description: Coordinates Orchid spec leases, bud work, and branch-local goal cycles. Use for dispatch, validation, staging, cleanup, or orchid goal runs.
 ---
 
 # Orchid
 
 Use `orchid` as the control plane from the repository root. Orchid owns leases,
-packets, reports, touched-file attribution, staging plans, and `.orchid`
-runtime state. Follow JSON ACKs from the CLI instead of parsing generated
-Markdown or Git porcelain.
+packets, reports, touched-file attribution, staging plans, branch-local goal
+state, and `.orchid` runtime state. For spec and bud orchestration, follow JSON
+ACKs from the CLI instead of parsing generated Markdown or Git porcelain. For
+goal loops, follow the Markdown prompt printed by `orchid goal`; that command is
+Markdown-first by design.
 
 ## Mayor Loop
 
@@ -127,6 +129,58 @@ orchid close --lease LEASE_ID
 orchid cleanup --completed
 ```
 
+## Goal Loop
+
+Use `orchid goal` for one measurable, branch-local improvement target where a
+repeatable evaluator decides whether to keep, discard, block, or finish each
+cycle. Do not model this as a spec lease or legacy `loops/<id>` artifact unless
+the user explicitly asks for that shape.
+
+Initialize from the repository root with a metric, direction, minimum delta,
+budget, and first hypothesis:
+
+```sh
+orchid goal init \
+  --goal "SHORT GOAL" \
+  --metric METRIC_NAME \
+  --direction lower-is-better \
+  --min-delta 5 \
+  --hypothesis "FIRST HYPOTHESIS" \
+  --max-iterations 10 \
+  --max-duration 10h
+```
+
+Use `--evaluator` when the repo does not use the default `just goal-eval`. The
+evaluator must print one JSON object with `status`, `recommendation`, `metric`,
+`baseline`, `candidate`, `delta`, and `reason`. Use repeatable
+`--protected-surface PATH` for evaluator, fixture, or policy files that should
+block automatic keep/discard if changed. Use repeatable `--scope PATH` for
+advisory work surfaces.
+
+Run `orchid goal` to advance the loop. If it prints `# Goal Setup`, fix the
+evaluator and run `orchid goal` again. If it prints `# Goal Ready` or
+`# Goal Running`, implement one focused attempt inside the stated scope, then
+write the requested report under `.orchid/goals/<goal-id>/reports/C###.md`:
+
+```md
++++
+cycle = "C001"
+status = "ready_for_evaluation"
+next_hypothesis = "next idea to try"
++++
+
+## Summary
+
+What changed and what evidence was collected.
+```
+
+Use `status = "blocked"` when the attempt cannot be evaluated safely. After the
+report exists, run `orchid goal` again. Orchid runs the evaluator, appends
+measurement/result traces, commits kept candidates as
+`goal(<goal-id>): keep <cycle>`, or discards failed candidates by restoring the
+baseline while preserving `.orchid/`. Use `orchid goal status` for read-only
+state and `orchid goal finish` to stop without creating a pull request.
+
 ## Guardrails
 
 - Stay inside the scope the user authorized.
@@ -138,6 +192,8 @@ orchid cleanup --completed
   worker execution metadata.
 - Workers and validators may read packets, repo code, and reports, but they
   must not stage, commit, edit task state, close leases, or own final handoff.
+- Goal attempts may be implemented directly by the coordinator or delegated as
+  scoped work, but only `orchid goal` owns the keep/discard/done/block decision.
 - Account for active leases before dispatching, staging, or cleaning up.
 - Inactive spec folders are not dispatchable: `DRAFT-*`, `TBD-*`, `MANUAL-*`,
   `DONE-*`, or exact `DRAFT`, `TBD`, `MANUAL`, `DONE`.

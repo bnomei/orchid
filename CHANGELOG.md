@@ -29,6 +29,8 @@ All notable changes to this project will be documented in this file.
   effort/model before spawning subagents.
 - Updated bundled `make-specs` and `orchid` skills to author, validate, and use
   worker execution metadata from ACKs.
+- Updated bundled skills to route measurable hypothesis work through native
+  `orchid goal` cycles instead of spec or legacy loop scaffolding.
 - Switched lease touched/stage planning to structured porcelain v2 status data,
   forcing untracked-file and rename reporting for config-independent staging
   decisions.

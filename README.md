@@ -56,7 +56,7 @@ Most users should interact with Orchid through the included skills:
 - `skills/make-specs`: turns a request into `requirements.md`, `design.md`,
   `spec.toml`, and scoped `tasks/T###.md` files.
 - `skills/orchid`: runs the Orchid loop: observe, lease, dispatch, validate,
-  complete, stage, commit/review, and clean up.
+  complete, stage, commit/review, clean up, and branch-local goal cycles.
 
 Install or copy them into your skill setup, then adjust them to match
 your own agent preferences, validation rules, and repository conventions. Once

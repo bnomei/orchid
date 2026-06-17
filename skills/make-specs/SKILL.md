@@ -1,6 +1,6 @@
 ---
 name: make-specs
-description: Creates Orchid task-file specs from stable feature requests. Use when the user asks to plan Orchid work, create or update specs under specs/, write requirements.md/design.md/spec.toml/tasks/T###.md, or prepare dispatchable agent tasks for the orchid CLI.
+description: Creates Orchid specs with requirements, design, spec.toml, and scoped tasks. Use for stable work that should be planned before dispatch.
 ---
 
 # Make Specs
@@ -17,6 +17,10 @@ criteria.
 Do not create a dispatchable numeric spec for exploratory work, ambiguous
 scope, or missing success criteria. Use discovery or a `DRAFT-SLUG` spec until
 the task set is ready to lease.
+
+Do not create a spec just to host a measurable improvement loop. Use the Orchid
+goal loop instead when a named evaluator, metric, direction, minimum delta,
+budget, and keep/discard rule should govern repeated hypothesis cycles.
 
 Keep the human in the loop. Before freezing non-trivial tasks, clarify the
 user's intent, success criteria, desired granularity, review expectations, and
