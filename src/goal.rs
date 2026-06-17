@@ -716,13 +716,15 @@ fn evaluate_cycle_report(
         append_cycle_result(
             root,
             contract,
-            &next.cycle,
-            next.baseline_commit.as_deref(),
-            candidate_commit.as_deref(),
-            &next.next_hypothesis,
-            "blocked",
-            None,
-            Some("report blocked"),
+            CycleResultTrace {
+                cycle: &next.cycle,
+                baseline_commit: next.baseline_commit.as_deref(),
+                candidate_commit: candidate_commit.as_deref(),
+                next_hypothesis: &next.next_hypothesis,
+                decision: "blocked",
+                evaluator: None,
+                reason: Some("report blocked"),
+            },
         )?;
         next.write(root, &contract.goal_id)?;
         return Ok(next);
@@ -739,13 +741,15 @@ fn evaluate_cycle_report(
         append_cycle_result(
             root,
             contract,
-            &next.cycle,
-            next.baseline_commit.as_deref(),
-            candidate_commit.as_deref(),
-            &next.next_hypothesis,
-            "blocked",
-            None,
-            next.budget_exhausted_reason.as_deref(),
+            CycleResultTrace {
+                cycle: &next.cycle,
+                baseline_commit: next.baseline_commit.as_deref(),
+                candidate_commit: candidate_commit.as_deref(),
+                next_hypothesis: &next.next_hypothesis,
+                decision: "blocked",
+                evaluator: None,
+                reason: next.budget_exhausted_reason.as_deref(),
+            },
         )?;
         next.write(root, &contract.goal_id)?;
         return Ok(next);
@@ -778,26 +782,30 @@ fn evaluate_cycle_report(
         append_cycle_result(
             root,
             contract,
-            &result_cycle,
-            result_baseline_commit.as_deref(),
-            next.best_commit.as_deref(),
-            &result_next_hypothesis,
-            recommendation_label(recommendation),
-            Some(&evaluator),
-            Some(&result_reason),
+            CycleResultTrace {
+                cycle: &result_cycle,
+                baseline_commit: result_baseline_commit.as_deref(),
+                candidate_commit: next.best_commit.as_deref(),
+                next_hypothesis: &result_next_hypothesis,
+                decision: recommendation_label(recommendation),
+                evaluator: Some(&evaluator),
+                reason: Some(&result_reason),
+            },
         )?;
     } else {
         let candidate_commit = gitstate::head_commit(root)?;
         append_cycle_result(
             root,
             contract,
-            &result_cycle,
-            result_baseline_commit.as_deref(),
-            candidate_commit.as_deref(),
-            &result_next_hypothesis,
-            recommendation_label(recommendation),
-            Some(&evaluator),
-            Some(&result_reason),
+            CycleResultTrace {
+                cycle: &result_cycle,
+                baseline_commit: result_baseline_commit.as_deref(),
+                candidate_commit: candidate_commit.as_deref(),
+                next_hypothesis: &result_next_hypothesis,
+                decision: recommendation_label(recommendation),
+                evaluator: Some(&evaluator),
+                reason: Some(&result_reason),
+            },
         )?;
         close_cycle(root, contract, &mut next, &evaluator)?;
     }
@@ -921,40 +929,49 @@ fn discard_cycle(
     Ok(())
 }
 
+struct CycleResultTrace<'a> {
+    cycle: &'a str,
+    baseline_commit: Option<&'a str>,
+    candidate_commit: Option<&'a str>,
+    next_hypothesis: &'a str,
+    decision: &'a str,
+    evaluator: Option<&'a EvaluatorResult>,
+    reason: Option<&'a str>,
+}
+
 fn append_cycle_result(
     root: &Path,
     contract: &GoalContract,
-    cycle: &str,
-    baseline_commit: Option<&str>,
-    candidate_commit: Option<&str>,
-    next_hypothesis: &str,
-    decision: &str,
-    evaluator: Option<&EvaluatorResult>,
-    reason: Option<&str>,
+    trace: CycleResultTrace<'_>,
 ) -> OrchResult<()> {
     let mut row = Map::new();
-    row.insert("cycle".to_string(), Value::String(cycle.to_string()));
-    row.insert("decision".to_string(), Value::String(decision.to_string()));
+    row.insert("cycle".to_string(), Value::String(trace.cycle.to_string()));
+    row.insert(
+        "decision".to_string(),
+        Value::String(trace.decision.to_string()),
+    );
     row.insert(
         "baseline_commit".to_string(),
-        baseline_commit
+        trace
+            .baseline_commit
             .map(|value| Value::String(value.to_string()))
             .unwrap_or(Value::Null),
     );
     row.insert(
         "candidate_commit".to_string(),
-        candidate_commit
+        trace
+            .candidate_commit
             .map(|value| Value::String(value.to_string()))
             .unwrap_or(Value::Null),
     );
     row.insert(
         "next_hypothesis".to_string(),
-        Value::String(next_hypothesis.to_string()),
+        Value::String(trace.next_hypothesis.to_string()),
     );
-    if let Some(reason) = reason {
+    if let Some(reason) = trace.reason {
         row.insert("reason".to_string(), Value::String(reason.to_string()));
     }
-    if let Some(evaluator) = evaluator {
+    if let Some(evaluator) = trace.evaluator {
         row.insert(
             "metric".to_string(),
             Value::String(evaluator.metric.clone()),
