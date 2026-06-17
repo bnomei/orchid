@@ -568,6 +568,10 @@ fn bare_goal_evaluates_ready_report_and_records_keep_decision() {
         Some(keep_commit.as_str())
     );
     assert_ne!(baseline_commit, keep_commit);
+
+    let status = repo.run_stdout(&["goal", "status"]);
+    assert!(status.contains("- Kept cycles: `1`"));
+    assert!(status.contains("- Discarded cycles: `0`"));
 }
 
 #[test]
@@ -610,6 +614,10 @@ fn goal_evaluates_discard_recommendation_with_git_reset_and_clean() {
     let results =
         fs::read_to_string(repo.root.join(".orchid/goals/discard-goal/results.jsonl")).unwrap();
     assert!(results.contains("\"decision\":\"discard\""));
+
+    let status = repo.run_stdout(&["goal", "status"]);
+    assert!(status.contains("- Kept cycles: `0`"));
+    assert!(status.contains("- Discarded cycles: `1`"));
 }
 
 #[test]

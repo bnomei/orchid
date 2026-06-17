@@ -527,7 +527,7 @@ fn cmd_goal_current(root: &Path) -> OrchResult<String> {
 
 fn cmd_goal_status(root: &Path) -> OrchResult<String> {
     match goal::current_goal(root)? {
-        Some((contract, state)) => Ok(goal::render_goal_status(&contract, &state)),
+        Some((contract, state)) => goal::render_goal_status(root, &contract, &state),
         None => Ok("# Goal Status\n\nNo current goal is initialized.\n".to_string()),
     }
 }

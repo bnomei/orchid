@@ -562,7 +562,7 @@ pub(crate) fn render_goal_prompt(
         }
         GoalStatus::Keep | GoalStatus::Discard => Ok(render_goal_decision(contract, state)),
         GoalStatus::Blocked => Ok(render_goal_blocked(contract, state)),
-        GoalStatus::Done | GoalStatus::Stopped => Ok(render_goal_finish(contract, state)),
+        GoalStatus::Done | GoalStatus::Stopped => render_goal_finish(root, contract, state),
     }
 }
 
@@ -570,8 +570,13 @@ pub(crate) fn render_no_goal_prompt() -> String {
     "# Goal Setup\n\nNo current goal is initialized.\n\nRun `orchid goal init` with `--goal`, `--metric`, `--direction`, `--min-delta`, `--hypothesis`, `--max-iterations`, and `--max-duration`.\n".to_string()
 }
 
-pub(crate) fn render_goal_status(contract: &GoalContract, state: &GoalState) -> String {
-    format!(
+pub(crate) fn render_goal_status(
+    root: &Path,
+    contract: &GoalContract,
+    state: &GoalState,
+) -> OrchResult<String> {
+    let counts = goal_result_counts(root, &contract.goal_id)?;
+    Ok(format!(
         "# Goal Status\n\n- Goal: `{}`\n- Reason: `{}`\n- Best result: `{}` at `{}`\n- Budget: `{}/{}` iterations, exhausted: `{}`\n- Kept cycles: `{}`\n- Discarded cycles: `{}`\n- Branch state: current goal files are local under `.orchid/goals/{}`\n\nNo pull request was created.\n",
         contract.goal_id.as_str(),
         goal_status_label(state.status),
@@ -580,10 +585,10 @@ pub(crate) fn render_goal_status(contract: &GoalContract, state: &GoalState) -> 
         state.iterations_completed,
         contract.max_iterations,
         state.budget_exhausted,
-        0,
-        0,
+        counts.kept,
+        counts.discarded,
         contract.goal_id.as_str(),
-    )
+    ))
 }
 
 pub(crate) fn finish_goal(
@@ -597,11 +602,16 @@ pub(crate) fn finish_goal(
     }
     next.updated_at = now_iso();
     next.write(root, &contract.goal_id)?;
-    Ok(render_goal_finish(contract, &next))
+    render_goal_finish(root, contract, &next)
 }
 
-pub(crate) fn render_goal_finish(contract: &GoalContract, state: &GoalState) -> String {
-    format!(
+pub(crate) fn render_goal_finish(
+    root: &Path,
+    contract: &GoalContract,
+    state: &GoalState,
+) -> OrchResult<String> {
+    let counts = goal_result_counts(root, &contract.goal_id)?;
+    Ok(format!(
         "# Goal Finish\n\n- Goal: `{}`\n- Reason: `{}`\n- Best result: `{}` at `{}`\n- Budget: `{}/{}` iterations, exhausted: `{}`\n- Kept cycles: `{}`\n- Discarded cycles: `{}`\n- Branch state: finish requested without PR creation\n\nNo pull request was created.\n",
         contract.goal_id.as_str(),
         state
@@ -613,9 +623,9 @@ pub(crate) fn render_goal_finish(contract: &GoalContract, state: &GoalState) -> 
         state.iterations_completed,
         contract.max_iterations,
         state.budget_exhausted,
-        0,
-        0,
-    )
+        counts.kept,
+        counts.discarded,
+    ))
 }
 
 fn baseline_evaluator(root: &Path, contract: &GoalContract) -> OrchResult<(Option<String>, f64)> {
@@ -1038,6 +1048,37 @@ fn render_goal_blocked(contract: &GoalContract, state: &GoalState) -> String {
             .as_deref()
             .unwrap_or("blocked"),
     )
+}
+
+#[derive(Default)]
+struct GoalResultCounts {
+    kept: usize,
+    discarded: usize,
+}
+
+fn goal_result_counts(root: &Path, goal_id: &GoalId) -> OrchResult<GoalResultCounts> {
+    let path = safe_goal_dir(root, goal_id)?.join(RESULTS_JSONL);
+    if !path.exists() {
+        return Ok(GoalResultCounts::default());
+    }
+    let mut counts = GoalResultCounts::default();
+    for (index, line) in read_text(&path)?.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(line).map_err(|err| {
+            OrchError::new("invalid goal result trace")
+                .detail("path", path_to_string(&path))
+                .detail("line", (index + 1).to_string())
+                .detail("message", err.to_string())
+        })?;
+        match value.get("decision").and_then(Value::as_str) {
+            Some("keep") => counts.kept += 1,
+            Some("discard") => counts.discarded += 1,
+            _ => {}
+        }
+    }
+    Ok(counts)
 }
 
 fn goal_status_label(status: GoalStatus) -> &'static str {
