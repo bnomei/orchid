@@ -32,6 +32,11 @@ fn git(root: &Path, args: &[&str], check: bool) -> OrchResult<Vec<u8>> {
     Ok(output.stdout)
 }
 
+fn git_owned(root: &Path, args: &[String], check: bool) -> OrchResult<Vec<u8>> {
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    git(root, &refs, check)
+}
+
 fn git_text(root: &Path, args: &[&str], check: bool) -> OrchResult<String> {
     Ok(String::from_utf8_lossy(&git(root, args, check)?)
         .trim()
@@ -145,7 +150,7 @@ pub(crate) fn changed_paths_value(status: &Map<String, Value>) -> Value {
     string_array(changed_paths(status))
 }
 
-fn changed_paths(status: &Map<String, Value>) -> Vec<String> {
+pub(crate) fn changed_paths(status: &Map<String, Value>) -> Vec<String> {
     let mut paths = BTreeSet::new();
     if let Some(changed) = status.get("changed").and_then(Value::as_object) {
         for key in ["modified", "staged", "untracked"] {
@@ -155,6 +160,53 @@ fn changed_paths(status: &Map<String, Value>) -> Vec<String> {
         }
     }
     paths.into_iter().collect()
+}
+
+pub(crate) fn visible_changed_paths(root: &Path) -> OrchResult<Vec<String>> {
+    Ok(changed_paths(&git_status_data(root)?))
+}
+
+pub(crate) fn changed_protected_paths(
+    root: &Path,
+    protected_surfaces: &[String],
+) -> OrchResult<Vec<String>> {
+    let mut changed: Vec<String> = visible_changed_paths(root)?
+        .into_iter()
+        .filter(|path| path_in_scope(path, protected_surfaces))
+        .collect();
+    changed.sort();
+    changed.dedup();
+    Ok(changed)
+}
+
+pub(crate) fn stage_goal_candidates(root: &Path) -> OrchResult<Vec<String>> {
+    let candidates = visible_changed_paths(root)?;
+    if candidates.is_empty() {
+        return Ok(candidates);
+    }
+    let mut args = vec!["add".to_string(), "--".to_string()];
+    args.extend(candidates.iter().map(|path| format!(":(literal){path}")));
+    git_owned(root, &args, true)?;
+    Ok(candidates)
+}
+
+pub(crate) fn commit_goal_keep(root: &Path, goal_id: &str, cycle: &str) -> OrchResult<String> {
+    git(
+        root,
+        &["commit", "-m", &format!("goal({goal_id}): keep {cycle}")],
+        true,
+    )?;
+    git_text(root, &["rev-parse", "HEAD"], true)
+}
+
+pub(crate) fn reset_hard(root: &Path, commit: &str) -> OrchResult<()> {
+    git(root, &["reset", "--hard", commit], true)?;
+    Ok(())
+}
+
+pub(crate) fn clean_goal_candidates(root: &Path) -> OrchResult<()> {
+    git(root, &["clean", "-fd", "-e", ".orchid/"], true)?;
+    Ok(())
 }
 
 pub(crate) fn touched_for_lease(

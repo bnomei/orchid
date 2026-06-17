@@ -120,6 +120,7 @@ struct GoalArgs {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum GoalCommand {
     #[command(about = "Initialize a branch-local goal contract")]
     Init(GoalInitArgs),
@@ -533,7 +534,7 @@ fn cmd_goal_status(root: &Path) -> OrchResult<String> {
 
 fn cmd_goal_finish(root: &Path) -> OrchResult<String> {
     match goal::current_goal(root)? {
-        Some((contract, state)) => Ok(goal::render_goal_finish(&contract, &state)),
+        Some((contract, state)) => goal::finish_goal(root, &contract, &state),
         None => Ok("# Goal Finish\n\nNo current goal is initialized.\n".to_string()),
     }
 }

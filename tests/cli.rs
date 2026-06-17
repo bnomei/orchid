@@ -158,6 +158,22 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
+fn git_stdout(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed\nstdout:{}\nstderr:{}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("git stdout utf8")
+}
+
 fn write_goal_report(repo: &Repo, goal_id: &str, cycle: &str, status: &str, next: &str) {
     let dir = repo
         .root
@@ -499,6 +515,7 @@ fn bare_goal_evaluates_ready_report_and_records_keep_decision() {
         "printf '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"cycle:%s base:%s\",\"sample_count\":12}\\n' \"$ORCHID_GOAL_CYCLE\" \"$ORCHID_GOAL_BASELINE_VALUE\"",
         "10",
     );
+    fs::write(repo.root.join("candidate.txt"), "candidate\n").unwrap();
     write_goal_report(
         &repo,
         "eval-goal",
@@ -509,13 +526,23 @@ fn bare_goal_evaluates_ready_report_and_records_keep_decision() {
 
     let stdout = repo.run_stdout(&["goal"]);
 
-    assert!(stdout.starts_with("# Goal Decision"));
-    assert!(stdout.contains("- Decision: `keep`"));
+    assert!(stdout.starts_with("# Goal Ready"));
+    assert!(stdout.contains("- Cycle: `C002`"));
     let state = goal_state(&repo, "eval-goal");
-    assert_eq!(state["status"], "keep");
+    assert_eq!(state["status"], "ready");
     assert_eq!(state["iterations_completed"], 1);
     assert_eq!(state["last_decision"], "keep");
     assert_eq!(state["next_hypothesis"], "precompute static rank weights");
+    assert_eq!(state["baseline_value"], 110.0);
+    assert_eq!(state["best_value"], 110.0);
+    assert_eq!(
+        git_stdout(&repo.root, &["log", "-1", "--pretty=%s"]).trim(),
+        "goal(eval-goal): keep C001"
+    );
+    assert_eq!(
+        git_stdout(&repo.root, &["show", "--pretty=", "--name-only", "HEAD"]).trim(),
+        "candidate.txt"
+    );
 
     let goal_root = repo.root.join(".orchid/goals/eval-goal");
     let measurements = fs::read_to_string(goal_root.join("measurements.jsonl")).unwrap();
@@ -528,16 +555,19 @@ fn bare_goal_evaluates_ready_report_and_records_keep_decision() {
 }
 
 #[test]
-fn goal_evaluates_discard_recommendation_without_git_reset() {
+fn goal_evaluates_discard_recommendation_with_git_reset_and_clean() {
     let repo = Repo::new();
     repo.init_git();
-    fs::write(repo.root.join("candidate.txt"), "candidate\n").unwrap();
     init_ready_goal(
         &repo,
         "discard-goal",
         "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"discard\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":130.0,\"delta\":-10.0,\"reason\":\"regressed\"}'",
         "10",
     );
+    let tracked_path = repo.root.join("specs/example/requirements.md");
+    let original_tracked = fs::read_to_string(&tracked_path).unwrap();
+    fs::write(&tracked_path, "# Requirements\n\ncandidate change\n").unwrap();
+    fs::write(repo.root.join("candidate.txt"), "candidate\n").unwrap();
     write_goal_report(
         &repo,
         "discard-goal",
@@ -548,11 +578,18 @@ fn goal_evaluates_discard_recommendation_without_git_reset() {
 
     let stdout = repo.run_stdout(&["goal"]);
 
-    assert!(stdout.starts_with("# Goal Decision"));
-    assert!(stdout.contains("- Decision: `discard`"));
-    assert!(repo.root.join("candidate.txt").exists());
+    assert!(stdout.starts_with("# Goal Ready"));
+    assert!(stdout.contains("- Cycle: `C002`"));
+    assert!(!repo.root.join("candidate.txt").exists());
+    assert_eq!(fs::read_to_string(&tracked_path).unwrap(), original_tracked);
+    assert!(repo
+        .root
+        .join(".orchid/goals/discard-goal/state.json")
+        .exists());
     let state = goal_state(&repo, "discard-goal");
-    assert_eq!(state["status"], "discard");
+    assert_eq!(state["status"], "ready");
+    assert_eq!(state["cycle"], "C002");
+    assert_eq!(state["iterations_completed"], 1);
     assert_eq!(state["last_decision"], "discard");
     let results =
         fs::read_to_string(repo.root.join(".orchid/goals/discard-goal/results.jsonl")).unwrap();
@@ -597,6 +634,7 @@ fn budget_exhaustion_is_applied_after_cycle_closes() {
         "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"done\"}'",
         "1",
     );
+    fs::write(repo.root.join("candidate.txt"), "candidate\n").unwrap();
     write_goal_report(
         &repo,
         "budget-goal",
@@ -614,6 +652,32 @@ fn budget_exhaustion_is_applied_after_cycle_closes() {
     assert_eq!(state["iterations_completed"], 1);
     assert_eq!(state["budget_exhausted"], true);
     assert_eq!(state["budget_exhausted_reason"], "max_iterations");
+}
+
+#[test]
+fn goal_status_is_read_only_and_finish_marks_goal_stopped() {
+    let repo = Repo::new();
+    repo.init_git();
+    init_ready_goal(
+        &repo,
+        "finish-goal",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":118.5,\"delta\":1.5,\"reason\":\"baseline\"}'",
+        "10",
+    );
+
+    let stdout = repo.run_stdout(&["goal", "status"]);
+
+    assert!(stdout.starts_with("# Goal Status"));
+    assert!(stdout.contains("- Reason: `ready`"));
+    assert!(stdout.contains("No pull request was created."));
+    assert_eq!(goal_state(&repo, "finish-goal")["status"], "ready");
+
+    let stdout = repo.run_stdout(&["goal", "finish"]);
+
+    assert!(stdout.starts_with("# Goal Finish"));
+    assert!(stdout.contains("- Reason: `stopped`"));
+    assert!(stdout.contains("No pull request was created."));
+    assert_eq!(goal_state(&repo, "finish-goal")["status"], "stopped");
 }
 
 #[test]

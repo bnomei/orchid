@@ -250,6 +250,48 @@ orchid research-path example --create
 orchid research-clean example
 ```
 
+## Goal Loop
+
+`orchid goal` runs a branch-local improvement loop for one measurable target.
+It is Markdown-first for agents and stores durable state under
+`.orchid/goals/<goal-id>/`.
+
+Start a goal with the metric, direction, budget, and first hypothesis:
+
+```sh
+orchid goal init \
+  --goal "Reduce search ranking p95 without changing correctness" \
+  --metric p95_ms \
+  --direction lower-is-better \
+  --min-delta 5 \
+  --hypothesis "cache normalized query features before ranking" \
+  --max-iterations 10 \
+  --max-duration 10h
+```
+
+By default the goal id is derived from the current branch and the evaluator is
+`just goal-eval`. The evaluator must run from the repository root and print one
+JSON object with `status`, `recommendation`, `metric`, `baseline`, `candidate`,
+`delta`, and `reason`. Use repeatable `--protected-surface <path>` flags for
+evaluator or fixture files that should block automatic keep/discard if changed,
+and repeatable `--scope <path>` flags for advisory work surfaces.
+
+Run the loop with:
+
+```sh
+orchid goal
+orchid goal status
+orchid goal finish
+```
+
+When a cycle is ready, Orchid prints the report path under
+`.orchid/goals/<goal-id>/reports/C###.md`. The agent writes that Markdown report
+with TOML frontmatter containing `cycle`, `status`, and `next_hypothesis`.
+Orchid then runs the evaluator, appends `measurements.jsonl` and `results.jsonl`,
+commits kept candidate changes as `goal(<goal-id>): keep <cycle>`, or discards a
+failed attempt with `git reset --hard <baseline>` and non-`-x` clean behavior
+while preserving `.orchid/`. v0 does not create pull requests.
+
 ## Spec Layout
 
 An active spec is a directory under `specs/`:

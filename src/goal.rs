@@ -16,7 +16,6 @@ use crate::paths::{
     atomic_write, atomic_write_json, goal_current_path, goal_dir, path_to_string, read_text,
     repo_path,
 };
-use crate::specs::path_in_scope;
 use crate::taskfile::{quote_toml_string, split_frontmatter};
 
 const GOAL_TOML: &str = "goal.toml";
@@ -46,10 +45,7 @@ impl GoalId {
         let mut out = String::new();
         let mut last_was_sep = true;
         for byte in raw.bytes() {
-            if byte.is_ascii_alphanumeric() {
-                out.push(byte as char);
-                last_was_sep = false;
-            } else if matches!(byte, b'.' | b'_' | b'-') {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
                 out.push(byte as char);
                 last_was_sep = false;
             } else if !last_was_sep {
@@ -590,6 +586,20 @@ pub(crate) fn render_goal_status(contract: &GoalContract, state: &GoalState) -> 
     )
 }
 
+pub(crate) fn finish_goal(
+    root: &Path,
+    contract: &GoalContract,
+    state: &GoalState,
+) -> OrchResult<String> {
+    let mut next = state.clone();
+    if !matches!(next.status, GoalStatus::Done) {
+        next.status = GoalStatus::Stopped;
+    }
+    next.updated_at = now_iso();
+    next.write(root, &contract.goal_id)?;
+    Ok(render_goal_finish(contract, &next))
+}
+
 pub(crate) fn render_goal_finish(contract: &GoalContract, state: &GoalState) -> String {
     format!(
         "# Goal Finish\n\n- Goal: `{}`\n- Reason: `{}`\n- Best result: `{}` at `{}`\n- Budget: `{}/{}` iterations, exhausted: `{}`\n- Kept cycles: `{}`\n- Discarded cycles: `{}`\n- Branch state: finish requested without PR creation\n\nNo pull request was created.\n",
@@ -703,9 +713,13 @@ fn evaluate_cycle_report(
         return Ok(next);
     }
 
-    if let Some(path) = changed_protected_surface(root, contract)? {
+    let protected_changes = changed_protected_surfaces(root, contract)?;
+    if !protected_changes.is_empty() {
         next.status = GoalStatus::Blocked;
-        next.budget_exhausted_reason = Some(format!("protected surface changed: {path}"));
+        next.budget_exhausted_reason = Some(format!(
+            "protected surface changed: {}",
+            protected_changes.join(", ")
+        ));
         append_cycle_result(
             root,
             contract,
@@ -727,8 +741,8 @@ fn evaluate_cycle_report(
     evaluator.append_measurement(root, &contract.goal_id, &state.cycle)?;
 
     next.last_decision = Some(evaluator.recommendation);
-    next.iterations_completed = next.iterations_completed.saturating_add(1);
-    next.status = match evaluator.recommendation {
+    let recommendation = evaluator.recommendation;
+    next.status = match recommendation {
         EvaluatorRecommendation::Keep => GoalStatus::Keep,
         EvaluatorRecommendation::Discard => GoalStatus::Discard,
         EvaluatorRecommendation::Blocked => GoalStatus::Blocked,
@@ -739,16 +753,20 @@ fn evaluate_cycle_report(
         root,
         contract,
         &next,
-        recommendation_label(evaluator.recommendation),
+        recommendation_label(recommendation),
         Some(&evaluator),
         Some(&evaluator.reason),
     )?;
+
+    close_cycle(root, contract, &mut next, &evaluator)?;
 
     let budget = next.budget_decision(contract, crate::core::utc_now())?;
     if budget.exhausted && next.status != GoalStatus::Blocked {
         next.status = GoalStatus::Done;
         next.budget_exhausted = true;
         next.budget_exhausted_reason = budget.reason;
+    } else if matches!(next.status, GoalStatus::Keep | GoalStatus::Discard) {
+        next.status = GoalStatus::Ready;
     }
     next.write(root, &contract.goal_id)?;
     Ok(next)
@@ -791,23 +809,68 @@ fn run_evaluator(
     EvaluatorResult::parse_json(&String::from_utf8_lossy(&output.stdout))
 }
 
-fn changed_protected_surface(root: &Path, contract: &GoalContract) -> OrchResult<Option<String>> {
+fn changed_protected_surfaces(root: &Path, contract: &GoalContract) -> OrchResult<Vec<String>> {
     let scopes: Vec<String> = contract
         .protected_surfaces
         .iter()
         .map(|path| path_to_string(path))
         .collect();
-    if scopes.is_empty() {
-        return Ok(None);
-    }
-    let status = gitstate::git_status_data(root)?;
-    let changed = gitstate::changed_paths_value(&status);
-    for path in crate::core::string_list(Some(&changed)) {
-        if path_in_scope(&path, &scopes) {
-            return Ok(Some(path));
+    gitstate::changed_protected_paths(root, &scopes)
+}
+
+fn close_cycle(
+    root: &Path,
+    contract: &GoalContract,
+    state: &mut GoalState,
+    evaluator: &EvaluatorResult,
+) -> OrchResult<()> {
+    match evaluator.recommendation {
+        EvaluatorRecommendation::Keep => keep_cycle(root, contract, state, evaluator),
+        EvaluatorRecommendation::Discard => discard_cycle(root, state, evaluator),
+        EvaluatorRecommendation::Blocked => {
+            state.status = GoalStatus::Blocked;
+            state.budget_exhausted_reason = Some(evaluator.reason.clone());
+            Ok(())
+        }
+        EvaluatorRecommendation::Done => {
+            state.status = GoalStatus::Done;
+            state.iterations_completed = state.iterations_completed.saturating_add(1);
+            Ok(())
         }
     }
-    Ok(None)
+}
+
+fn keep_cycle(
+    root: &Path,
+    contract: &GoalContract,
+    state: &mut GoalState,
+    evaluator: &EvaluatorResult,
+) -> OrchResult<()> {
+    let _staged = gitstate::stage_goal_candidates(root)?;
+    let commit = gitstate::commit_goal_keep(root, contract.goal_id.as_str(), &state.cycle)?;
+    state.baseline_commit = Some(commit.clone());
+    state.baseline_value = Some(evaluator.candidate);
+    state.best_commit = Some(commit);
+    state.best_value = Some(evaluator.candidate);
+    state.iterations_completed = state.iterations_completed.saturating_add(1);
+    state.cycle = next_cycle_id(&state.cycle)?;
+    Ok(())
+}
+
+fn discard_cycle(
+    root: &Path,
+    state: &mut GoalState,
+    _evaluator: &EvaluatorResult,
+) -> OrchResult<()> {
+    let baseline = state
+        .baseline_commit
+        .clone()
+        .ok_or_else(|| OrchError::new("goal baseline commit missing"))?;
+    gitstate::reset_hard(root, &baseline)?;
+    gitstate::clean_goal_candidates(root)?;
+    state.iterations_completed = state.iterations_completed.saturating_add(1);
+    state.cycle = next_cycle_id(&state.cycle)?;
+    Ok(())
 }
 
 fn append_cycle_result(
