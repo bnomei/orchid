@@ -435,7 +435,7 @@ fn goal_init_with_valid_evaluator_records_baseline_and_renders_ready_markdown() 
         "--goal",
         "Reduce search ranking p95",
         "--evaluator",
-        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":118.5,\"delta\":1.5,\"reason\":\"baseline\"}'",
+        "test \"$ORCHID_GOAL_ID\" = ready-goal && test \"$ORCHID_GOAL_CYCLE\" = C001 && test -n \"$ORCHID_GOAL_DIR\" && printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":118.5,\"delta\":1.5,\"reason\":\"baseline\"}'",
         "--metric",
         "p95_ms",
         "--direction",

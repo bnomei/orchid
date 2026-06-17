@@ -619,10 +619,11 @@ pub(crate) fn render_goal_finish(contract: &GoalContract, state: &GoalState) -> 
 }
 
 fn baseline_evaluator(root: &Path, contract: &GoalContract) -> OrchResult<(Option<String>, f64)> {
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(&contract.evaluator)
-        .current_dir(root)
+    let head = gitstate::head_commit(root)?;
+    let output = evaluator_command(root, contract)?
+        .env("ORCHID_GOAL_CYCLE", first_cycle_id())
+        .env("ORCHID_GOAL_BASELINE_COMMIT", head.as_deref().unwrap_or(""))
+        .env("ORCHID_GOAL_BASELINE_VALUE", "")
         .output()
         .map_err(OrchError::from)?;
     if !output.status.success() {
@@ -640,7 +641,7 @@ fn baseline_evaluator(root: &Path, contract: &GoalContract) -> OrchResult<(Optio
             .detail("expected", contract.primary_metric.clone())
             .detail("actual", result.metric));
     }
-    Ok((gitstate::head_commit(root)?, result.baseline))
+    Ok((head, result.baseline))
 }
 
 fn maybe_establish_baseline(
@@ -777,13 +778,7 @@ fn run_evaluator(
     contract: &GoalContract,
     state: &GoalState,
 ) -> OrchResult<EvaluatorResult> {
-    let goal_dir = safe_goal_dir(root, &contract.goal_id)?;
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(&contract.evaluator)
-        .current_dir(root)
-        .env("ORCHID_GOAL_ID", contract.goal_id.as_str())
-        .env("ORCHID_GOAL_DIR", &goal_dir)
+    let output = evaluator_command(root, contract)?
         .env("ORCHID_GOAL_CYCLE", &state.cycle)
         .env(
             "ORCHID_GOAL_BASELINE_COMMIT",
@@ -807,6 +802,18 @@ fn run_evaluator(
             ));
     }
     EvaluatorResult::parse_json(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn evaluator_command(root: &Path, contract: &GoalContract) -> OrchResult<Command> {
+    let goal_dir = safe_goal_dir(root, &contract.goal_id)?;
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg(&contract.evaluator)
+        .current_dir(root)
+        .env("ORCHID_GOAL_ID", contract.goal_id.as_str())
+        .env("ORCHID_GOAL_DIR", goal_dir);
+    Ok(command)
 }
 
 fn changed_protected_surfaces(root: &Path, contract: &GoalContract) -> OrchResult<Vec<String>> {
