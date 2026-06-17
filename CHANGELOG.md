@@ -6,12 +6,22 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Added goal-loop commands and state for `goal init`, bare `goal`, `goal status`,
+  and `goal finish`, including evaluator contracts, baseline capture, keep,
+  discard, done, blocked, and budget decisions.
+- Added goal evaluator environment variables and durable measurement/result
+  traces so goal cycles can be replayed and audited.
 - Added first-class worker execution metadata with `worker_reasoning_effort` and
   optional `worker_model` task fields, lease snapshots, packet trusted lines,
   and JSON ACKs for coordinator spawn decisions.
 - Added `--worker-reasoning-effort` and `--worker-model` overrides for `lease`
   and `bud`.
 - Added `--brief` for compact `ready` and `next` output.
+- Added cargo package verification and source-hygiene CI checks for the
+  crates.io package contents.
+- Added porcelain v2 Git status records to `git-status`, `git-touched`, and
+  `git-stage-plan`, including status kinds for renames, deletes, mixed
+  staged/unstaged changes, and untracked files.
 
 ### Changed
 
@@ -19,11 +29,20 @@ All notable changes to this project will be documented in this file.
   effort/model before spawning subagents.
 - Updated bundled `make-specs` and `orchid` skills to author, validate, and use
   worker execution metadata from ACKs.
+- Switched lease touched/stage planning to structured porcelain v2 status data,
+  forcing untracked-file and rename reporting for config-independent staging
+  decisions.
 
 ### Fixed
 
 - Rejected invalid worker reasoning effort and model values during lint,
   readiness, leasing, and bud creation.
+- Blocked automatic staging for cross-scope renames by considering both the old
+  and new paths in a porcelain status record.
+- Accepted CRLF task frontmatter and normalized goal report paths so the full
+  Windows test matrix passes.
+- Tolerated RTK-compatible clean status output and merged RTK diagnostic chunks
+  when parsing porcelain status streams.
 
 ## [0.3.3] - 2026-06-07
 
