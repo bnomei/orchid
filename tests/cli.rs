@@ -158,6 +158,60 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
+fn write_goal_report(repo: &Repo, goal_id: &str, cycle: &str, status: &str, next: &str) {
+    let dir = repo
+        .root
+        .join(".orchid/goals")
+        .join(goal_id)
+        .join("reports");
+    fs::create_dir_all(&dir).expect("goal reports dir");
+    fs::write(
+        dir.join(format!("{cycle}.md")),
+        format!(
+            "+++\ncycle = \"{cycle}\"\nstatus = \"{status}\"\nnext_hypothesis = \"{next}\"\n+++\n\n## Summary\nDone.\n"
+        ),
+    )
+    .expect("goal report");
+}
+
+fn goal_state(repo: &Repo, goal_id: &str) -> Value {
+    serde_json::from_str(
+        &fs::read_to_string(
+            repo.root
+                .join(".orchid/goals")
+                .join(goal_id)
+                .join("state.json"),
+        )
+        .expect("goal state"),
+    )
+    .expect("goal state json")
+}
+
+fn init_ready_goal(repo: &Repo, goal_id: &str, evaluator: &str, max_iterations: &str) {
+    repo.run_stdout(&[
+        "goal",
+        "init",
+        "--id",
+        goal_id,
+        "--goal",
+        "Reduce search ranking p95",
+        "--evaluator",
+        evaluator,
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "5",
+        "--hypothesis",
+        "cache normalized query features",
+        "--max-iterations",
+        max_iterations,
+        "--max-duration",
+        "10h",
+    ]);
+}
+
 fn task_status(root: &Path, path: &str) -> String {
     let text = fs::read_to_string(root.join(path)).expect("task file");
     let start = "+++\n".len();
@@ -433,6 +487,213 @@ fn bare_goal_renders_running_prompt_for_missing_cycle_report() {
     assert!(stdout.starts_with("# Goal Running"));
     assert!(stdout.contains("- Expected report path: `"));
     assert!(stdout.contains(".orchid/goals/running-goal/reports/C001.md"));
+}
+
+#[test]
+fn bare_goal_evaluates_ready_report_and_records_keep_decision() {
+    let repo = Repo::new();
+    repo.init_git();
+    init_ready_goal(
+        &repo,
+        "eval-goal",
+        "printf '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"cycle:%s base:%s\",\"sample_count\":12}\\n' \"$ORCHID_GOAL_CYCLE\" \"$ORCHID_GOAL_BASELINE_VALUE\"",
+        "10",
+    );
+    write_goal_report(
+        &repo,
+        "eval-goal",
+        "C001",
+        "ready_for_evaluation",
+        "precompute static rank weights",
+    );
+
+    let stdout = repo.run_stdout(&["goal"]);
+
+    assert!(stdout.starts_with("# Goal Decision"));
+    assert!(stdout.contains("- Decision: `keep`"));
+    let state = goal_state(&repo, "eval-goal");
+    assert_eq!(state["status"], "keep");
+    assert_eq!(state["iterations_completed"], 1);
+    assert_eq!(state["last_decision"], "keep");
+    assert_eq!(state["next_hypothesis"], "precompute static rank weights");
+
+    let goal_root = repo.root.join(".orchid/goals/eval-goal");
+    let measurements = fs::read_to_string(goal_root.join("measurements.jsonl")).unwrap();
+    assert!(measurements.contains("\"cycle\":\"C001\""));
+    assert!(measurements.contains("\"sample_count\":12"));
+    assert!(measurements.contains("cycle:C001 base:120"));
+    let results = fs::read_to_string(goal_root.join("results.jsonl")).unwrap();
+    assert!(results.contains("\"decision\":\"keep\""));
+    assert!(results.contains("\"next_hypothesis\":\"precompute static rank weights\""));
+}
+
+#[test]
+fn goal_evaluates_discard_recommendation_without_git_reset() {
+    let repo = Repo::new();
+    repo.init_git();
+    fs::write(repo.root.join("candidate.txt"), "candidate\n").unwrap();
+    init_ready_goal(
+        &repo,
+        "discard-goal",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"discard\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":130.0,\"delta\":-10.0,\"reason\":\"regressed\"}'",
+        "10",
+    );
+    write_goal_report(
+        &repo,
+        "discard-goal",
+        "C001",
+        "ready_for_evaluation",
+        "try a smaller change",
+    );
+
+    let stdout = repo.run_stdout(&["goal"]);
+
+    assert!(stdout.starts_with("# Goal Decision"));
+    assert!(stdout.contains("- Decision: `discard`"));
+    assert!(repo.root.join("candidate.txt").exists());
+    let state = goal_state(&repo, "discard-goal");
+    assert_eq!(state["status"], "discard");
+    assert_eq!(state["last_decision"], "discard");
+    let results =
+        fs::read_to_string(repo.root.join(".orchid/goals/discard-goal/results.jsonl")).unwrap();
+    assert!(results.contains("\"decision\":\"discard\""));
+}
+
+#[test]
+fn goal_evaluator_done_recommendation_finishes_without_budget_exhaustion() {
+    let repo = Repo::new();
+    repo.init_git();
+    init_ready_goal(
+        &repo,
+        "done-goal",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"done\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"goal satisfied\"}'",
+        "10",
+    );
+    write_goal_report(
+        &repo,
+        "done-goal",
+        "C001",
+        "ready_for_evaluation",
+        "no next attempt",
+    );
+
+    let stdout = repo.run_stdout(&["goal"]);
+
+    assert!(stdout.starts_with("# Goal Finish"));
+    assert!(stdout.contains("- Reason: `done`"));
+    let state = goal_state(&repo, "done-goal");
+    assert_eq!(state["status"], "done");
+    assert_eq!(state["last_decision"], "done");
+    assert_eq!(state["budget_exhausted"], false);
+}
+
+#[test]
+fn budget_exhaustion_is_applied_after_cycle_closes() {
+    let repo = Repo::new();
+    repo.init_git();
+    init_ready_goal(
+        &repo,
+        "budget-goal",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"done\"}'",
+        "1",
+    );
+    write_goal_report(
+        &repo,
+        "budget-goal",
+        "C001",
+        "ready_for_evaluation",
+        "next attempt",
+    );
+
+    let stdout = repo.run_stdout(&["goal"]);
+
+    assert!(stdout.starts_with("# Goal Finish"));
+    assert!(stdout.contains("- Reason: `max_iterations`"));
+    let state = goal_state(&repo, "budget-goal");
+    assert_eq!(state["status"], "done");
+    assert_eq!(state["iterations_completed"], 1);
+    assert_eq!(state["budget_exhausted"], true);
+    assert_eq!(state["budget_exhausted_reason"], "max_iterations");
+}
+
+#[test]
+fn blocked_cycle_report_blocks_without_running_evaluator() {
+    let repo = Repo::new();
+    repo.init_git();
+    init_ready_goal(
+        &repo,
+        "blocked-goal",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"baseline\"}'",
+        "10",
+    );
+    write_goal_report(
+        &repo,
+        "blocked-goal",
+        "C001",
+        "blocked",
+        "needs human direction",
+    );
+
+    let stdout = repo.run_stdout(&["goal"]);
+
+    assert!(stdout.starts_with("# Goal Blocked"));
+    assert!(stdout.contains("report blocked"));
+    let state = goal_state(&repo, "blocked-goal");
+    assert_eq!(state["status"], "blocked");
+    assert_eq!(state["next_hypothesis"], "needs human direction");
+    assert!(!repo
+        .root
+        .join(".orchid/goals/blocked-goal/measurements.jsonl")
+        .exists());
+}
+
+#[test]
+fn protected_surface_change_blocks_automatic_decision() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run_stdout(&[
+        "goal",
+        "init",
+        "--id",
+        "protected-goal",
+        "--goal",
+        "Reduce search ranking p95",
+        "--evaluator",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"baseline\"}'",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "5",
+        "--hypothesis",
+        "cache normalized query features",
+        "--max-iterations",
+        "10",
+        "--max-duration",
+        "10h",
+        "--protected-surface",
+        "justfile",
+    ]);
+    fs::write(repo.root.join("justfile"), "goal-eval:\n\t@echo changed\n").unwrap();
+    write_goal_report(
+        &repo,
+        "protected-goal",
+        "C001",
+        "ready_for_evaluation",
+        "next attempt",
+    );
+
+    let stdout = repo.run_stdout(&["goal"]);
+
+    assert!(stdout.starts_with("# Goal Blocked"));
+    assert!(stdout.contains("protected surface changed: justfile"));
+    let state = goal_state(&repo, "protected-goal");
+    assert_eq!(state["status"], "blocked");
+    assert!(!repo
+        .root
+        .join(".orchid/goals/protected-goal/measurements.jsonl")
+        .exists());
 }
 
 #[test]

@@ -16,6 +16,7 @@ use crate::paths::{
     atomic_write, atomic_write_json, goal_current_path, goal_dir, path_to_string, read_text,
     repo_path,
 };
+use crate::specs::path_in_scope;
 use crate::taskfile::{quote_toml_string, split_frontmatter};
 
 const GOAL_TOML: &str = "goal.toml";
@@ -472,10 +473,18 @@ impl EvaluatorResult {
         })
     }
 
-    pub(crate) fn append_measurement(&self, root: &Path, goal_id: &GoalId) -> OrchResult<()> {
+    pub(crate) fn append_measurement(
+        &self,
+        root: &Path,
+        goal_id: &GoalId,
+        cycle: &str,
+    ) -> OrchResult<()> {
+        let mut row = self.raw.clone();
+        row.entry("cycle".to_string())
+            .or_insert_with(|| Value::String(cycle.to_string()));
         append_jsonl(
             &safe_goal_dir(root, goal_id)?.join(MEASUREMENTS_JSONL),
-            &self.raw,
+            &row,
         )
     }
 }
@@ -551,14 +560,13 @@ pub(crate) fn render_goal_prompt(
     state: &GoalState,
 ) -> OrchResult<String> {
     match state.status {
-        GoalStatus::Setup | GoalStatus::Baseline => Ok(render_goal_setup_for_contract(contract)),
-        GoalStatus::Ready => render_goal_ready(root, contract, state),
-        GoalStatus::Running => render_goal_running(root, contract, state),
+        GoalStatus::Setup | GoalStatus::Baseline => maybe_establish_baseline(root, contract, state),
+        GoalStatus::Ready | GoalStatus::Running | GoalStatus::Evaluate => {
+            render_or_evaluate_goal(root, contract, state)
+        }
+        GoalStatus::Keep | GoalStatus::Discard => Ok(render_goal_decision(contract, state)),
         GoalStatus::Blocked => Ok(render_goal_blocked(contract, state)),
         GoalStatus::Done | GoalStatus::Stopped => Ok(render_goal_finish(contract, state)),
-        GoalStatus::Evaluate | GoalStatus::Keep | GoalStatus::Discard => {
-            render_goal_running(root, contract, state)
-        }
     }
 }
 
@@ -625,6 +633,242 @@ fn baseline_evaluator(root: &Path, contract: &GoalContract) -> OrchResult<(Optio
     Ok((gitstate::head_commit(root)?, result.baseline))
 }
 
+fn maybe_establish_baseline(
+    root: &Path,
+    contract: &GoalContract,
+    state: &GoalState,
+) -> OrchResult<String> {
+    let Ok((commit, value)) = baseline_evaluator(root, contract) else {
+        return Ok(render_goal_setup_for_contract(contract));
+    };
+    let mut next = state.clone();
+    next.status = GoalStatus::Ready;
+    next.baseline_commit = commit.clone();
+    next.baseline_value = Some(value);
+    next.best_commit = commit;
+    next.best_value = Some(value);
+    next.updated_at = now_iso();
+    next.write(root, &contract.goal_id)?;
+    render_goal_ready(root, contract, &next)
+}
+
+fn render_or_evaluate_goal(
+    root: &Path,
+    contract: &GoalContract,
+    state: &GoalState,
+) -> OrchResult<String> {
+    let path = report_path(root, &contract.goal_id, &state.cycle)?;
+    if !path.exists() {
+        return if state.status == GoalStatus::Ready {
+            render_goal_ready(root, contract, state)
+        } else {
+            render_goal_running(root, contract, state)
+        };
+    }
+    let next = evaluate_cycle_report(root, contract, state, &path)?;
+    render_goal_prompt(root, contract, &next)
+}
+
+fn evaluate_cycle_report(
+    root: &Path,
+    contract: &GoalContract,
+    state: &GoalState,
+    path: &Path,
+) -> OrchResult<GoalState> {
+    let report = GoalReport::read(path)?;
+    if report.cycle != state.cycle {
+        return Err(OrchError::new("goal report cycle mismatch")
+            .detail("expected", state.cycle.clone())
+            .detail("actual", report.cycle));
+    }
+
+    let mut next = state.clone();
+    next.status = GoalStatus::Evaluate;
+    next.last_report = Some(path_to_string(path));
+    next.next_hypothesis = report.next_hypothesis.clone();
+    next.updated_at = now_iso();
+
+    if report.status == GoalReportStatus::Blocked {
+        next.status = GoalStatus::Blocked;
+        next.budget_exhausted_reason = Some("report blocked".to_string());
+        append_cycle_result(
+            root,
+            contract,
+            &next,
+            "blocked",
+            None,
+            Some("report blocked"),
+        )?;
+        next.write(root, &contract.goal_id)?;
+        return Ok(next);
+    }
+
+    if let Some(path) = changed_protected_surface(root, contract)? {
+        next.status = GoalStatus::Blocked;
+        next.budget_exhausted_reason = Some(format!("protected surface changed: {path}"));
+        append_cycle_result(
+            root,
+            contract,
+            &next,
+            "blocked",
+            None,
+            next.budget_exhausted_reason.as_deref(),
+        )?;
+        next.write(root, &contract.goal_id)?;
+        return Ok(next);
+    }
+
+    let evaluator = run_evaluator(root, contract, state)?;
+    if evaluator.metric != contract.primary_metric {
+        return Err(OrchError::new("evaluator metric mismatch")
+            .detail("expected", contract.primary_metric.clone())
+            .detail("actual", evaluator.metric));
+    }
+    evaluator.append_measurement(root, &contract.goal_id, &state.cycle)?;
+
+    next.last_decision = Some(evaluator.recommendation);
+    next.iterations_completed = next.iterations_completed.saturating_add(1);
+    next.status = match evaluator.recommendation {
+        EvaluatorRecommendation::Keep => GoalStatus::Keep,
+        EvaluatorRecommendation::Discard => GoalStatus::Discard,
+        EvaluatorRecommendation::Blocked => GoalStatus::Blocked,
+        EvaluatorRecommendation::Done => GoalStatus::Done,
+    };
+    next.updated_at = now_iso();
+    append_cycle_result(
+        root,
+        contract,
+        &next,
+        recommendation_label(evaluator.recommendation),
+        Some(&evaluator),
+        Some(&evaluator.reason),
+    )?;
+
+    let budget = next.budget_decision(contract, crate::core::utc_now())?;
+    if budget.exhausted && next.status != GoalStatus::Blocked {
+        next.status = GoalStatus::Done;
+        next.budget_exhausted = true;
+        next.budget_exhausted_reason = budget.reason;
+    }
+    next.write(root, &contract.goal_id)?;
+    Ok(next)
+}
+
+fn run_evaluator(
+    root: &Path,
+    contract: &GoalContract,
+    state: &GoalState,
+) -> OrchResult<EvaluatorResult> {
+    let goal_dir = safe_goal_dir(root, &contract.goal_id)?;
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&contract.evaluator)
+        .current_dir(root)
+        .env("ORCHID_GOAL_ID", contract.goal_id.as_str())
+        .env("ORCHID_GOAL_DIR", &goal_dir)
+        .env("ORCHID_GOAL_CYCLE", &state.cycle)
+        .env(
+            "ORCHID_GOAL_BASELINE_COMMIT",
+            state.baseline_commit.as_deref().unwrap_or(""),
+        )
+        .env(
+            "ORCHID_GOAL_BASELINE_VALUE",
+            state
+                .baseline_value
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        )
+        .output()
+        .map_err(OrchError::from)?;
+    if !output.status.success() {
+        return Err(OrchError::new("goal evaluator failed")
+            .detail("evaluator", contract.evaluator.clone())
+            .detail(
+                "stderr",
+                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            ));
+    }
+    EvaluatorResult::parse_json(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn changed_protected_surface(root: &Path, contract: &GoalContract) -> OrchResult<Option<String>> {
+    let scopes: Vec<String> = contract
+        .protected_surfaces
+        .iter()
+        .map(|path| path_to_string(path))
+        .collect();
+    if scopes.is_empty() {
+        return Ok(None);
+    }
+    let status = gitstate::git_status_data(root)?;
+    let changed = gitstate::changed_paths_value(&status);
+    for path in crate::core::string_list(Some(&changed)) {
+        if path_in_scope(&path, &scopes) {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn append_cycle_result(
+    root: &Path,
+    contract: &GoalContract,
+    state: &GoalState,
+    decision: &str,
+    evaluator: Option<&EvaluatorResult>,
+    reason: Option<&str>,
+) -> OrchResult<()> {
+    let mut row = Map::new();
+    row.insert("cycle".to_string(), Value::String(state.cycle.clone()));
+    row.insert("decision".to_string(), Value::String(decision.to_string()));
+    row.insert(
+        "baseline_commit".to_string(),
+        state
+            .baseline_commit
+            .as_ref()
+            .map(|value| Value::String(value.clone()))
+            .unwrap_or(Value::Null),
+    );
+    row.insert(
+        "candidate_commit".to_string(),
+        gitstate::head_commit(root)?
+            .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    row.insert(
+        "next_hypothesis".to_string(),
+        Value::String(state.next_hypothesis.clone()),
+    );
+    if let Some(reason) = reason {
+        row.insert("reason".to_string(), Value::String(reason.to_string()));
+    }
+    if let Some(evaluator) = evaluator {
+        row.insert(
+            "metric".to_string(),
+            Value::String(evaluator.metric.clone()),
+        );
+        row.insert("baseline".to_string(), json_number(evaluator.baseline)?);
+        row.insert("candidate".to_string(), json_number(evaluator.candidate)?);
+        row.insert("delta".to_string(), json_number(evaluator.delta)?);
+    }
+    append_result(root, &contract.goal_id, &row)
+}
+
+fn json_number(value: f64) -> OrchResult<Value> {
+    serde_json::Number::from_f64(value)
+        .map(Value::Number)
+        .ok_or_else(|| OrchError::new("invalid JSON").detail("message", "non-finite number"))
+}
+
+fn recommendation_label(recommendation: EvaluatorRecommendation) -> &'static str {
+    match recommendation {
+        EvaluatorRecommendation::Keep => "keep",
+        EvaluatorRecommendation::Discard => "discard",
+        EvaluatorRecommendation::Blocked => "blocked",
+        EvaluatorRecommendation::Done => "done",
+    }
+}
+
 fn render_goal_setup_for_contract(contract: &GoalContract) -> String {
     format!(
         "# Goal Setup\n\n- Goal: `{}`\n- Evaluator: `{}`\n- Metric: `{}`\n\nMake `{}` run successfully from the repository root and print valid evaluator JSON with `status`, `recommendation`, `metric`, `baseline`, `candidate`, `delta`, and `reason` fields.\n\nAfter the evaluator works, run `orchid goal init` again with the same flags or run `orchid goal` to continue from the current state.\n",
@@ -670,6 +914,16 @@ fn render_goal_running(
         state.cycle,
         report_path.display(),
     ))
+}
+
+fn render_goal_decision(contract: &GoalContract, state: &GoalState) -> String {
+    format!(
+        "# Goal Decision\n\n- Goal: `{}`\n- Cycle: `{}`\n- Decision: `{}`\n- Next hypothesis: {}\n\nOrchid recorded the decision and durable traces. Git keep/discard effects are pending.\n",
+        contract.goal_id.as_str(),
+        state.cycle,
+        goal_status_label(state.status),
+        state.next_hypothesis,
+    )
 }
 
 fn render_goal_blocked(contract: &GoalContract, state: &GoalState) -> String {
@@ -947,7 +1201,7 @@ next_hypothesis = "next"
         )
         .unwrap();
         evaluator
-            .append_measurement(tmp.path(), &contract.goal_id)
+            .append_measurement(tmp.path(), &contract.goal_id, "C001")
             .unwrap();
         append_result(
             tmp.path(),
