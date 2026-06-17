@@ -230,6 +230,7 @@ fn init_ready_goal(repo: &Repo, goal_id: &str, evaluator: &str, max_iterations: 
 
 fn task_status(root: &Path, path: &str) -> String {
     let text = fs::read_to_string(root.join(path)).expect("task file");
+    let text = text.replace("\r\n", "\n");
     let start = "+++\n".len();
     let end = text[start..]
         .find("\n+++\n")
@@ -2115,6 +2116,7 @@ fn git_touched_and_stage_plan_split_scope_and_baseline() {
 }
 
 #[test]
+#[cfg(unix)]
 fn git_stage_plan_literalizes_magic_pathspec_filenames() {
     let repo = Repo::new();
     repo.init_git();

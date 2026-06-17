@@ -194,12 +194,14 @@ pub(crate) fn split_frontmatter(
 }
 
 fn raw_frontmatter<'a>(text: &'a str, path: &Path) -> OrchResult<(&'a str, String)> {
-    if !text.starts_with("+++\n") {
+    let start = if text.starts_with("+++\r\n") {
+        FRONTMATTER.len() + 2
+    } else if text.starts_with("+++\n") {
+        FRONTMATTER.len() + 1
+    } else {
         return Err(OrchError::new("missing TOML frontmatter").detail("path", path_to_string(path)));
-    }
-    let start = FRONTMATTER.len() + 1;
-    let marker = "\n+++\n";
-    let Some(end) = text[start..].find(marker).map(|idx| idx + start) else {
+    };
+    let Some((end, marker)) = closing_frontmatter_marker(text, start) else {
         return Err(
             OrchError::new("unterminated TOML frontmatter").detail("path", path_to_string(path))
         );
@@ -207,6 +209,13 @@ fn raw_frontmatter<'a>(text: &'a str, path: &Path) -> OrchResult<(&'a str, Strin
     let raw = &text[start..end];
     let body = text[end + marker.len()..].to_string();
     Ok((raw, body))
+}
+
+fn closing_frontmatter_marker(text: &str, start: usize) -> Option<(usize, &'static str)> {
+    ["\n+++\n", "\n+++\r\n", "\r\n+++\n", "\r\n+++\r\n"]
+        .into_iter()
+        .filter_map(|marker| text[start..].find(marker).map(|idx| (idx + start, marker)))
+        .min_by_key(|(idx, _)| *idx)
 }
 
 pub(crate) fn load_task(path: impl AsRef<Path>, root: &Path) -> OrchResult<Task> {
@@ -406,6 +415,16 @@ mod tests {
         assert_eq!(parsed["id"], "T900");
         assert_eq!(parsed["scope"], json!(["src/orchid"]));
         assert_eq!(body, "\n## Context\n");
+    }
+
+    #[test]
+    fn task_frontmatter_accepts_crlf_line_endings() {
+        let text = "+++\r\nid = \"T900\"\r\nscope = [\"src/orchid\"]\r\n+++\r\n\r\n## Context\r\n";
+        let (parsed, body) = split_frontmatter(text, Path::new("task.md")).unwrap();
+
+        assert_eq!(parsed["id"], "T900");
+        assert_eq!(parsed["scope"], json!(["src/orchid"]));
+        assert_eq!(body, "\r\n## Context\r\n");
     }
 
     #[test]

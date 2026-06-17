@@ -58,6 +58,20 @@ jobs:
       - name: Check with minimum supported Rust
         run: cargo check --locked --all-targets
 
+  package:
+    name: Package verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+      - name: Check source hygiene
+        run: scripts/check-source-hygiene.sh
+      - name: Verify crates.io package
+        run: cargo package --locked
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

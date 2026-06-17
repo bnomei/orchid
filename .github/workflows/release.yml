@@ -31,6 +31,10 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Run tests
         run: cargo test --locked --all-targets
+      - name: Check source hygiene
+        run: scripts/check-source-hygiene.sh
+      - name: Verify crates.io package
+        run: cargo package --locked
 
   build:
     name: Build ${{ matrix.target }}
