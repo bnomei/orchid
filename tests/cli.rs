@@ -230,6 +230,7 @@ fn init_ready_goal(repo: &Repo, goal_id: &str, evaluator: &str, max_iterations: 
 
 fn task_status(root: &Path, path: &str) -> String {
     let text = fs::read_to_string(root.join(path)).expect("task file");
+    let text = text.replace("\r\n", "\n");
     let start = "+++\n".len();
     let end = text[start..]
         .find("\n+++\n")

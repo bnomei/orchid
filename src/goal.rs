@@ -1027,7 +1027,7 @@ fn render_goal_ready(
         contract.max_duration,
         state.next_hypothesis,
         optional_string(state.last_report.as_deref()),
-        report_path.display(),
+        path_to_string(&report_path),
     ))
 }
 
@@ -1041,7 +1041,7 @@ fn render_goal_running(
         "# Goal Running\n\n- Goal: `{}`\n- Cycle: `{}`\n- Expected report path: `{}`\n\nWrite the cycle report before asking Orchid to evaluate this attempt.\n",
         contract.goal_id.as_str(),
         state.cycle,
-        report_path.display(),
+        path_to_string(&report_path),
     ))
 }
 
