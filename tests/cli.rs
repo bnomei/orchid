@@ -2115,6 +2115,7 @@ fn git_touched_and_stage_plan_split_scope_and_baseline() {
 }
 
 #[test]
+#[cfg(unix)]
 fn git_stage_plan_literalizes_magic_pathspec_filenames() {
     let repo = Repo::new();
     repo.init_git();
