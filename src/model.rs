@@ -130,7 +130,14 @@ pub(crate) fn normalize_scope_entry(value: &str) -> String {
     while let Some(rest) = cleaned.strip_prefix("./") {
         cleaned = rest.to_string();
     }
-    cleaned.trim_matches('/').to_string()
+    let cleaned = cleaned.trim_matches('/');
+    // A bare "." is the whole-repo spelling, like "", "/", and "./"; collapse it to empty
+    // so it is handled by the root guard instead of surviving as a token that matches nothing.
+    if cleaned == "." {
+        String::new()
+    } else {
+        cleaned.to_string()
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -703,6 +710,15 @@ mod tests {
         assert!(parent.contains_path("src/feature/file.rs"));
         assert!(parent.overlaps(&child));
         assert!(!parent.overlaps(&sibling));
+    }
+
+    #[test]
+    fn root_scope_spellings_collapse_consistently() {
+        // "." must collapse like its sibling whole-repo spellings instead of surviving as a
+        // non-empty token that matches nothing.
+        for value in [".", "/", "./", "", "././", "./."] {
+            assert_eq!(normalize_scope_entry(value), "", "value: {value:?}");
+        }
     }
 
     #[test]
