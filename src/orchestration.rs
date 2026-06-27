@@ -733,6 +733,16 @@ pub(crate) fn heartbeat(root: &Path, lease_id: &str) -> OrchResult<Map<String, V
     validate_lease_id(lease_id)?;
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, lease_id)?;
+    // Heartbeats only make sense for active leases; refreshing a terminal lease would
+    // return a misleading "alive" ack.
+    if !lease.status().is_active() {
+        return Err(OrchError::coded(
+            "cannot heartbeat a lease that is not active",
+            ErrorCode::LeaseNotActive,
+        )
+        .detail("lease_id", lease_id)
+        .detail("status", lease.get_str("status").unwrap_or("").to_string()));
+    }
     let heartbeat_at = now_iso();
     lease.set("heartbeat_at", heartbeat_at.clone());
     save_lease(root, &lease)?;
@@ -783,6 +793,16 @@ pub(crate) fn release(root: &Path, lease_id: &str, reason: &str) -> OrchResult<M
     validate_lease_id(lease_id)?;
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, lease_id)?;
+    // release stops an active worker; releasing a terminal lease (e.g. completed) would
+    // drop it from completed_runtime_leases and orphan its unstaged work.
+    if !lease.status().is_active() {
+        return Err(OrchError::coded(
+            "cannot release a lease that is not active",
+            ErrorCode::LeaseNotActive,
+        )
+        .detail("lease_id", lease_id)
+        .detail("status", lease.get_str("status").unwrap_or("").to_string()));
+    }
     lease.set("status", "released");
     lease.set("released_at", now_iso());
     if !reason.is_empty() {

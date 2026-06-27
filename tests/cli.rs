@@ -2006,6 +2006,33 @@ fn next_spec_does_not_surface_foreign_spec_cleanup() {
 }
 
 #[test]
+fn release_and_heartbeat_reject_completed_leases() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_abc",
+    ]);
+    repo.run(&["complete", "--lease", "l_abc", "--verified-by", "mayor"]);
+
+    // Releasing a completed lease would drop it from completed_runtime_leases and orphan
+    // its stage/cleanup work.
+    let released = repo.run_fail(&["release", "l_abc", "--reason", "superseded"]);
+    assert_eq!(released["code"], "lease_not_active");
+    // The lease stays completed and remains a cleanup candidate.
+    let next = repo.run(&["next", "--spec", "example", "--explain"]);
+    assert_eq!(next["phase"], "cleanup");
+    assert_eq!(next["cleanup"][0]["lease_id"], "l_abc");
+
+    let heartbeat = repo.run_fail(&["heartbeat", "l_abc"]);
+    assert_eq!(heartbeat["code"], "lease_not_active");
+}
+
+#[test]
 fn block_rejects_task_with_active_lease() {
     let repo = Repo::new();
     repo.run(&[
