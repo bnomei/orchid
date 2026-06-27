@@ -460,6 +460,14 @@ impl LeaseRecord {
         string_list(self.get("baseline_changed"))
     }
 
+    /// Paths that were changed when this lease was completed, captured at `complete` time.
+    /// `None` for leases that have not been completed (or predate this snapshot), in which
+    /// case staging falls back to the live working tree.
+    pub(crate) fn completed_changed(&self) -> Option<Vec<String>> {
+        self.get("completed_changed")
+            .map(|value| string_list(Some(value)))
+    }
+
     pub(crate) fn report_path(&self) -> Option<&str> {
         self.get_str("report_path").filter(|path| !path.is_empty())
     }

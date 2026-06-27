@@ -584,6 +584,11 @@ pub(crate) fn touched_for_lease(
 ) -> OrchResult<Map<String, Value>> {
     let status = git_status_data(root)?;
     let baseline: BTreeSet<String> = lease.baseline_changed().into_iter().collect();
+    // For completed leases, only paths inside the completion window are attributable to the
+    // lease; anything edited afterward must not be folded into its stage plan.
+    let completed_window: Option<BTreeSet<String>> = lease
+        .completed_changed()
+        .map(|paths| paths.into_iter().collect());
     let records = git_status_records_from_status(&status);
     let scope = lease.scope();
     let task_path = lease.task_path();
@@ -608,6 +613,13 @@ pub(crate) fn touched_for_lease(
             }
             ambiguous_records.push(record);
             continue;
+        }
+
+        if let Some(window) = &completed_window {
+            if !paths.iter().any(|path| window.contains(path)) {
+                // Edited after this lease completed; not part of its stage set.
+                continue;
+            }
         }
 
         changed_records.push(record.clone());

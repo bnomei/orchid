@@ -681,8 +681,12 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     }
     let completed_at = meta.get("completed_at").cloned().unwrap_or(Value::Null);
     write_task_frontmatter(&task, frontmatter)?;
+    // Freeze the lease's git boundary at completion so a later stage plan attributes only
+    // the lease window's edits to it, not coordinator edits made after complete.
+    let completed_status = git_status_data(root)?;
     lease.set("status", "completed");
     lease.set("completed_at", completed_at);
+    lease.set("completed_changed", changed_paths_value(&completed_status));
     save_lease(root, &lease)?;
     let mut payload = json_ok();
     insert(&mut payload, "lease_id", request.lease.clone());

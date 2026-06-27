@@ -2277,6 +2277,38 @@ fn git_touched_and_stage_plan_split_scope_and_baseline() {
 }
 
 #[test]
+fn stage_plan_excludes_in_scope_edits_made_after_complete() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_test",
+    ]);
+    fs::write(repo.root.join("src/feature/work.txt"), "worker edit\n").unwrap();
+    repo.run(&["complete", "--lease", "l_test", "--verified-by", "mayor"]);
+    // Coordinator edits another in-scope file AFTER completing the lease.
+    fs::write(repo.root.join("src/feature/extra.txt"), "post-complete edit\n").unwrap();
+
+    let plan = repo.run(&["git-stage-plan", "--lease", "l_test"]);
+    // The lease-window edits (worker file + the task file complete updated) are staged;
+    // the post-complete extra.txt is excluded.
+    assert_eq!(
+        plan["pathspecs"],
+        serde_json::json!([
+            ":(literal)specs/example/tasks/T001.md",
+            ":(literal)src/feature/work.txt"
+        ])
+    );
+    let plan_str = plan["pathspecs"].to_string();
+    assert!(!plan_str.contains("extra.txt"));
+}
+
+#[test]
 fn git_status_exposes_porcelain_v2_status_records() {
     let repo = Repo::new();
     fs::write(repo.root.join("src/feature/mixed.txt"), "base\n").unwrap();
