@@ -648,16 +648,20 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
         .collect();
     let ready_payload = ready
         .iter()
-        .map(|task| ReadyTask {
-            id: task.id(),
-            spec: task.spec_id.clone(),
-            task: task_key(task),
-            scope: task.scope(),
-            verify: task.verification_mode().to_string(),
-            worker_reasoning_effort: task.worker_reasoning_effort(),
-            worker_model: optional_task_worker_model(task).map(str::to_string),
+        .map(|task| {
+            let policy = load_spec_policy(root, &task.spec_id)?;
+            Ok(ReadyTask {
+                id: task.id(),
+                spec: task.spec_id.clone(),
+                task: task_key(task),
+                scope: task.scope(),
+                verify: task.verification_mode().to_string(),
+                fanout_is_serial: policy.fanout_is_serial(),
+                worker_reasoning_effort: task.worker_reasoning_effort(),
+                worker_model: optional_task_worker_model(task).map(str::to_string),
+            })
         })
-        .collect();
+        .collect::<OrchResult<Vec<_>>>()?;
     let blocked = blocked
         .into_iter()
         .map(|item| BlockedTask {

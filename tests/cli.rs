@@ -2448,6 +2448,33 @@ fn lease_rejects_allow_parallel_for_serial_fanout_spec() {
 }
 
 #[test]
+fn next_waits_for_serial_fanout_ready_task_under_active_lease() {
+    let repo = Repo::new();
+    repo.write_task_file("other", "T001", "todo", "src/other/");
+    repo.write_task_file("serialspec", "T001", "todo", "src/serial/");
+    fs::write(
+        repo.root.join("specs/serialspec/spec.toml"),
+        "fanout_policy = \"serial\"\n",
+    )
+    .unwrap();
+    repo.run(&[
+        "lease",
+        "other",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_other",
+    ]);
+
+    let next = repo.run(&["next", "--spec", "serialspec", "--explain"]);
+    assert_eq!(next["phase"], "wait");
+    assert!(next.get("cmd").is_none());
+    assert_eq!(next["ready"][0]["task"], "serialspec/T001");
+    assert_eq!(next["ready"][0]["fanout_policy"], "serial");
+}
+
+#[test]
 fn lease_overlap_uses_live_task_scope_after_expansion() {
     let repo = Repo::new();
     let t1 = repo.write_task_file("sx", "T001", "todo", "src/a/");
@@ -2662,7 +2689,7 @@ fn next_prefers_validate_over_recover_for_stale_lease_with_report() {
 }
 
 #[test]
-fn next_wait_surfaces_scope_disjoint_ready_tasks() {
+fn next_dispatches_scope_disjoint_ready_tasks_with_parallel_flag() {
     let repo = Repo::new();
     repo.write_task_file("example", "T005", "todo", "src/feature/");
     // Active lease in a disjoint scope.
@@ -2687,10 +2714,21 @@ fn next_wait_surfaces_scope_disjoint_ready_tasks() {
         .collect();
     assert!(ready_tasks.contains(&"example/T001"));
 
-    // ...and next, while still waiting under the serial default, now surfaces the same
-    // ready tasks instead of an empty, contradictory wait.
+    // ...and next dispatches the same scope-disjoint task with explicit parallel confirmation
+    // instead of returning an empty, contradictory wait.
     let next = repo.run(&["next", "--spec", "example", "--explain"]);
-    assert_eq!(next["phase"], "wait");
+    assert_eq!(next["phase"], "dispatch");
+    assert_eq!(
+        next["cmd"],
+        serde_json::json!([
+            "lease",
+            "example",
+            "T001",
+            "--owner",
+            "worker:<agent-id>",
+            "--allow-parallel"
+        ])
+    );
     let next_ready: Vec<&str> = next["ready"]
         .as_array()
         .unwrap()
