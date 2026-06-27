@@ -2090,6 +2090,39 @@ fn corrupt_lease_file_fails_scope_enumeration_closed() {
 }
 
 #[test]
+fn lease_rejects_allow_parallel_for_serial_fanout_spec() {
+    let repo = Repo::new();
+    repo.write_task_file("serialspec", "T001", "todo", "src/a/");
+    repo.write_task_file("serialspec", "T002", "todo", "src/b/");
+    fs::write(
+        repo.root.join("specs/serialspec/spec.toml"),
+        "fanout_policy = \"serial\"\n",
+    )
+    .unwrap();
+    repo.run(&[
+        "lease",
+        "serialspec",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    // A serial-fanout spec must reject parallel leasing even on a disjoint scope.
+    let failed = repo.run_fail(&[
+        "lease",
+        "serialspec",
+        "T002",
+        "--owner",
+        "worker:b",
+        "--lease-id",
+        "l_2",
+        "--allow-parallel",
+    ]);
+    assert_eq!(failed["code"], "serial_fanout_policy");
+}
+
+#[test]
 fn lease_rejects_invalid_verification_mode() {
     let repo = Repo::new();
     let path = repo.write_task_file("vmspec", "T001", "todo", "src/vm/");

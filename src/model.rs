@@ -687,6 +687,10 @@ impl SpecPolicy {
         self.data.get("human_checkpoint").and_then(Value::as_str) == Some("before-implementation")
     }
 
+    pub(crate) fn fanout_is_serial(&self) -> bool {
+        self.data.get("fanout_policy").and_then(Value::as_str) == Some("serial")
+    }
+
     pub(crate) fn into_map(self) -> Map<String, Value> {
         self.data
     }

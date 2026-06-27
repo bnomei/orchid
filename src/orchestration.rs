@@ -303,6 +303,16 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
         )
         .detail("active_leases", compact_leases(active)?));
     }
+    // Enforce the spec's declared fanout policy: a serial spec must not be leased in parallel.
+    if request.allow_parallel
+        && crate::specs::load_spec_policy(root, &task.spec_id)?.fanout_is_serial()
+    {
+        return Err(OrchError::coded(
+            "spec fanout_policy is serial; --allow-parallel is not permitted",
+            ErrorCode::SerialFanoutPolicy,
+        )
+        .detail("spec", task.spec_id.clone()));
+    }
 
     let lease_id = requested_lease_id.unwrap_or_else(|| lease_id_for(&task.path, &request.owner));
     ensure_lease_id_available(root, lease_id.as_str())?;
