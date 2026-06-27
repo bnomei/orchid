@@ -778,6 +778,12 @@ fn evaluate_cycle_report(
             .detail("expected", contract.primary_metric.clone())
             .detail("actual", evaluator.metric));
     }
+    // A non-pass evaluator status means the measurement run itself failed; never keep/discard
+    // on it regardless of the recommendation field. Treat it as a blocked cycle.
+    if evaluator.status != "pass" {
+        evaluator.recommendation = EvaluatorRecommendation::Blocked;
+        evaluator.reason = format!("evaluator status {}", evaluator.status);
+    }
     evaluator.append_measurement(root, &contract.goal_id, &state.cycle)?;
 
     // Enforce the configured keep gate: a Keep whose improvement over the current baseline is

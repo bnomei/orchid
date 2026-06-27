@@ -714,6 +714,34 @@ fn goal_init_rejects_zero_budgets() {
 }
 
 #[test]
+fn goal_non_pass_status_blocks_keep() {
+    let repo = Repo::new();
+    repo.init_git();
+    // status=fail but recommendation=keep must not keep.
+    init_ready_goal(
+        &repo,
+        "status-goal",
+        "printf '%s\n' '{\"status\":\"fail\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"tests failed\"}'",
+        "10",
+    );
+    fs::write(repo.root.join("candidate.txt"), "candidate\n").unwrap();
+    write_goal_report(
+        &repo,
+        "status-goal",
+        "C001",
+        "ready_for_evaluation",
+        "next attempt",
+    );
+
+    let stdout = repo.run_stdout(&["goal"]);
+    assert!(stdout.starts_with("# Goal Blocked"));
+    let state = goal_state(&repo, "status-goal");
+    assert_eq!(state["status"], "blocked");
+    let status = repo.run_stdout(&["goal", "status"]);
+    assert!(status.contains("- Kept cycles: `0`"));
+}
+
+#[test]
 fn goal_keep_below_min_delta_is_downgraded_to_discard() {
     let repo = Repo::new();
     repo.init_git();
