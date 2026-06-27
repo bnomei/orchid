@@ -2272,7 +2272,9 @@ fn complete_updates_only_task_and_next_finds_stage_or_cleanup() {
     );
 
     let payload = repo.run(&["next", "--spec", "example"]);
-    assert_eq!(payload["phase"], "cleanup");
+    assert_eq!(payload["phase"], "stage");
+    assert_eq!(payload["stage"][0]["lease_id"], "l_test");
+    assert_eq!(payload["stage"][0]["git"], false);
 
     let repo = Repo::new();
     repo.init_git();
@@ -2700,10 +2702,12 @@ fn next_spec_does_not_surface_foreign_spec_cleanup() {
     assert_eq!(payload["phase"], "dispatch");
     assert!(payload.get("cleanup").is_none());
 
-    // next scoped to other still surfaces its own cleanup.
+    // next scoped to other still surfaces its own completed lease, now as an unsafe gitless stage
+    // plan rather than cleanup.
     let other = repo.run(&["next", "--spec", "other", "--explain"]);
-    assert_eq!(other["phase"], "cleanup");
-    assert_eq!(other["cleanup"][0]["lease_id"], "l_other");
+    assert_eq!(other["phase"], "stage");
+    assert_eq!(other["stage"][0]["lease_id"], "l_other");
+    assert_eq!(other["stage"][0]["git"], false);
 }
 
 #[test]
@@ -2845,10 +2849,12 @@ fn release_and_heartbeat_reject_completed_leases() {
     // its stage/cleanup work.
     let released = repo.run_fail(&["release", "l_abc", "--reason", "superseded"]);
     assert_eq!(released["code"], "lease_not_active");
-    // The lease stays completed and remains a cleanup candidate.
+    // The lease stays completed and remains visible to next; without git it is an unsafe stage
+    // candidate rather than cleanup.
     let next = repo.run(&["next", "--spec", "example", "--explain"]);
-    assert_eq!(next["phase"], "cleanup");
-    assert_eq!(next["cleanup"][0]["lease_id"], "l_abc");
+    assert_eq!(next["phase"], "stage");
+    assert_eq!(next["stage"][0]["lease_id"], "l_abc");
+    assert_eq!(next["stage"][0]["git"], false);
 
     let heartbeat = repo.run_fail(&["heartbeat", "l_abc"]);
     assert_eq!(heartbeat["code"], "lease_not_active");
@@ -3562,9 +3568,11 @@ fn stage_plan_marks_unsafe_when_git_unavailable() {
     // so a coordinator doesn't read the empty plan as "staging confirmed safe".
     let touched = repo.run(&["git-touched", "--lease", "l_1"]);
     assert_eq!(touched["git"], false);
+    assert_eq!(touched["safe_to_stage"], false);
 
     let plan = repo.run(&["git-stage-plan", "--lease", "l_1"]);
     assert_eq!(plan["git"], false);
+    assert_eq!(plan["safe_to_stage"], false);
 }
 
 #[test]

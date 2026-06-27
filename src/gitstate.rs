@@ -707,12 +707,9 @@ pub(crate) fn touched_for_lease(
     if !out_of_scope.is_empty() || !ambiguous.is_empty() {
         map.insert("safe_to_stage".to_string(), Value::Bool(false));
     }
-    // Without git there is no baseline attribution and no changed paths to stage; surface the
-    // missing-git signal so coordinators don't read the empty plan as "staging confirmed safe".
-    // (safe_to_stage is left as-is: there are no pathspecs, so the planner still routes a
-    // completed lease to cleanup rather than a phantom stage.)
     if !git_available {
         map.insert("git".to_string(), Value::Bool(false));
+        map.insert("safe_to_stage".to_string(), Value::Bool(false));
     }
     Ok(map)
 }
