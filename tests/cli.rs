@@ -2336,6 +2336,35 @@ fn depends_dash_sentinel_is_ready_and_lint_clean() {
 }
 
 #[test]
+fn next_prefers_validate_over_recover_for_stale_lease_with_report() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_123",
+    ]);
+    // Worker wrote a report, then went stale (age the heartbeat).
+    fs::write(
+        repo.root.join(".orchid/reports/l_123.md"),
+        "+++\nlease_id = \"l_123\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
+    )
+    .unwrap();
+    let lease_path = repo.root.join(".orchid/leases/l_123.json");
+    let mut lease: Value = serde_json::from_str(&fs::read_to_string(&lease_path).unwrap()).unwrap();
+    lease["heartbeat_at"] = Value::String("2020-01-01T00:00:00Z".to_string());
+    lease["started_at"] = Value::String("2020-01-01T00:00:00Z".to_string());
+    fs::write(&lease_path, serde_json::to_string_pretty(&lease).unwrap()).unwrap();
+
+    // The finished report must steer next to validate, not recover.
+    let payload = repo.run(&["next", "--spec", "example", "--older-than", "1m"]);
+    assert_eq!(payload["phase"], "validate");
+}
+
+#[test]
 fn next_wait_surfaces_scope_disjoint_ready_tasks() {
     let repo = Repo::new();
     repo.write_task_file("example", "T005", "todo", "src/feature/");

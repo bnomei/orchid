@@ -572,6 +572,13 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
     let stale = active
         .iter()
         .filter(|lease| lease_stale(lease, now, stale_after))
+        // A lease with a finished report belongs in validate, not recover, even if its
+        // heartbeat has gone stale.
+        .filter(|lease| {
+            !report_path_for_lease(root, lease)
+                .map(|path| path.exists())
+                .unwrap_or(false)
+        })
         .map(|lease| compact_lease(lease, Some(now), Some(stale_after)))
         .collect::<OrchResult<Vec<_>>>()?;
     let mut reports_ready = Vec::new();
