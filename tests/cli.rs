@@ -2201,6 +2201,30 @@ fn release_and_heartbeat_reject_completed_leases() {
 }
 
 #[test]
+fn block_rewrites_task_with_nested_table_frontmatter() {
+    let repo = Repo::new();
+    let path = repo.write_task_file("metaspec", "T001", "todo", "src/meta/");
+    // Add a nested TOML table section; a mutator must still be able to rewrite the frontmatter.
+    let task = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        task.replace("+++\n\n## Context\n", "[metadata]\nowner = \"team-a\"\n+++\n\n## Context\n"),
+    )
+    .unwrap();
+
+    let block = repo.run(&["block", "metaspec", "T001", "--reason", "waiting"]);
+    assert_eq!(block["task"], "metaspec/T001");
+    assert_eq!(
+        task_status(&repo.root, "specs/metaspec/tasks/T001.md"),
+        "blocked"
+    );
+    // The nested metadata survives the rewrite.
+    let rewritten = fs::read_to_string(&path).unwrap();
+    assert!(rewritten.contains("owner"));
+    assert!(rewritten.contains("team-a"));
+}
+
+#[test]
 fn block_on_fresh_repo_preserves_orchid_marker() {
     let repo = Repo::new();
     assert!(!repo.root.join(".orchid").exists());
