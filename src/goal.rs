@@ -109,6 +109,12 @@ impl GoalInitRequest {
     ) -> OrchResult<Self> {
         let max_duration_raw = max_duration.into();
         let max_duration = parse_duration(&max_duration_raw)?;
+        // A zero iteration budget exhausts on the first cycle check, so the goal could never
+        // run. (A zero max_duration is already rejected by parse_duration.)
+        if max_iterations == 0 {
+            return Err(OrchError::new("max-iterations must be at least 1")
+                .detail("max_iterations", max_iterations.to_string()));
+        }
         Ok(Self {
             goal_id,
             goal: goal.into(),

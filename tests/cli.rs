@@ -656,6 +656,64 @@ fn goal_keep_retry_after_crash_does_not_wedge() {
 }
 
 #[test]
+fn goal_init_rejects_zero_budgets() {
+    let repo = Repo::new();
+    let base = [
+        "goal",
+        "init",
+        "--id",
+        "zero-goal",
+        "--goal",
+        "G",
+        "--evaluator",
+        "true",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "1",
+        "--hypothesis",
+        "h",
+        "--max-duration",
+        "10h",
+    ];
+    let mut zero_iters = base.to_vec();
+    zero_iters.extend(["--max-iterations", "0"]);
+    let failed = repo.run_fail(&zero_iters);
+    assert!(failed["error"]
+        .as_str()
+        .unwrap()
+        .contains("max-iterations"));
+
+    // Zero duration is rejected by the duration parser.
+    let zero_dur = [
+        "goal",
+        "init",
+        "--id",
+        "zero-goal",
+        "--goal",
+        "G",
+        "--evaluator",
+        "true",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "1",
+        "--hypothesis",
+        "h",
+        "--max-iterations",
+        "10",
+        "--max-duration",
+        "0m",
+    ];
+    let failed = repo.run_fail(&zero_dur);
+    assert_eq!(failed["code"], "invalid_duration");
+}
+
+#[test]
 fn goal_keep_below_min_delta_is_downgraded_to_discard() {
     let repo = Repo::new();
     repo.init_git();
