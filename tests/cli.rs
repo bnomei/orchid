@@ -1799,6 +1799,33 @@ fn complete_updates_only_task_and_next_finds_stage_or_cleanup() {
 }
 
 #[test]
+fn corrupt_lease_file_fails_scope_enumeration_closed() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_real",
+    ]);
+    // A truncated lease file must not silently disappear from exclusivity checks.
+    let leases_dir = repo.root.join(".orchid/leases");
+    fs::write(leases_dir.join("l_ghost.json"), "{").unwrap();
+    let payload = repo.run_fail(&[
+        "lease",
+        "example",
+        "T002",
+        "--owner",
+        "worker:b",
+        "--lease-id",
+        "l_b",
+    ]);
+    assert_eq!(payload["code"], "corrupt_lease_file");
+}
+
+#[test]
 fn complete_rejects_released_lease_after_release() {
     let repo = Repo::new();
     repo.run(&[

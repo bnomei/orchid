@@ -94,11 +94,23 @@ pub(crate) fn all_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
         };
         validate_lease_id(expected_lease_id)?;
         let lease_path = repo_path(root, &lease_path, "lease_path")?;
-        let Ok(raw) = fs::read_to_string(&lease_path) else {
-            continue;
-        };
-        let Ok(Value::Object(mut data)) = serde_json::from_str::<Value>(&raw) else {
-            continue;
+        // Fail closed: an unreadable or unparseable lease file must not silently drop
+        // out of scope/task exclusivity checks while its filename still reserves the id.
+        let raw = fs::read_to_string(&lease_path).map_err(|err| {
+            OrchError::coded("cannot read lease file", ErrorCode::CorruptLeaseFile)
+                .detail("lease_id", expected_lease_id)
+                .detail("error", err.to_string())
+        })?;
+        let Value::Object(mut data) = serde_json::from_str::<Value>(&raw).map_err(|err| {
+            OrchError::coded("cannot parse lease file", ErrorCode::CorruptLeaseFile)
+                .detail("lease_id", expected_lease_id)
+                .detail("error", err.to_string())
+        })?
+        else {
+            return Err(
+                OrchError::coded("lease file is not a json object", ErrorCode::CorruptLeaseFile)
+                    .detail("lease_id", expected_lease_id),
+            );
         };
         bind_lease_record_id(&mut data, expected_lease_id)?;
         data.entry("_path".to_string())
