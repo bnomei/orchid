@@ -1478,6 +1478,37 @@ fn lease_agent_metadata_attach_and_status_lookup_work() {
 }
 
 #[test]
+fn attach_agent_refreshes_existing_worker_packet() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:unassigned",
+        "--lease-id",
+        "l_x",
+    ]);
+    let packet = repo.run(&["packet", "--lease", "l_x", "--role", "worker"]);
+    let packet_path = repo.root.join(packet["packet"].as_str().unwrap());
+    let before = fs::read_to_string(&packet_path).unwrap();
+    assert!(before.contains("worker:unassigned"));
+
+    repo.run(&[
+        "lease-attach-agent",
+        "--lease",
+        "l_x",
+        "--agent-id",
+        "agent_456",
+    ]);
+
+    // The packet a worker reads must reflect the post-attach identity.
+    let after = fs::read_to_string(&packet_path).unwrap();
+    assert!(after.contains("agent_456"));
+    assert!(!after.contains("worker:unassigned"));
+}
+
+#[test]
 fn agent_id_is_reusable_after_lease_completes() {
     let repo = Repo::new();
     repo.run(&[

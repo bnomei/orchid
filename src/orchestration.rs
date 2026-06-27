@@ -510,9 +510,18 @@ pub(crate) fn lease_attach_agent(
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, &request.lease)?;
     ensure_agent_id_available(root, Some(&request.agent_id), Some(&request.lease))?;
+    // If a worker packet was already rendered, its echoed owner/agent will go stale; refresh it
+    // after updating the identity so workers don't read pre-attach metadata.
+    let worker_packet_exists = lease
+        .worker_packet_path()
+        .map(|rel| root.join(rel).exists())
+        .unwrap_or(false);
     lease.set("agent_id", request.agent_id.clone());
     if lease.get_str("owner") == Some("worker:unassigned") {
         lease.set("owner", format!("worker:{}", request.agent_id));
+    }
+    if worker_packet_exists {
+        render_packet_for_lease(root, &mut lease, &request.lease, PacketRoleKind::Worker)?;
     }
     save_lease(root, &lease)?;
     let mut payload = json_ok();
