@@ -19,7 +19,6 @@ use crate::specs::safe_spec_id;
 
 pub(crate) struct RuntimeLock {
     path: PathBuf,
-    root: PathBuf,
 }
 
 impl Drop for RuntimeLock {
@@ -28,7 +27,6 @@ impl Drop for RuntimeLock {
         if let Some(parent) = self.path.parent() {
             let _ = fs::remove_dir(parent);
         }
-        let _ = fs::remove_dir(orch_dir(&self.root));
     }
 }
 
@@ -84,7 +82,6 @@ fn try_acquire_lock(path: &Path, root: &Path) -> OrchResult<RuntimeLock> {
     )?;
     Ok(RuntimeLock {
         path: path.to_path_buf(),
-        root: root.to_path_buf(),
     })
 }
 

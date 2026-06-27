@@ -3922,7 +3922,7 @@ fn packet_close_cleanup_and_research_lifecycle() {
     )
     .unwrap();
     repo.run(&["complete", "--lease", "l_test", "--verified-by", "mayor"]);
-    let payload = repo.run(&["close", "--lease", "l_test"]);
+    let payload = repo.run(&["close", "--lease", "l_test", "--force"]);
     assert!(payload["deleted"]
         .as_array()
         .unwrap()
@@ -3937,7 +3937,7 @@ fn packet_close_cleanup_and_research_lifecycle() {
         .as_array()
         .unwrap()
         .contains(&Value::String(".orchid/reports/l_test.md".to_string())));
-    assert!(!repo.root.join(".orchid").exists());
+    assert!(repo.root.join(".orchid").exists());
 
     let repo = Repo::new();
     let payload = repo.run(&["research-path", "specs/example", "--create"]);
@@ -3954,7 +3954,7 @@ fn packet_close_cleanup_and_research_lifecycle() {
         payload["deleted"],
         serde_json::json!([".orchid/spec-research/example"])
     );
-    assert!(!repo.root.join(".orchid").exists());
+    assert!(repo.root.join(".orchid").exists());
 }
 
 #[test]
