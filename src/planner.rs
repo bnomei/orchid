@@ -440,6 +440,7 @@ mod tests {
         StagePlan {
             lease_id: "l_stage".to_string(),
             task: "example/T001".to_string(),
+            git_available: true,
             safe_to_stage,
             pathspecs: pathspecs.into_iter().map(str::to_string).collect(),
             records: Vec::new(),

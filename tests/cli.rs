@@ -2945,6 +2945,30 @@ fn git_touched_and_stage_plan_split_scope_and_baseline() {
 }
 
 #[test]
+fn stage_plan_marks_unsafe_when_git_unavailable() {
+    // No init_git: the repo has no git, so attribution is impossible.
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    fs::write(repo.root.join("src/feature/work.txt"), "work\n").unwrap();
+
+    // Without git there is nothing to stage, but the payload must signal git is unavailable
+    // so a coordinator doesn't read the empty plan as "staging confirmed safe".
+    let touched = repo.run(&["git-touched", "--lease", "l_1"]);
+    assert_eq!(touched["git"], false);
+
+    let plan = repo.run(&["git-stage-plan", "--lease", "l_1"]);
+    assert_eq!(plan["git"], false);
+}
+
+#[test]
 fn stage_plan_excludes_in_scope_edits_made_after_complete() {
     let repo = Repo::new();
     repo.init_git();

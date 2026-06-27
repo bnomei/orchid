@@ -567,6 +567,7 @@ impl CompactLease {
 pub(crate) struct StagePlan {
     pub(crate) lease_id: String,
     pub(crate) task: String,
+    pub(crate) git_available: bool,
     pub(crate) safe_to_stage: bool,
     pub(crate) pathspecs: Vec<String>,
     pub(crate) records: Vec<Value>,
@@ -579,6 +580,9 @@ impl StagePlan {
         let mut map = Map::new();
         map.insert("lease_id".to_string(), Value::String(self.lease_id.clone()));
         map.insert("task".to_string(), Value::String(self.task.clone()));
+        if !self.git_available {
+            map.insert("git".to_string(), Value::Bool(false));
+        }
         if !self.safe_to_stage {
             map.insert("safe_to_stage".to_string(), Value::Bool(false));
         }
