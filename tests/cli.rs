@@ -622,6 +622,40 @@ fn goal_evaluates_discard_recommendation_with_git_reset_and_clean() {
 }
 
 #[test]
+fn goal_keep_retry_after_crash_does_not_wedge() {
+    let repo = Repo::new();
+    repo.init_git();
+    init_ready_goal(
+        &repo,
+        "crash-goal",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"baseline\"}'",
+        "10",
+    );
+    fs::write(repo.root.join("candidate.txt"), "candidate\n").unwrap();
+    write_goal_report(
+        &repo,
+        "crash-goal",
+        "C001",
+        "ready_for_evaluation",
+        "precompute static rank weights",
+    );
+    let state_path = repo.root.join(".orchid/goals/crash-goal/state.json");
+    // Capture the pre-evaluation durable state, then evaluate (commits the keep).
+    let pre_state = fs::read_to_string(&state_path).unwrap();
+    repo.run_stdout(&["goal"]);
+
+    // Simulate a crash after the keep commit but before state.json was advanced: the
+    // working tree is now clean and the C001 report is still present. The retry must not
+    // wedge on `git commit` against a clean tree.
+    fs::write(&state_path, &pre_state).unwrap();
+    let stdout = repo.run_stdout(&["goal"]);
+    assert!(stdout.starts_with("# Goal Ready"));
+    let state = goal_state(&repo, "crash-goal");
+    assert_eq!(state["cycle"], "C002");
+    assert_eq!(state["last_decision"], "keep");
+}
+
+#[test]
 fn goal_evaluator_done_recommendation_finishes_without_budget_exhaustion() {
     let repo = Repo::new();
     repo.init_git();

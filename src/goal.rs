@@ -907,8 +907,16 @@ fn keep_cycle(
     state: &mut GoalState,
     evaluator: &EvaluatorResult,
 ) -> OrchResult<()> {
-    let _staged = gitstate::stage_goal_candidates(root)?;
-    let commit = gitstate::commit_goal_keep(root, contract.goal_id.as_str(), &state.cycle)?;
+    let staged = gitstate::stage_goal_candidates(root)?;
+    // Nothing to commit means either the keep cycle made no file changes, or a previous
+    // attempt already committed this cycle and crashed before advancing state. Either way,
+    // reuse HEAD instead of failing `git commit` on a clean tree (which would wedge the loop).
+    let commit = if staged.is_empty() {
+        gitstate::head_commit(root)?
+            .ok_or_else(|| OrchError::new("goal keep requires a git head commit"))?
+    } else {
+        gitstate::commit_goal_keep(root, contract.goal_id.as_str(), &state.cycle)?
+    };
     state.baseline_commit = Some(commit.clone());
     state.baseline_value = Some(evaluator.candidate);
     state.best_commit = Some(commit);
