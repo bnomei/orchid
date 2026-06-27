@@ -279,7 +279,25 @@ fn dump_toml_value(value: &Value, array_style: Option<ArrayStyle>) -> OrchResult
     match value {
         Value::String(raw) => Ok(quote_toml_string(raw)),
         Value::Bool(raw) => Ok(if *raw { "true" } else { "false" }.to_string()),
-        Value::Number(raw) if raw.is_i64() || raw.is_u64() => Ok(raw.to_string()),
+        // serde_json renders integers without and finite floats with a decimal point or
+        // exponent, both of which TOML accepts. Floats are always finite here (the loader
+        // maps non-finite TOML floats to Null), so any Number is dumpable.
+        Value::Number(raw) => Ok(raw.to_string()),
+        Value::Object(map) => {
+            // Emit a TOML inline table so a loaded nested table round-trips on write-back.
+            let mut parts = Vec::with_capacity(map.len());
+            for (key, item) in map {
+                parts.push(format!(
+                    "{key} = {}",
+                    dump_toml_value(item, Some(ArrayStyle::Inline))?
+                ));
+            }
+            if parts.is_empty() {
+                Ok("{}".to_string())
+            } else {
+                Ok(format!("{{ {} }}", parts.join(", ")))
+            }
+        }
         Value::Array(items) => {
             if items.is_empty() {
                 if array_style == Some(ArrayStyle::Multiline) {
@@ -305,8 +323,6 @@ fn dump_toml_value(value: &Value, array_style: Option<ArrayStyle>) -> OrchResult
             Ok(format!("[\n{}\n]", lines.join("\n")))
         }
         Value::Null => Ok(quote_toml_string("")),
-        other => Err(OrchError::new("unsupported frontmatter value type")
-            .detail("type", value_type_name(other))),
     }
 }
 
@@ -380,17 +396,6 @@ fn toml_to_json(value: toml::Value) -> Value {
     }
 }
 
-fn value_type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "NoneType",
-        Value::Bool(_) => "bool",
-        Value::Number(_) => "number",
-        Value::String(_) => "str",
-        Value::Array(_) => "list",
-        Value::Object(_) => "dict",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,6 +420,24 @@ mod tests {
         assert_eq!(parsed["id"], "T900");
         assert_eq!(parsed["scope"], json!(["src/orchid"]));
         assert_eq!(body, "\n## Context\n");
+    }
+
+    #[test]
+    fn task_frontmatter_round_trips_float_and_nested_table_fields() {
+        let mut meta = Map::new();
+        meta.insert("id".to_string(), json!("T900"));
+        meta.insert("status".to_string(), json!("todo"));
+        meta.insert("priority".to_string(), json!(0.5));
+        meta.insert("meta".to_string(), json!({ "owner": "x" }));
+
+        // The loader accepts floats and tables, so the dumper must be able to write them back
+        // (otherwise complete/block/lease would wedge the task).
+        let dumped = dump_frontmatter(&meta).unwrap();
+        let text = dumped + "\n## Context\n";
+        let (parsed, _) = split_frontmatter(&text, Path::new("task.md")).unwrap();
+
+        assert_eq!(parsed["priority"], json!(0.5));
+        assert_eq!(parsed["meta"]["owner"], "x");
     }
 
     #[test]
