@@ -755,6 +755,15 @@ pub(crate) fn block(root: &Path, request: &BlockRequest) -> OrchResult<Map<Strin
     // root-discovery marker.
     ensure_runtime_dirs(root)?;
     let task = resolve_task(root, &request.target, request.task_id.as_deref())?;
+    // Don't regress a terminal task: block must not overwrite a completed task back to
+    // blocked while its completion metadata stays in frontmatter.
+    if task.status_model().is_done() {
+        return Err(
+            OrchError::coded("cannot block a completed task", ErrorCode::CannotBlockDoneTask)
+                .detail("task", task_key(&task))
+                .detail("status", task.status()),
+        );
+    }
     // Don't leave a task marked blocked while an active lease still claims it; the
     // coordinator must release/close that lease first.
     let task_rel = relpath(&task.path, root);

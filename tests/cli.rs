@@ -2327,6 +2327,33 @@ fn block_rewrites_task_with_nested_table_frontmatter() {
 }
 
 #[test]
+fn block_rejects_completed_task() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    repo.run(&["complete", "--lease", "l_1", "--verified-by", "mayor"]);
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "done"
+    );
+
+    // block must not regress a done task back to blocked.
+    let failed = repo.run_fail(&["block", "example", "T001", "--reason", "decision"]);
+    assert_eq!(failed["code"], "cannot_block_done_task");
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "done"
+    );
+}
+
+#[test]
 fn block_on_fresh_repo_preserves_orchid_marker() {
     let repo = Repo::new();
     assert!(!repo.root.join(".orchid").exists());
