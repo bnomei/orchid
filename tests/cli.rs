@@ -2028,6 +2028,14 @@ fn lease_rejects_invalid_verification_mode() {
 }
 
 #[test]
+fn numeric_spec_selector_resolves_exact_directory() {
+    let repo = Repo::new();
+    repo.write_task_file("001", "T001", "todo", "src/numeric/");
+    let ready = repo.run(&["ready", "--spec", "001", "--explain"]);
+    assert_eq!(ready["ready"][0]["task"], "001/T001");
+}
+
+#[test]
 fn depends_dash_sentinel_is_ready_and_lint_clean() {
     let repo = Repo::new();
     let path = repo.write_task_file("dashspec", "T001", "todo", "src/dash/");
