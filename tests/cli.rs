@@ -2119,6 +2119,44 @@ fn block_rejects_task_with_active_lease() {
 }
 
 #[test]
+#[cfg(unix)]
+fn complete_rolls_back_task_when_lease_save_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_abc",
+    ]);
+    // Force save_lease to fail (read-only leases dir) while the task write still succeeds.
+    let leases_dir = repo.root.join(".orchid/leases");
+    let original = fs::metadata(&leases_dir).unwrap().permissions();
+    fs::set_permissions(&leases_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let failed = repo.run_fail(&["complete", "--lease", "l_abc", "--verified-by", "mayor"]);
+    assert!(failed.get("error").is_some());
+
+    fs::set_permissions(&leases_dir, original).unwrap();
+
+    // The task must not be left done with an active lease: it is rolled back to todo and the
+    // lease stays active, so re-dispatch is still possible.
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(leases_dir.join("l_abc.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lease["status"], "active");
+}
+
+#[test]
 fn complete_rejects_released_lease_after_release() {
     let repo = Repo::new();
     repo.run(&[

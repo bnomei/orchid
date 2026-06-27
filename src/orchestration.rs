@@ -687,7 +687,13 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     lease.set("status", "completed");
     lease.set("completed_at", completed_at);
     lease.set("completed_changed", changed_paths_value(&completed_status));
-    save_lease(root, &lease)?;
+    if let Err(err) = save_lease(root, &lease) {
+        // The task is already persisted as done; if writing the completed lease fails, roll
+        // the task back to its pre-complete frontmatter so we don't wedge it as a done task
+        // with a still-active lease (which would block re-dispatch).
+        let _ = write_task_frontmatter(&task, task.frontmatter().clone());
+        return Err(err);
+    }
     let mut payload = json_ok();
     insert(&mut payload, "lease_id", request.lease.clone());
     insert(&mut payload, "task", task_key(&task));
