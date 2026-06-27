@@ -176,7 +176,11 @@ pub(crate) fn save_lease(root: &Path, lease: &LeaseRecord) -> OrchResult<()> {
         leases_dir(root).join(format!("{lease_id}.json")),
         "lease_path",
     )?;
-    atomic_write_json(&path, lease.raw())
+    // Load-time bookkeeping keys (prefixed `_`, e.g. the `_path` injected by load_lease /
+    // all_leases) are in-memory only; durable lease JSON must contain only domain fields.
+    let mut data = lease.raw().clone();
+    data.retain(|key, _| !key.starts_with('_'));
+    atomic_write_json(&path, &data)
 }
 
 pub(crate) fn lease_stale(lease: &LeaseRecord, now: DateTime<Utc>, stale_after: TimeDelta) -> bool {

@@ -2708,6 +2708,33 @@ fn release_and_heartbeat_reject_completed_leases() {
 }
 
 #[test]
+fn save_lease_does_not_persist_internal_path_metadata() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_meta",
+    ]);
+    // A load -> mutate -> save cycle (heartbeat) must not leak the in-memory `_path` key, which
+    // load_lease injects for runtime bookkeeping, into the durable lease JSON.
+    repo.run(&["heartbeat", "l_meta"]);
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_meta.json")).expect("lease json"),
+    )
+    .unwrap();
+    assert!(lease.get("_path").is_none());
+    assert!(lease
+        .as_object()
+        .unwrap()
+        .keys()
+        .all(|key| !key.starts_with('_')));
+}
+
+#[test]
 fn block_rewrites_task_with_nested_table_frontmatter() {
     let repo = Repo::new();
     let path = repo.write_task_file("metaspec", "T001", "todo", "src/meta/");
