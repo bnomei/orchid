@@ -2326,6 +2326,38 @@ fn next_spec_does_not_surface_foreign_spec_cleanup() {
 }
 
 #[test]
+#[cfg(unix)]
+fn close_keeps_lease_json_when_dependent_delete_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    repo.run(&["complete", "--lease", "l_1", "--verified-by", "mayor"]);
+    // Give the lease a report file, then make the reports dir read-only so its delete fails.
+    let reports_dir = repo.root.join(".orchid/reports");
+    fs::create_dir_all(&reports_dir).unwrap();
+    fs::write(reports_dir.join("l_1.md"), "report\n").unwrap();
+    let original = fs::metadata(&reports_dir).unwrap().permissions();
+    fs::set_permissions(&reports_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let failed = repo.run_fail(&["close", "--lease", "l_1"]);
+    assert!(failed.get("error").is_some());
+
+    fs::set_permissions(&reports_dir, original).unwrap();
+
+    // The lease JSON must survive so the close can be retried instead of orphaning artifacts.
+    assert!(repo.root.join(".orchid/leases/l_1.json").exists());
+}
+
+#[test]
 fn close_blocks_completed_lease_with_unstaged_changes() {
     let repo = Repo::new();
     repo.init_git();

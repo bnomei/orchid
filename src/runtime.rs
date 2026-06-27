@@ -278,12 +278,10 @@ pub(crate) fn close_lease_files(
         .ok_or_else(|| OrchError::new("lease missing lease_id"))?;
     validate_lease_id(lease_id)?;
     let mut deleted = Vec::new();
-    remove_if_exists(
-        &leases_dir(root).join(format!("{lease_id}.json")),
-        root,
-        &mut deleted,
-    )?;
 
+    // Delete dependent artifacts first and the lease JSON last: if a dependent delete fails,
+    // the authoritative lease record survives so the close can be retried instead of leaving
+    // orphaned packets/reports with no lease.
     let packet_dir = packets_dir(root);
     if packet_dir.exists() {
         repo_path(root, &packet_dir, "packet_dir")?;
@@ -311,6 +309,11 @@ pub(crate) fn close_lease_files(
     )?;
     remove_if_exists(
         &buds_dir(root).join(format!("{lease_id}.md")),
+        root,
+        &mut deleted,
+    )?;
+    remove_if_exists(
+        &leases_dir(root).join(format!("{lease_id}.json")),
         root,
         &mut deleted,
     )?;
