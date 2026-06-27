@@ -2094,6 +2094,16 @@ fn release_and_heartbeat_reject_completed_leases() {
 }
 
 #[test]
+fn block_on_fresh_repo_preserves_orchid_marker() {
+    let repo = Repo::new();
+    assert!(!repo.root.join(".orchid").exists());
+    let block = repo.run(&["block", "example", "T001", "--reason", "waiting"]);
+    assert_eq!(block["task"], "example/T001");
+    // The runtime marker directory must survive a lock-only command so root discovery works.
+    assert!(repo.root.join(".orchid").exists());
+}
+
+#[test]
 fn block_rejects_task_with_active_lease() {
     let repo = Repo::new();
     repo.run(&[

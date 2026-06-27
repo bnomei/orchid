@@ -711,6 +711,10 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
 
 pub(crate) fn block(root: &Path, request: &BlockRequest) -> OrchResult<Map<String, Value>> {
     let _lock = runtime_lock(root)?;
+    // Establish the runtime home like lease/bud/packet do. Without it, block writes nothing
+    // under .orchid, so the lock's Drop prunes the lock-only .orchid and erases the
+    // root-discovery marker.
+    ensure_runtime_dirs(root)?;
     let task = resolve_task(root, &request.target, request.task_id.as_deref())?;
     // Don't leave a task marked blocked while an active lease still claims it; the
     // coordinator must release/close that lease first.
