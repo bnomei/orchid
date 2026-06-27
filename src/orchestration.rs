@@ -394,7 +394,10 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
     let worker_reasoning_effort =
         resolve_worker_reasoning_effort_value(request.worker_reasoning_effort.as_deref())?;
     let worker_model = normalize_optional_string(&request.worker_model);
-    let instructions = fs::read_to_string(&request.instructions)?;
+    // Confine --instructions to the repository root like other repo-bound inputs, so a host
+    // path (e.g. /etc/passwd) cannot be copied into buds and the worker packet.
+    let instructions_path = repo_path(root, &request.instructions, "instructions")?;
+    let instructions = fs::read_to_string(&instructions_path)?;
     ensure_runtime_dirs(root)?;
 
     let active = active_leases(root)?;

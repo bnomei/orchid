@@ -2035,6 +2035,27 @@ fn complete_updates_only_task_and_next_finds_stage_or_cleanup() {
 }
 
 #[test]
+fn bud_rejects_instructions_outside_repo() {
+    let repo = Repo::new();
+    // A file outside the repository root must not be readable into a bud packet.
+    let outside = repo.root.parent().unwrap().join("secret.txt");
+    fs::write(&outside, "host secret\n").unwrap();
+
+    let failed = repo.run_fail(&[
+        "bud",
+        "--title",
+        "x",
+        "--scope",
+        "src/feature/",
+        "--instructions",
+        outside.to_str().unwrap(),
+        "--worker-reasoning-effort",
+        "medium",
+    ]);
+    assert_eq!(failed["code"], "path_outside_repo");
+}
+
+#[test]
 fn stray_misnamed_json_does_not_abort_lease_scan() {
     let repo = Repo::new();
     repo.run(&[
