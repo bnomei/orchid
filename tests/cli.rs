@@ -2326,6 +2326,57 @@ fn next_spec_does_not_surface_foreign_spec_cleanup() {
 }
 
 #[test]
+fn close_blocks_completed_lease_with_unstaged_changes() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    fs::write(repo.root.join("src/feature/work.txt"), "work\n").unwrap();
+    repo.run(&["complete", "--lease", "l_1", "--verified-by", "mayor"]);
+
+    // Closing before staging would orphan the unstaged work.
+    let failed = repo.run_fail(&["close", "--lease", "l_1"]);
+    assert_eq!(failed["code"], "close_has_unstaged_changes");
+
+    // --force overrides.
+    let closed = repo.run(&["close", "--lease", "l_1", "--force"]);
+    assert!(closed["deleted"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(".orchid/leases/l_1.json".to_string())));
+}
+
+#[test]
+fn close_succeeds_after_changes_are_committed() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    fs::write(repo.root.join("src/feature/work.txt"), "work\n").unwrap();
+    repo.run(&["complete", "--lease", "l_1", "--verified-by", "mayor"]);
+    // Documented workflow: stage and commit before close.
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-m", "stage work"]);
+
+    let closed = repo.run(&["close", "--lease", "l_1"]);
+    assert_eq!(closed["lease_id"], "l_1");
+}
+
+#[test]
 fn close_force_records_audit_trail_on_active_task() {
     let repo = Repo::new();
     repo.run(&[

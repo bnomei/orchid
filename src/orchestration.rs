@@ -922,6 +922,20 @@ pub(crate) fn close(root: &Path, request: &CloseRequest) -> OrchResult<Map<Strin
         )
         .detail("lease_id", request.lease.clone()));
     }
+    // Don't drop a completed lease's baseline before its work is staged: if the lease still
+    // has pending in-scope changes in the working tree, closing would orphan them and lose
+    // the snapshot git-stage-plan needs. Require --force to override.
+    if lease.status().is_completed() && !lease.is_bud() && !request.force {
+        let plan = stage_plan_for_lease(root, &lease)?;
+        if !plan.pathspecs.is_empty() || !plan.safe_to_stage {
+            return Err(OrchError::coded(
+                "completed lease has unstaged changes; stage first or use --force",
+                ErrorCode::CloseHasUnstagedChanges,
+            )
+            .detail("lease_id", request.lease.clone())
+            .detail("pathspecs", string_values(plan.pathspecs.clone())));
+        }
+    }
     // Force-closing an active lease deletes its runtime artifacts; leave a minimal audit
     // trail on the task (as complete does with last_lease_id) so the forced closure is not
     // invisible. The task status is left unchanged, so it stays re-leasable. Best effort:
