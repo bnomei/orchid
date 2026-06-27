@@ -2144,6 +2144,43 @@ fn lease_rejects_allow_parallel_for_serial_fanout_spec() {
 }
 
 #[test]
+fn lease_overlap_uses_live_task_scope_after_expansion() {
+    let repo = Repo::new();
+    let t1 = repo.write_task_file("sx", "T001", "todo", "src/a/");
+    repo.write_task_file("sx", "T002", "todo", "src/b/");
+    repo.run(&[
+        "lease",
+        "sx",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    // Expand T001's scope on disk while it is leased.
+    let task = fs::read_to_string(&t1).unwrap();
+    fs::write(
+        &t1,
+        task.replace("scope = [\"src/a/\"]", "scope = [\"src/a/\", \"src/b/\"]"),
+    )
+    .unwrap();
+
+    // Leasing T002 (src/b) must now conflict with l_1's expanded live scope.
+    let failed = repo.run_fail(&[
+        "lease",
+        "sx",
+        "T002",
+        "--owner",
+        "worker:b",
+        "--lease-id",
+        "l_2",
+        "--allow-parallel",
+    ]);
+    assert_eq!(failed["code"], "scope_conflict");
+    assert_eq!(failed["lease_id"], "l_1");
+}
+
+#[test]
 fn lease_rejects_invalid_verification_mode() {
     let repo = Repo::new();
     let path = repo.write_task_file("vmspec", "T001", "todo", "src/vm/");

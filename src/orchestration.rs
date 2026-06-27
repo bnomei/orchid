@@ -283,10 +283,11 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
                     .detail("lease_id", lease.id_value()),
             );
         }
-        if scopes_overlap(&task.scope(), &lease.scope()) {
+        let effective_scope = effective_lease_scope(root, lease);
+        if scopes_overlap(&task.scope(), &effective_scope) {
             return Err(OrchError::coded("scope conflict", ErrorCode::ScopeConflict)
                 .detail("lease_id", lease.id_value())
-                .detail("scope", string_values(lease.scope())));
+                .detail("scope", string_values(effective_scope)));
         }
     }
     if request.serial && !active.is_empty() {
@@ -1689,6 +1690,26 @@ fn lease_in_selected_specs(lease: &LeaseRecord, selected_specs: &[String]) -> bo
     let task = lease.get_str("task").unwrap_or("");
     let spec = task.split_once('/').map(|(spec, _)| spec).unwrap_or("");
     !spec.is_empty() && selected_specs.iter().any(|selected| selected == spec)
+}
+
+/// Scope to enforce exclusivity against for an active lease: the snapshot stored at lease
+/// time unioned with the task's current on-disk scope. This way, expanding a task's scope
+/// while it is leased still blocks overlapping leases on the newly claimed region. Best
+/// effort — a bud (no task file) or an unreadable task falls back to the stored snapshot.
+fn effective_lease_scope(root: &Path, lease: &LeaseRecord) -> Vec<String> {
+    let mut scope = lease.scope();
+    if !lease.is_bud() {
+        if let Ok(task_path) = repo_path(root, lease.task_path(), "task_path") {
+            if let Ok(task) = load_task(task_path, root) {
+                for entry in task.scope() {
+                    if !scope.contains(&entry) {
+                        scope.push(entry);
+                    }
+                }
+            }
+        }
+    }
+    scope
 }
 
 fn specs_arg(specs: &[String]) -> Option<&[String]> {
