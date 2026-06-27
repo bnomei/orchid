@@ -635,6 +635,14 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
         return Ok(payload);
     }
 
+    if !lease.status().is_active() {
+        return Err(OrchError::coded(
+            "cannot complete a lease that is not active",
+            ErrorCode::CompleteRequiresActiveLease,
+        )
+        .detail("lease_id", request.lease.clone())
+        .detail("status", lease.get_str("status").unwrap_or("").to_string()));
+    }
     let task_path = lease.task_path();
     let task = load_task(repo_path(root, task_path, "task_path")?, root)?;
     let mut frontmatter = task.frontmatter().clone();

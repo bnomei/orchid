@@ -1799,6 +1799,39 @@ fn complete_updates_only_task_and_next_finds_stage_or_cleanup() {
 }
 
 #[test]
+fn complete_rejects_released_lease_after_release() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_old",
+    ]);
+    repo.run(&["release", "l_old", "--reason", "paused"]);
+    // Re-leasing the same todo task must succeed now that the old lease is released.
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:b",
+        "--lease-id",
+        "l_new",
+    ]);
+    // Completing the released lease must be rejected so it cannot mark the task done
+    // while l_new is still active.
+    let payload = repo.run_fail(&["complete", "--lease", "l_old", "--verified-by", "validator:x"]);
+    assert_eq!(payload["code"], "complete_requires_active_lease");
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+}
+
+#[test]
 fn report_check_rejects_report_path_that_claims_another_lease() {
     let repo = Repo::new();
     repo.write_task_file("example", "T005", "todo", "src/other/");
