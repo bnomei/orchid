@@ -2361,6 +2361,24 @@ fn research_commands_resolve_numeric_spec_prefix() {
 }
 
 #[test]
+fn all_open_resolves_satisfied_cross_spec_dependency() {
+    let repo = Repo::new();
+    repo.write_task_file("002-done", "T010", "done", "src/done/");
+    let active = repo.write_task_file("001-active", "T005", "todo", "src/active/");
+    let task = fs::read_to_string(&active).unwrap();
+    fs::write(
+        &active,
+        task.replace("depends = []", "depends = [\"002-done/T010\"]"),
+    )
+    .unwrap();
+
+    // The cross-spec dependency is satisfied (002-done/T010 is done), so the task is ready,
+    // not falsely blocked as a missing dependency.
+    let payload = repo.run(&["ready", "--all-open", "--explain"]);
+    assert_eq!(payload["ready"][0]["task"], "001-active/T005");
+}
+
+#[test]
 fn numeric_spec_selector_resolves_exact_directory() {
     let repo = Repo::new();
     repo.write_task_file("001", "T001", "todo", "src/numeric/");

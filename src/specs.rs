@@ -398,6 +398,9 @@ pub(crate) fn ready_tasks(
     active: Option<&[LeaseRecord]>,
 ) -> OrchResult<ReadyTasksResult> {
     let (tasks, selected_specs) = select_tasks(root, spec_names, all_open)?;
+    // Resolve dependencies against the full task index (not just the selected spec) so a
+    // satisfied cross-spec dependency like other-spec/T010 isn't falsely reported missing.
+    let all_tasks = load_tasks(root, None)?;
     let active = active.unwrap_or(&[]);
     let mut ready = Vec::new();
     let mut blocked = Vec::new();
@@ -424,7 +427,7 @@ pub(crate) fn ready_tasks(
                 if dep == "-" {
                     continue;
                 }
-                match task_by_ref(&tasks, &task.spec_id, &dep) {
+                match task_by_ref(&all_tasks, &task.spec_id, &dep) {
                     None => {
                         reason = Some(format!("missing dependency:{dep}"));
                         break;
