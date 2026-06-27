@@ -469,6 +469,31 @@ fn goal_init_with_valid_evaluator_records_baseline_and_renders_ready_markdown() 
 }
 
 #[test]
+fn bare_goal_advances_ready_cycle_to_running() {
+    let repo = Repo::new();
+    repo.init_git();
+    init_ready_goal(
+        &repo,
+        "run-goal",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":118.5,\"delta\":1.5,\"reason\":\"baseline\"}'",
+        "10",
+    );
+    // `goal init` leaves the freshly established cycle in `ready` (not started yet).
+    assert_eq!(goal_state(&repo, "run-goal")["status"], "ready");
+
+    // The first standalone `orchid goal` still shows the ready kickoff prompt, but advances the
+    // durable state to `running` so coordinators can tell the cycle is in progress.
+    let stdout = repo.run_stdout(&["goal"]);
+    assert!(stdout.starts_with("# Goal Ready"));
+    assert_eq!(goal_state(&repo, "run-goal")["status"], "running");
+
+    // Subsequent calls (still no cycle report) render the running prompt.
+    let stdout = repo.run_stdout(&["goal"]);
+    assert!(stdout.starts_with("# Goal Running"));
+    assert_eq!(goal_state(&repo, "run-goal")["status"], "running");
+}
+
+#[test]
 fn bare_goal_renders_running_prompt_for_missing_cycle_report() {
     let repo = Repo::new();
     repo.init_git();

@@ -582,6 +582,31 @@ pub(crate) fn render_goal_prompt(
     }
 }
 
+/// Render the bare `orchid goal` prompt and, on the first standalone request for a `ready`
+/// cycle whose report does not yet exist, advance the durable state into `running`. This makes
+/// the documented `ready -> running -> evaluate` transition observable (docs/goal.md) so a
+/// coordinator can distinguish "cycle not started" from "cycle in progress". The kickoff
+/// (ready) prompt is still returned for this first call; subsequent calls render the running
+/// prompt. The transition is intentionally driven from the user-facing command rather than the
+/// shared renderer so that `goal init` and post-decision cycle advances leave the new cycle in
+/// `ready` until the agent actually picks it up.
+pub(crate) fn render_goal_prompt_and_advance(
+    root: &Path,
+    contract: &GoalContract,
+    state: &GoalState,
+) -> OrchResult<String> {
+    let prompt = render_goal_prompt(root, contract, state)?;
+    if state.status == GoalStatus::Ready
+        && !report_path(root, &contract.goal_id, &state.cycle)?.exists()
+    {
+        let mut next = state.clone();
+        next.status = GoalStatus::Running;
+        next.updated_at = now_iso();
+        next.write(root, &contract.goal_id)?;
+    }
+    Ok(prompt)
+}
+
 pub(crate) fn render_no_goal_prompt() -> String {
     "# Goal Setup\n\nNo current goal is initialized.\n\nRun `orchid goal init` with `--goal`, `--metric`, `--direction`, `--min-delta`, `--hypothesis`, `--max-iterations`, and `--max-duration`.\n".to_string()
 }

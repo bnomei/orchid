@@ -520,7 +520,7 @@ fn cmd_goal_init(root: &Path, args: &GoalInitArgs) -> OrchResult<String> {
 
 fn cmd_goal_current(root: &Path) -> OrchResult<String> {
     match goal::current_goal(root)? {
-        Some((contract, state)) => goal::render_goal_prompt(root, &contract, &state),
+        Some((contract, state)) => goal::render_goal_prompt_and_advance(root, &contract, &state),
         None => Ok(goal::render_no_goal_prompt()),
     }
 }
