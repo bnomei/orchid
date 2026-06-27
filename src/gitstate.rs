@@ -566,8 +566,15 @@ pub(crate) fn changed_protected_paths(
     Ok(changed)
 }
 
-pub(crate) fn stage_goal_candidates(root: &Path) -> OrchResult<Vec<String>> {
-    let candidates = visible_changed_paths(root)?;
+pub(crate) fn stage_goal_candidates(root: &Path, scope: &[String]) -> OrchResult<Vec<String>> {
+    let mut candidates = visible_changed_paths(root)?;
+    if !scope.is_empty() {
+        // A declared goal scope bounds what a kept cycle commits: stage only changed paths
+        // inside the scope so out-of-scope working-tree edits are never folded into the goal
+        // baseline. They stay visible and uncommitted (like the lease flow's scope handling)
+        // rather than being silently absorbed into the cycle.
+        candidates.retain(|path| path_in_scope(path, scope));
+    }
     if candidates.is_empty() {
         return Ok(candidates);
     }

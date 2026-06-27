@@ -1014,7 +1014,8 @@ fn keep_cycle(
     state: &mut GoalState,
     evaluator: &EvaluatorResult,
 ) -> OrchResult<()> {
-    let staged = gitstate::stage_goal_candidates(root)?;
+    let scope: Vec<String> = contract.scope.iter().map(|path| path_to_string(path)).collect();
+    let staged = gitstate::stage_goal_candidates(root, &scope)?;
     // Nothing to commit means either the keep cycle made no file changes, or a previous
     // attempt already committed this cycle and crashed before advancing state. Either way,
     // reuse HEAD instead of failing `git commit` on a clean tree (which would wedge the loop).

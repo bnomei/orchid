@@ -601,6 +601,53 @@ fn bare_goal_evaluates_ready_report_and_records_keep_decision() {
 }
 
 #[test]
+fn goal_keep_commits_only_in_scope_changes() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run_stdout(&[
+        "goal",
+        "init",
+        "--id",
+        "scoped-goal",
+        "--goal",
+        "G",
+        "--evaluator",
+        "printf '%s\\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"r\"}'",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "5",
+        "--hypothesis",
+        "h",
+        "--max-iterations",
+        "10",
+        "--max-duration",
+        "10h",
+        "--scope",
+        "src/ranker.rs",
+    ]);
+
+    // The cycle edits one in-scope file and one out-of-scope file.
+    fs::create_dir_all(repo.root.join("src")).unwrap();
+    fs::write(repo.root.join("src/ranker.rs"), "fn rank() {}\n").unwrap();
+    fs::write(repo.root.join("incidental.md"), "incidental\n").unwrap();
+    write_goal_report(&repo, "scoped-goal", "C001", "ready_for_evaluation", "next");
+
+    let stdout = repo.run_stdout(&["goal"]);
+    assert!(stdout.starts_with("# Goal Ready"));
+
+    // Only the in-scope file is folded into the goal baseline; the out-of-scope file is left
+    // uncommitted in the working tree rather than silently absorbed into the cycle.
+    let committed = git_stdout(&repo.root, &["show", "--pretty=", "--name-only", "HEAD"]);
+    assert!(committed.contains("src/ranker.rs"), "committed: {committed}");
+    assert!(!committed.contains("incidental.md"), "committed: {committed}");
+    let porcelain = git_stdout(&repo.root, &["status", "--porcelain", "incidental.md"]);
+    assert!(porcelain.contains("incidental.md"), "status: {porcelain}");
+}
+
+#[test]
 fn goal_evaluates_discard_recommendation_with_git_reset_and_clean() {
     let repo = Repo::new();
     repo.init_git();
