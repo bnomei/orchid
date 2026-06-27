@@ -819,6 +819,38 @@ fn evaluate_cycle_report(
     let result_next_hypothesis = next.next_hypothesis.clone();
     let result_reason = evaluator.reason.clone();
 
+    // Re-check protected surfaces immediately before keep: the pre-evaluator check is a
+    // point-in-time snapshot, so edits made during the (unbounded) evaluator subprocess must
+    // not slip into the keep commit.
+    if recommendation == EvaluatorRecommendation::Keep {
+        let protected_changes =
+            changed_protected_surfaces(root, contract, next.baseline_commit.as_deref())?;
+        if !protected_changes.is_empty() {
+            next.status = GoalStatus::Blocked;
+            next.last_decision = Some(EvaluatorRecommendation::Blocked);
+            next.budget_exhausted_reason = Some(format!(
+                "protected surface changed: {}",
+                protected_changes.join(", ")
+            ));
+            let candidate_commit = gitstate::head_commit(root)?;
+            append_cycle_result(
+                root,
+                contract,
+                CycleResultTrace {
+                    cycle: &result_cycle,
+                    baseline_commit: result_baseline_commit.as_deref(),
+                    candidate_commit: candidate_commit.as_deref(),
+                    next_hypothesis: &result_next_hypothesis,
+                    decision: "blocked",
+                    evaluator: None,
+                    reason: next.budget_exhausted_reason.as_deref(),
+                },
+            )?;
+            next.write(root, &contract.goal_id)?;
+            return Ok(next);
+        }
+    }
+
     if recommendation == EvaluatorRecommendation::Keep {
         close_cycle(root, contract, &mut next, &evaluator)?;
         append_cycle_result(

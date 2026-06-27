@@ -939,6 +939,53 @@ fn protected_surface_change_blocks_automatic_decision() {
 }
 
 #[test]
+fn protected_surface_edited_during_evaluation_blocks_keep() {
+    let repo = Repo::new();
+    // Commit an initial justfile so it is clean at the pre-evaluator check.
+    fs::write(repo.root.join("justfile"), "orig\n").unwrap();
+    repo.init_git();
+    // The evaluator edits the protected file during the cycle run (only when a baseline value
+    // is set, so baseline establishment leaves it clean), then recommends keep.
+    repo.run_stdout(&[
+        "goal",
+        "init",
+        "--id",
+        "toctou-goal",
+        "--goal",
+        "Reduce p95",
+        "--evaluator",
+        "[ -n \"$ORCHID_GOAL_BASELINE_VALUE\" ] && echo changed > justfile; printf '%s\\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"baseline\"}'",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "5",
+        "--hypothesis",
+        "h",
+        "--max-iterations",
+        "10",
+        "--max-duration",
+        "10h",
+        "--protected-surface",
+        "justfile",
+    ]);
+    write_goal_report(
+        &repo,
+        "toctou-goal",
+        "C001",
+        "ready_for_evaluation",
+        "next attempt",
+    );
+
+    let stdout = repo.run_stdout(&["goal"]);
+    assert!(stdout.starts_with("# Goal Blocked"));
+    assert!(stdout.contains("protected surface changed: justfile"));
+    let status = repo.run_stdout(&["goal", "status"]);
+    assert!(status.contains("- Kept cycles: `0`"));
+}
+
+#[test]
 fn protected_surface_committed_in_cycle_blocks_automatic_decision() {
     let repo = Repo::new();
     repo.init_git();
