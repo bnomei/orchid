@@ -32,6 +32,11 @@ impl Drop for RuntimeLock {
     }
 }
 
+/// A runtime lock older than this is treated as abandoned by a dead owner and reclaimed. Mutating
+/// commands hold the lock only for their own (sub-second) duration, so this bound is far longer
+/// than any legitimate hold yet bounds recovery after a SIGKILL/OOM/power-loss.
+const LOCK_STALE_AFTER_SECONDS: i64 = 300;
+
 pub(crate) fn runtime_lock(root: &Path) -> OrchResult<RuntimeLock> {
     let lock_dir = repo_path(root, locks_dir(root), "lock_dir")?;
     fs::create_dir_all(&lock_dir)?;
@@ -44,14 +49,30 @@ pub(crate) fn runtime_lock(root: &Path) -> OrchResult<RuntimeLock> {
         );
     }
     let path = lock_dir.join("state.lock");
+    match try_acquire_lock(&path, root) {
+        Ok(lock) => Ok(lock),
+        Err(err) if err.code == ErrorCode::RuntimeLockBusy.as_str() => {
+            // The lock already exists. If its owner is gone (recorded created_at / file mtime
+            // older than the staleness bound), reclaim it so a SIGKILL/OOM/power-loss between
+            // acquire and Drop cannot wedge every later command forever.
+            if lock_is_stale(&path) && reclaim_stale_lock(&path) {
+                return try_acquire_lock(&path, root);
+            }
+            Err(err)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn try_acquire_lock(path: &Path, root: &Path) -> OrchResult<RuntimeLock> {
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(&path)
+        .open(path)
         .map_err(|err| {
             if err.kind() == std::io::ErrorKind::AlreadyExists {
                 OrchError::coded("runtime lock busy", ErrorCode::RuntimeLockBusy)
-                    .detail("lock", relpath(&path, root))
+                    .detail("lock", relpath(path, root))
             } else {
                 OrchError::from(err)
             }
@@ -62,9 +83,41 @@ pub(crate) fn runtime_lock(root: &Path) -> OrchResult<RuntimeLock> {
         serde_json::json!({"pid": std::process::id(), "created_at": now_iso()})
     )?;
     Ok(RuntimeLock {
-        path,
+        path: path.to_path_buf(),
         root: root.to_path_buf(),
     })
+}
+
+fn lock_is_stale(path: &Path) -> bool {
+    lock_age_seconds(path).is_some_and(|age| age >= LOCK_STALE_AFTER_SECONDS)
+}
+
+/// Age of the lock, preferring the recorded `created_at`; falls back to the file's mtime when the
+/// payload is missing or unreadable (e.g. a crash mid-write). A fresh, mid-creation lock therefore
+/// reads as young and is never reclaimed.
+fn lock_age_seconds(path: &Path) -> Option<i64> {
+    if let Ok(content) = fs::read_to_string(path) {
+        if let Ok(value) = serde_json::from_str::<Value>(content.trim()) {
+            if let Some(stamp) = parse_iso_datetime(value.get("created_at")) {
+                return Some((utc_now() - stamp).num_seconds());
+            }
+        }
+    }
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    Some(modified.elapsed().ok()?.as_secs() as i64)
+}
+
+/// Atomically claim a stale lock by renaming it to a per-process name: `rename` is atomic, so when
+/// two processes both observe the same stale lock only one wins the rename (the loser gets ENOENT
+/// and falls back to a normal busy result). The winner deletes the claimed file and recreates.
+fn reclaim_stale_lock(path: &Path) -> bool {
+    let claim = path.with_file_name(format!("state.lock.reclaiming.{}", std::process::id()));
+    if fs::rename(path, &claim).is_ok() {
+        let _ = fs::remove_file(&claim);
+        true
+    } else {
+        false
+    }
 }
 
 pub(crate) fn active_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {

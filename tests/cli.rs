@@ -2808,6 +2808,45 @@ fn release_and_heartbeat_reject_completed_leases() {
 }
 
 #[test]
+fn runtime_lock_reclaims_stale_lock_but_respects_fresh_one() {
+    let repo = Repo::new();
+    let lock_dir = repo.root.join(".orchid/locks");
+    fs::create_dir_all(&lock_dir).unwrap();
+    let lock_path = lock_dir.join("state.lock");
+
+    // A lock whose recorded owner is long gone (old created_at) must be reclaimed so a
+    // crash between acquire and Drop cannot wedge every later command.
+    let stale = (Utc::now() - Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, false);
+    fs::write(
+        &lock_path,
+        format!("{{\"pid\":424242,\"created_at\":\"{stale}\"}}\n"),
+    )
+    .unwrap();
+    let lease = repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_reclaim",
+    ]);
+    assert_eq!(lease["lease_id"], "l_reclaim");
+
+    // A fresh lock (current created_at) still means another command holds it: respect it.
+    // (The successful lease above released and pruned the lock dir, so recreate it.)
+    fs::create_dir_all(&lock_dir).unwrap();
+    let fresh = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, false);
+    fs::write(
+        &lock_path,
+        format!("{{\"pid\":424242,\"created_at\":\"{fresh}\"}}\n"),
+    )
+    .unwrap();
+    let busy = repo.run_fail(&["lease", "example", "T002", "--owner", "worker:b"]);
+    assert_eq!(busy["code"], "runtime_lock_busy");
+}
+
+#[test]
 fn save_lease_does_not_persist_internal_path_metadata() {
     let repo = Repo::new();
     repo.run(&[
