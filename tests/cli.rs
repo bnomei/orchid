@@ -2181,6 +2181,36 @@ fn lease_overlap_uses_live_task_scope_after_expansion() {
 }
 
 #[test]
+fn lease_rejects_task_id_path_traversal() {
+    let repo = Repo::new();
+    repo.write_task_file("001-foo", "T001", "todo", "src/foo/");
+    repo.write_task_file("002-bar", "T001", "todo", "src/bar/");
+
+    // A task id with .. must not escape the target spec's tasks directory.
+    let failed = repo.run_fail(&[
+        "lease",
+        "001-foo",
+        "../../002-bar/tasks/T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    assert_eq!(failed["code"], "invalid_task_id");
+
+    // The spec/task target form is guarded the same way.
+    let failed = repo.run_fail(&[
+        "lease",
+        "001-foo/../../002-bar/tasks/T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_2",
+    ]);
+    assert_eq!(failed["code"], "invalid_task_id");
+}
+
+#[test]
 fn lease_rejects_invalid_verification_mode() {
     let repo = Repo::new();
     let path = repo.write_task_file("vmspec", "T001", "todo", "src/vm/");

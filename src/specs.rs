@@ -314,6 +314,23 @@ pub(crate) fn task_key(task: &Task) -> String {
     format!("{}/{}", task.spec_id, task.id())
 }
 
+/// A task id must be a single filename segment so it cannot escape the target spec's
+/// tasks directory (e.g. `../../other-spec/tasks/T001`).
+fn safe_task_id(task_id: &str) -> OrchResult<&str> {
+    let valid = !task_id.is_empty()
+        && task_id != "."
+        && task_id != ".."
+        && !task_id.contains('/')
+        && !task_id.contains('\\')
+        && !task_id.contains("..");
+    if !valid {
+        return Err(
+            OrchError::coded("invalid task id", ErrorCode::InvalidTaskId).detail("task_id", task_id),
+        );
+    }
+    Ok(task_id)
+}
+
 pub(crate) fn resolve_task(root: &Path, target: &str, task_id: Option<&str>) -> OrchResult<Task> {
     let target_path = Path::new(target);
     if task_id.is_none() && target_path.extension().and_then(|s| s.to_str()) == Some("md") {
@@ -322,7 +339,7 @@ pub(crate) fn resolve_task(root: &Path, target: &str, task_id: Option<&str>) -> 
     if task_id.is_none() && target.contains('/') {
         let mut parts = target.splitn(2, '/');
         let spec = parts.next().unwrap_or("").to_string();
-        let task = parts.next().unwrap_or("");
+        let task = safe_task_id(parts.next().unwrap_or(""))?;
         let resolved = resolve_spec_selectors(root, &[spec])?;
         return load_task(
             root.join("specs")
@@ -338,6 +355,7 @@ pub(crate) fn resolve_task(root: &Path, target: &str, task_id: Option<&str>) -> 
             ErrorCode::TaskIdRequired,
         ));
     };
+    let task_id = safe_task_id(task_id)?;
     let resolved = resolve_spec_selectors(root, &[target.to_string()])?;
     load_task(
         root.join("specs")
