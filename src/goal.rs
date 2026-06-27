@@ -730,7 +730,8 @@ fn evaluate_cycle_report(
         return Ok(next);
     }
 
-    let protected_changes = changed_protected_surfaces(root, contract)?;
+    let protected_changes =
+        changed_protected_surfaces(root, contract, next.baseline_commit.as_deref())?;
     if !protected_changes.is_empty() {
         next.status = GoalStatus::Blocked;
         next.budget_exhausted_reason = Some(format!(
@@ -865,13 +866,17 @@ fn evaluator_command(root: &Path, contract: &GoalContract) -> OrchResult<Command
     Ok(command)
 }
 
-fn changed_protected_surfaces(root: &Path, contract: &GoalContract) -> OrchResult<Vec<String>> {
+fn changed_protected_surfaces(
+    root: &Path,
+    contract: &GoalContract,
+    baseline: Option<&str>,
+) -> OrchResult<Vec<String>> {
     let scopes: Vec<String> = contract
         .protected_surfaces
         .iter()
         .map(|path| path_to_string(path))
         .collect();
-    gitstate::changed_protected_paths(root, &scopes)
+    gitstate::changed_protected_paths(root, &scopes, baseline)
 }
 
 fn close_cycle(

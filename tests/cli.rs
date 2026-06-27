@@ -786,6 +786,55 @@ fn protected_surface_change_blocks_automatic_decision() {
 }
 
 #[test]
+fn protected_surface_committed_in_cycle_blocks_automatic_decision() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run_stdout(&[
+        "goal",
+        "init",
+        "--id",
+        "protected-goal",
+        "--goal",
+        "Reduce search ranking p95",
+        "--evaluator",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"baseline\"}'",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "5",
+        "--hypothesis",
+        "cache normalized query features",
+        "--max-iterations",
+        "10",
+        "--max-duration",
+        "10h",
+        "--protected-surface",
+        "justfile",
+    ]);
+    // Commit the protected-surface edit during the cycle so the working tree is clean
+    // and porcelain status alone would miss it.
+    fs::write(repo.root.join("justfile"), "goal-eval:\n\t@echo changed\n").unwrap();
+    git(&repo.root, &["add", "justfile"]);
+    git(&repo.root, &["commit", "-m", "tweak evaluator"]);
+    write_goal_report(
+        &repo,
+        "protected-goal",
+        "C001",
+        "ready_for_evaluation",
+        "next attempt",
+    );
+
+    let stdout = repo.run_stdout(&["goal"]);
+
+    assert!(stdout.starts_with("# Goal Blocked"));
+    assert!(stdout.contains("protected surface changed: justfile"));
+    let state = goal_state(&repo, "protected-goal");
+    assert_eq!(state["status"], "blocked");
+}
+
+#[test]
 fn ready_requires_scope_and_reports_blocked_tasks() {
     let repo = Repo::new();
     let payload = repo.run_from_cwd(&["ready", "--spec", "example"]);

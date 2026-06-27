@@ -510,14 +510,39 @@ pub(crate) fn visible_changed_paths(root: &Path) -> OrchResult<Vec<String>> {
     Ok(changed_paths(&git_status_data(root)?))
 }
 
+/// Paths that differ between `baseline` and HEAD. Rename detection is disabled so a
+/// protected file renamed away still surfaces under its original name. Returns empty
+/// when git is unavailable.
+pub(crate) fn changed_paths_since(root: &Path, baseline: &str) -> OrchResult<Vec<String>> {
+    if !git_available(root) {
+        return Ok(Vec::new());
+    }
+    let out = git(
+        root,
+        &["diff", "--no-renames", "--name-only", "-z", baseline, "HEAD"],
+        true,
+    )?;
+    Ok(split_z(&out))
+}
+
 pub(crate) fn changed_protected_paths(
     root: &Path,
     protected_surfaces: &[String],
+    baseline: Option<&str>,
 ) -> OrchResult<Vec<String>> {
     let mut changed: Vec<String> = visible_changed_paths(root)?
         .into_iter()
         .filter(|path| path_in_scope(path, protected_surfaces))
         .collect();
+    // Uncommitted status misses protected edits already committed during the cycle;
+    // diff against the cycle baseline to catch those too.
+    if let Some(baseline) = baseline {
+        changed.extend(
+            changed_paths_since(root, baseline)?
+                .into_iter()
+                .filter(|path| path_in_scope(path, protected_surfaces)),
+        );
+    }
     changed.sort();
     changed.dedup();
     Ok(changed)
