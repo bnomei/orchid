@@ -533,8 +533,14 @@ mod tests {
             "src/feature_extra/file.rs",
             &["src/feature".to_string()]
         ));
+        assert!(path_in_scope("src/main.rs", &[".".to_string()]));
+        assert!(path_in_scope("src/main.rs", &["/".to_string()]));
         assert!(scopes_overlap(
             &["src/feature".to_string()],
+            &["src/feature/file.rs".to_string()]
+        ));
+        assert!(scopes_overlap(
+            &[".".to_string()],
             &["src/feature/file.rs".to_string()]
         ));
         assert!(!scopes_overlap(

@@ -107,9 +107,9 @@ impl Scope {
         let norm_path = normalize_path_for_scope(path);
         self.entries.iter().any(|scope| {
             let norm_scope = normalize_scope_entry(scope);
-            !norm_scope.is_empty()
-                && (norm_path == norm_scope
-                    || norm_path.starts_with(&(norm_scope.trim_end_matches('/').to_string() + "/")))
+            norm_scope.is_empty()
+                || norm_path == norm_scope
+                || norm_path.starts_with(&(norm_scope.trim_end_matches('/').to_string() + "/"))
         })
     }
 
@@ -118,11 +118,11 @@ impl Scope {
             let ln = normalize_scope_entry(left);
             other.entries.iter().any(|right| {
                 let rn = normalize_scope_entry(right);
-                !ln.is_empty()
-                    && !rn.is_empty()
-                    && (ln == rn
-                        || ln.starts_with(&(rn.trim_end_matches('/').to_string() + "/"))
-                        || rn.starts_with(&(ln.trim_end_matches('/').to_string() + "/")))
+                ln.is_empty()
+                    || rn.is_empty()
+                    || ln == rn
+                    || ln.starts_with(&(rn.trim_end_matches('/').to_string() + "/"))
+                    || rn.starts_with(&(ln.trim_end_matches('/').to_string() + "/"))
             })
         })
     }
