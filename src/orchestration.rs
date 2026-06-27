@@ -1315,7 +1315,7 @@ fn report_path_from_request(root: &Path, value: &str) -> OrchResult<ResolvedRepo
         }
         Err(error) if error.code == ErrorCode::PathOutsideRepo.as_str() => {
             let path = abs_clean_arg(Path::new(value))?;
-            if let Some((path, rel)) = external_orchid_report_path(&path)? {
+            if let Some((path, rel)) = external_orchid_report_path(root, &path)? {
                 return Ok(ResolvedReportPath { path, rel });
             }
             Err(error)
@@ -1347,17 +1347,38 @@ fn clean_path(path: &Path) -> PathBuf {
     out
 }
 
-fn external_orchid_report_path(path: &Path) -> OrchResult<Option<(PathBuf, String)>> {
+fn external_orchid_report_path(
+    root: &Path,
+    path: &Path,
+) -> OrchResult<Option<(PathBuf, String)>> {
     let Ok(path) = fs::canonicalize(path) else {
         return Ok(None);
     };
-    if let Some(rel) = orchid_report_relpath(&path) {
-        return Ok(Some((path.clone(), rel)));
+    if let Some((external_root, rel)) = orchid_report_relpath(&path) {
+        // The fallback exists only to read a report written in a linked git worktree of the
+        // *same* repository (worktree support, commit 0175ba8). Without this check it would
+        // admit any `<anything>/.orchid/reports/<name>` file on the filesystem, letting a
+        // worker plant an out-of-root report and spoof the report-check gate.
+        if same_git_repository(root, &external_root) {
+            return Ok(Some((path.clone(), rel)));
+        }
     }
     Ok(None)
 }
 
-fn orchid_report_relpath(path: &Path) -> Option<String> {
+/// True when `a` and `b` are checkouts of the same git repository (they share a git common
+/// directory). Used to confine the external report-path fallback to genuine linked worktrees.
+fn same_git_repository(a: &Path, b: &Path) -> bool {
+    match (
+        crate::gitstate::git_common_dir(a),
+        crate::gitstate::git_common_dir(b),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn orchid_report_relpath(path: &Path) -> Option<(PathBuf, String)> {
     for ancestor in path.ancestors() {
         if ancestor.file_name()? != "reports" {
             continue;
@@ -1369,7 +1390,7 @@ fn orchid_report_relpath(path: &Path) -> Option<String> {
         let root = orchid_dir.parent()?;
         let rel = path.strip_prefix(root).ok()?;
         if is_orchid_report_path(rel) {
-            return Some(path_to_string(rel));
+            return Some((root.to_path_buf(), path_to_string(rel)));
         }
     }
     None

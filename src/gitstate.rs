@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::{Map, Value};
@@ -126,6 +126,24 @@ pub(crate) fn head_commit(root: &Path) -> OrchResult<Option<String>> {
 
 fn git_available(root: &Path) -> bool {
     git(root, &["rev-parse", "--show-toplevel"], true).is_ok()
+}
+
+/// Resolve the shared git directory (`--git-common-dir`) for `root`, canonicalized to an
+/// absolute path. Linked worktrees of the same repository share this directory, so it is the
+/// identity used to decide whether two checkouts belong to the same repository. Returns `None`
+/// when `root` is not inside a git repository.
+pub(crate) fn git_common_dir(root: &Path) -> Option<PathBuf> {
+    let raw = git_text(root, &["rev-parse", "--git-common-dir"], true).ok()?;
+    if raw.is_empty() {
+        return None;
+    }
+    let candidate = Path::new(&raw);
+    let absolute = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        root.join(candidate)
+    };
+    std::fs::canonicalize(&absolute).ok()
 }
 
 fn split_z(data: &[u8]) -> Vec<String> {

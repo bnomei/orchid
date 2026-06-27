@@ -2966,6 +2966,7 @@ fn explicit_root_does_not_walk_up_to_parent_orchid_runtime() {
 #[test]
 fn report_check_accepts_report_from_external_orchid_reports_dir() {
     let repo = Repo::new();
+    repo.init_git();
     repo.run(&[
         "lease",
         "example",
@@ -2976,7 +2977,13 @@ fn report_check_accepts_report_from_external_orchid_reports_dir() {
         "l_test",
     ]);
 
+    // A genuine linked worktree of the same repository is the only out-of-root location the
+    // report-check fallback is allowed to read from.
     let worktree = repo.root.parent().unwrap().join("other-worktree");
+    git(
+        &repo.root,
+        &["worktree", "add", "-b", "wt", worktree.to_str().unwrap()],
+    );
     fs::create_dir_all(worktree.join(".orchid/reports")).unwrap();
     let report_path = worktree.join(".orchid/reports/l_test.md");
     fs::write(
@@ -3013,6 +3020,36 @@ fn report_check_rejects_external_report_outside_orchid_reports_dir() {
     let outside = repo.root.parent().unwrap().join("outside");
     fs::create_dir_all(&outside).unwrap();
     let report_path = outside.join("l_test.md");
+    fs::write(
+        &report_path,
+        "+++\nlease_id = \"l_test\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
+    )
+    .unwrap();
+
+    let payload = repo.run_fail(&["report-check", report_path.to_str().unwrap()]);
+    assert_eq!(payload["code"], "path_outside_repo");
+}
+
+#[test]
+fn report_check_rejects_external_orchid_reports_dir_in_unrelated_repo() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_test",
+    ]);
+
+    // A correctly shaped `<x>/.orchid/reports/<lease>.md` that is NOT a linked worktree of this
+    // repository must not be admitted by the fallback; otherwise a worker could plant an
+    // out-of-root report and spoof the report-check gate (default report paths even match).
+    let outside = repo.root.parent().unwrap().join("evil");
+    fs::create_dir_all(outside.join(".orchid/reports")).unwrap();
+    let report_path = outside.join(".orchid/reports/l_test.md");
     fs::write(
         &report_path,
         "+++\nlease_id = \"l_test\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
