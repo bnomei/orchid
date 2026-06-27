@@ -2911,6 +2911,55 @@ fn complete_rolls_back_task_when_lease_save_fails() {
 }
 
 #[test]
+fn complete_clean_spec_research_failure_keeps_completion() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_123",
+    ]);
+    // Populate a spec-research workspace, then make its directory undeletable so the bundled
+    // cleanup fails while the core completion still succeeds.
+    let research_dir = repo.root.join(".orchid/spec-research/example");
+    fs::create_dir_all(&research_dir).unwrap();
+    fs::write(research_dir.join("notes.md"), "notes\n").unwrap();
+    let original = fs::metadata(&research_dir).unwrap().permissions();
+    fs::set_permissions(&research_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let payload = repo.run(&[
+        "complete",
+        "--lease",
+        "l_123",
+        "--verified-by",
+        "mayor",
+        "--clean-spec-research",
+    ]);
+
+    fs::set_permissions(&research_dir, original).unwrap();
+
+    // The cleanup failure is surfaced as a detail, but completion is durable: task done, lease
+    // completed. The coordinator can run research-clean separately rather than seeing a failed
+    // complete against an already-done task.
+    assert_eq!(payload["task"], "example/T001");
+    assert_eq!(payload["lease_id"], "l_123");
+    assert!(payload.get("spec_research_clean_error").is_some());
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "done"
+    );
+    let lease: Value =
+        serde_json::from_str(&fs::read_to_string(repo.root.join(".orchid/leases/l_123.json")).unwrap())
+            .unwrap();
+    assert_eq!(lease["status"], "completed");
+}
+
+#[test]
 fn complete_rejects_task_not_in_completable_status() {
     let repo = Repo::new();
     repo.run(&[

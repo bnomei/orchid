@@ -780,13 +780,26 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     insert(&mut payload, "lease_id", request.lease.clone());
     insert(&mut payload, "task", task_key(&task));
     if request.clean_spec_research {
-        let (deleted, pruned) = clean_spec_research(root, &task.spec_id)?;
-        insert_non_empty(
-            &mut payload,
-            "spec_research_deleted",
-            string_values(deleted),
-        );
-        insert_non_empty(&mut payload, "pruned", string_values(pruned));
+        // Completion (task done + lease completed) is already durable. Spec-research cleanup is
+        // a bundled best-effort convenience — `research-clean` is also a standalone recovery
+        // command — so a cleanup failure is surfaced as a detail rather than failing the whole
+        // command, which would otherwise report an error for an already-completed task.
+        match clean_spec_research(root, &task.spec_id) {
+            Ok((deleted, pruned)) => {
+                insert_non_empty(
+                    &mut payload,
+                    "spec_research_deleted",
+                    string_values(deleted),
+                );
+                insert_non_empty(&mut payload, "pruned", string_values(pruned));
+            }
+            Err(err) => {
+                let mut detail = Map::new();
+                insert(&mut detail, "message", err.message.clone());
+                insert(&mut detail, "code", err.code.clone());
+                insert(&mut payload, "spec_research_clean_error", Value::Object(detail));
+            }
+        }
     }
     Ok(payload)
 }
