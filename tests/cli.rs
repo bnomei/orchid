@@ -2238,6 +2238,24 @@ fn lease_rejects_invalid_verification_mode() {
 }
 
 #[test]
+fn research_commands_resolve_numeric_spec_prefix() {
+    let repo = Repo::new();
+    repo.write_task_file("001-feature", "T001", "todo", "src/feat/");
+
+    // Numeric selector must resolve to the prefixed spec dir, matching ready/lease.
+    let created = repo.run(&["research-path", "001", "--create"]);
+    assert_eq!(created["spec"], "001-feature");
+    assert_eq!(created["path"], ".orchid/spec-research/001-feature");
+
+    let cleaned = repo.run(&["research-clean", "001"]);
+    assert_eq!(cleaned["spec"], "001-feature");
+    assert_eq!(
+        cleaned["deleted"],
+        serde_json::json!([".orchid/spec-research/001-feature"])
+    );
+}
+
+#[test]
 fn numeric_spec_selector_resolves_exact_directory() {
     let repo = Repo::new();
     repo.write_task_file("001", "T001", "todo", "src/numeric/");

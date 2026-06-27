@@ -880,7 +880,7 @@ pub(crate) fn research_path(
     root: &Path,
     request: &ResearchPathRequest,
 ) -> OrchResult<Map<String, Value>> {
-    let spec_id = crate::specs::safe_spec_id(&request.spec)?;
+    let spec_id = crate::specs::resolve_spec(root, &request.spec)?;
     let path = repo_path(root, spec_research_dir(root, &spec_id)?, "research_path")?;
     let mut created = false;
     if request.create {
@@ -901,7 +901,7 @@ pub(crate) fn research_path(
 }
 
 pub(crate) fn research_clean(root: &Path, spec: &str) -> OrchResult<Map<String, Value>> {
-    let spec_id = crate::specs::safe_spec_id(spec)?;
+    let spec_id = crate::specs::resolve_spec(root, spec)?;
     let _lock = runtime_lock(root)?;
     let (deleted, pruned) = clean_spec_research(root, &spec_id)?;
     let mut payload = json_ok();

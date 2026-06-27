@@ -124,6 +124,13 @@ fn resolve_spec_selector(root: &Path, specs: &Path, selector: &str) -> OrchResul
     }
 }
 
+/// Resolve a single spec selector (including numeric prefixes like `001`) to its directory
+/// name, so research commands target the same spec that dispatch commands do.
+pub(crate) fn resolve_spec(root: &Path, selector: &str) -> OrchResult<String> {
+    let specs = repo_path(root, root.join("specs"), "specs_dir")?;
+    resolve_spec_selector(root, &specs, selector)
+}
+
 fn resolve_spec_selectors(root: &Path, spec_names: &[String]) -> OrchResult<Vec<String>> {
     let specs = repo_path(root, root.join("specs"), "specs_dir")?;
     let mut resolved = Vec::new();
