@@ -1615,6 +1615,45 @@ fn agent_id_is_reusable_after_lease_completes() {
 }
 
 #[test]
+fn status_agent_id_ignores_terminal_lease() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--agent-id",
+        "agent_123",
+        "--lease-id",
+        "l_old",
+    ]);
+    repo.run(&["complete", "--lease", "l_old", "--verified-by", "mayor"]);
+    // A completed lease still carries agent_id on disk, but it is no longer the agent's
+    // current assignment; status must not present it as active work.
+    let terminal = repo.run_fail(&["status", "--agent-id", "agent_123"]);
+    assert_eq!(terminal["code"], "agent_lease_not_found");
+    assert_eq!(terminal["terminal_leases"][0], "l_old");
+
+    // Re-leasing the reusable agent_id yields a single active lease; status prefers it over
+    // the lingering terminal lease instead of reporting an ambiguous match.
+    repo.run(&[
+        "lease",
+        "example",
+        "T002",
+        "--owner",
+        "worker:agent_123",
+        "--agent-id",
+        "agent_123",
+        "--lease-id",
+        "l_new",
+    ]);
+    let status = repo.run(&["status", "--agent-id", "agent_123"]);
+    assert_eq!(status["lease_id"], "l_new");
+    assert_eq!(status["status"], "active");
+}
+
+#[test]
 fn worker_execution_metadata_flows_through_task_leases() {
     let repo = Repo::new();
     let ready = repo.run(&["ready", "--spec", "example", "--explain"]);

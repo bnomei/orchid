@@ -1532,8 +1532,26 @@ fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value
                 .detail("agent_id", agent_id),
         );
     }
-    if matches.len() > 1 {
+    // An agent_id is reusable once its previous lease reaches a terminal state, so the same id
+    // can match both a finished lease and the agent's current assignment. Only an active lease
+    // represents live work; never surface a terminal lease as the agent's current status.
+    let active = matches
+        .iter()
+        .filter(|lease| lease.status().is_active())
+        .collect::<Vec<_>>();
+    if active.is_empty() {
         let lease_ids = matches
+            .iter()
+            .filter_map(|lease| lease.id().map(str::to_string))
+            .collect::<Vec<_>>();
+        return Err(
+            OrchError::coded("agent has no active lease", ErrorCode::AgentLeaseNotFound)
+                .detail("agent_id", agent_id)
+                .detail("terminal_leases", string_values(lease_ids)),
+        );
+    }
+    if active.len() > 1 {
+        let lease_ids = active
             .iter()
             .filter_map(|lease| lease.id().map(str::to_string))
             .collect::<Vec<_>>();
@@ -1543,7 +1561,7 @@ fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value
                 .detail("leases", string_values(lease_ids)),
         );
     }
-    let lease = &matches[0];
+    let lease = active[0];
     let mut payload = json_ok();
     insert(&mut payload, "agent_id", agent_id);
     insert(&mut payload, "lease_id", lease.id_value());
