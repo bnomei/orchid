@@ -1875,6 +1875,31 @@ fn corrupt_lease_file_fails_scope_enumeration_closed() {
 }
 
 #[test]
+fn block_rejects_task_with_active_lease() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_test",
+    ]);
+    let payload = repo.run_fail(&["block", "example", "T001", "--reason", "needs decision"]);
+    assert_eq!(payload["code"], "task_already_leased");
+    // Task must remain todo, not blocked, while the lease is active.
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+    // After releasing the lease, block succeeds.
+    repo.run(&["release", "l_test", "--reason", "paused"]);
+    let block = repo.run(&["block", "example", "T001", "--reason", "needs decision"]);
+    assert_eq!(block["task"], "example/T001");
+}
+
+#[test]
 fn complete_rejects_released_lease_after_release() {
     let repo = Repo::new();
     repo.run(&[

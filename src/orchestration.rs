@@ -696,6 +696,18 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
 pub(crate) fn block(root: &Path, request: &BlockRequest) -> OrchResult<Map<String, Value>> {
     let _lock = runtime_lock(root)?;
     let task = resolve_task(root, &request.target, request.task_id.as_deref())?;
+    // Don't leave a task marked blocked while an active lease still claims it; the
+    // coordinator must release/close that lease first.
+    let task_rel = relpath(&task.path, root);
+    for lease in active_leases(root)? {
+        if lease.task_path() == task_rel {
+            return Err(
+                OrchError::coded("task already leased", ErrorCode::TaskAlreadyLeased)
+                    .detail("lease_id", lease.id_value())
+                    .detail("task", task_key(&task)),
+            );
+        }
+    }
     let mut frontmatter = task.frontmatter().clone();
     let meta = frontmatter.raw_mut();
     insert(meta, "status", "blocked");
