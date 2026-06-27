@@ -287,16 +287,19 @@ pub(crate) fn parse_duration(value: &str) -> OrchResult<TimeDelta> {
                 .detail("duration", value),
         );
     }
-    match unit {
-        's' => Ok(TimeDelta::seconds(amount)),
-        'm' => Ok(TimeDelta::minutes(amount)),
-        'h' => Ok(TimeDelta::hours(amount)),
-        'd' => Ok(TimeDelta::days(amount)),
-        _ => Err(
-            OrchError::coded("invalid duration", ErrorCode::InvalidDuration)
-                .detail("duration", value),
-        ),
-    }
+    // Use the non-panicking `try_*` constructors: chrono's bare `seconds/minutes/hours/days`
+    // panic ("out of bounds") for a large-magnitude (but in-i64) amount, which would abort the
+    // process instead of returning the documented InvalidDuration error.
+    let delta = match unit {
+        's' => TimeDelta::try_seconds(amount),
+        'm' => TimeDelta::try_minutes(amount),
+        'h' => TimeDelta::try_hours(amount),
+        'd' => TimeDelta::try_days(amount),
+        _ => None,
+    };
+    delta.ok_or_else(|| {
+        OrchError::coded("invalid duration", ErrorCode::InvalidDuration).detail("duration", value)
+    })
 }
 
 pub(crate) fn insert(map: &mut Map<String, Value>, key: &str, value: impl Into<Value>) {
@@ -326,6 +329,21 @@ mod tests {
     #[test]
     fn duration_parser_rejects_multibyte_suffix_without_panicking() {
         for value in ["3€", "30µ", "5é"] {
+            let err = parse_duration(value).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidDuration.as_str());
+        }
+    }
+
+    #[test]
+    fn duration_parser_rejects_out_of_range_magnitude_without_panicking() {
+        // In-i64 but beyond chrono's TimeDelta range: the bare constructors would panic; the
+        // try_* variants must yield a structured InvalidDuration instead.
+        for value in [
+            "99999999999999d",
+            "9999999999999999s",
+            "999999999999999h",
+            "99999999999999999m",
+        ] {
             let err = parse_duration(value).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidDuration.as_str());
         }

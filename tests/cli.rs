@@ -739,6 +739,15 @@ fn goal_init_rejects_zero_budgets() {
 }
 
 #[test]
+fn stale_rejects_out_of_range_duration_with_structured_error() {
+    let repo = Repo::new();
+    // An in-i64 but TimeDelta-overflowing magnitude must produce a JSON invalid_duration ACK,
+    // not a chrono panic that aborts the process with no structured output.
+    let failed = repo.run_fail(&["stale", "--older-than", "99999999999999d"]);
+    assert_eq!(failed["code"], "invalid_duration");
+}
+
+#[test]
 fn goal_non_pass_status_blocks_keep() {
     let repo = Repo::new();
     repo.init_git();
