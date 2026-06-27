@@ -739,6 +739,45 @@ fn goal_init_rejects_zero_budgets() {
 }
 
 #[test]
+fn goal_init_rejects_non_finite_min_delta() {
+    let repo = Repo::new();
+    for bad in ["nan", "inf"] {
+        let failed = repo.run_fail(&[
+            "goal",
+            "init",
+            "--id",
+            "nan-goal",
+            "--goal",
+            "G",
+            "--evaluator",
+            "true",
+            "--metric",
+            "p95_ms",
+            "--direction",
+            "lower-is-better",
+            "--min-delta",
+            bad,
+            "--hypothesis",
+            "h",
+            "--max-iterations",
+            "5",
+            "--max-duration",
+            "30m",
+        ]);
+        // A non-finite min-delta must be rejected at init rather than written as the invalid
+        // TOML literal `NaN`, which would wedge every later goal command. No goal.toml is left.
+        assert!(
+            failed["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("min-delta"),
+            "unexpected error for {bad}: {failed}"
+        );
+        assert!(!repo.root.join(".orchid/goals/nan-goal/goal.toml").exists());
+    }
+}
+
+#[test]
 fn stale_rejects_out_of_range_duration_with_structured_error() {
     let repo = Repo::new();
     // An in-i64 but TimeDelta-overflowing magnitude must produce a JSON invalid_duration ACK,

@@ -109,6 +109,13 @@ impl GoalInitRequest {
     ) -> OrchResult<Self> {
         let max_duration_raw = max_duration.into();
         let max_duration = parse_duration(&max_duration_raw)?;
+        // A non-finite min-delta corrupts durable state: NaN serializes via Display as the
+        // invalid-TOML literal `NaN`, so every later goal command fails to re-parse goal.toml
+        // and the goal is wedged. Infinity is a meaningless threshold. Reject both at init.
+        if !minimum_delta.is_finite() {
+            return Err(OrchError::new("min-delta must be a finite number")
+                .detail("min_delta", minimum_delta.to_string()));
+        }
         // A zero iteration budget exhausts on the first cycle check, so the goal could never
         // run. (A zero max_duration is already rejected by parse_duration.)
         if max_iterations == 0 {
