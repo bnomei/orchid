@@ -656,6 +656,39 @@ fn goal_keep_retry_after_crash_does_not_wedge() {
 }
 
 #[test]
+fn goal_keep_below_min_delta_is_downgraded_to_discard() {
+    let repo = Repo::new();
+    repo.init_git();
+    // Baseline 120, candidate 118 => improvement 2, below the --min-delta of 5.
+    init_ready_goal(
+        &repo,
+        "delta-goal",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":118.0,\"delta\":2.0,\"reason\":\"tiny\"}'",
+        "10",
+    );
+    fs::write(repo.root.join("candidate.txt"), "candidate\n").unwrap();
+    write_goal_report(
+        &repo,
+        "delta-goal",
+        "C001",
+        "ready_for_evaluation",
+        "next attempt",
+    );
+
+    let stdout = repo.run_stdout(&["goal"]);
+    assert!(stdout.starts_with("# Goal Ready"));
+    let state = goal_state(&repo, "delta-goal");
+    // The sub-threshold keep must not be committed; it is downgraded to discard.
+    assert_eq!(state["last_decision"], "discard");
+    let status = repo.run_stdout(&["goal", "status"]);
+    assert!(status.contains("- Kept cycles: `0`"));
+    assert!(status.contains("- Discarded cycles: `1`"));
+    let results =
+        fs::read_to_string(repo.root.join(".orchid/goals/delta-goal/results.jsonl")).unwrap();
+    assert!(results.contains("min_delta"));
+}
+
+#[test]
 fn goal_evaluator_done_recommendation_finishes_without_budget_exhaustion() {
     let repo = Repo::new();
     repo.init_git();

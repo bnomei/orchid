@@ -364,6 +364,16 @@ impl GoalDirection {
             Self::Target => "target",
         }
     }
+
+    /// Directional improvement of `candidate` over `baseline`. `None` for `Target`, which has
+    /// no stored target value to measure distance against, so its keep gate is not enforced.
+    pub(crate) fn improvement(self, baseline: f64, candidate: f64) -> Option<f64> {
+        match self {
+            Self::HigherIsBetter => Some(candidate - baseline),
+            Self::LowerIsBetter => Some(baseline - candidate),
+            Self::Target => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -756,13 +766,32 @@ fn evaluate_cycle_report(
         return Ok(next);
     }
 
-    let evaluator = run_evaluator(root, contract, state)?;
+    let mut evaluator = run_evaluator(root, contract, state)?;
     if evaluator.metric != contract.primary_metric {
         return Err(OrchError::new("evaluator metric mismatch")
             .detail("expected", contract.primary_metric.clone())
             .detail("actual", evaluator.metric));
     }
     evaluator.append_measurement(root, &contract.goal_id, &state.cycle)?;
+
+    // Enforce the configured keep gate: a Keep whose improvement over the current baseline is
+    // below --min-delta is downgraded to Discard so sub-threshold (noise) cycles are not kept.
+    if evaluator.recommendation == EvaluatorRecommendation::Keep {
+        if let Some(baseline_value) = state.baseline_value {
+            if let Some(improvement) = contract
+                .direction
+                .improvement(baseline_value, evaluator.candidate)
+            {
+                if improvement < contract.minimum_delta {
+                    evaluator.recommendation = EvaluatorRecommendation::Discard;
+                    evaluator.reason = format!(
+                        "improvement {improvement} below min_delta {}",
+                        contract.minimum_delta
+                    );
+                }
+            }
+        }
+    }
 
     next.last_decision = Some(evaluator.recommendation);
     let recommendation = evaluator.recommendation;
@@ -841,6 +870,8 @@ fn run_evaluator(
                 .map(|value| value.to_string())
                 .unwrap_or_default(),
         )
+        .env("ORCHID_GOAL_DIRECTION", contract.direction.as_str())
+        .env("ORCHID_GOAL_MIN_DELTA", contract.minimum_delta.to_string())
         .output()
         .map_err(OrchError::from)?;
     if !output.status.success() {
