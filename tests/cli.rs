@@ -1940,6 +1940,45 @@ fn corrupt_lease_file_fails_scope_enumeration_closed() {
 }
 
 #[test]
+fn next_wait_surfaces_scope_disjoint_ready_tasks() {
+    let repo = Repo::new();
+    repo.write_task_file("example", "T005", "todo", "src/feature/");
+    // Active lease in a disjoint scope.
+    repo.write_task_file("other", "T001", "todo", "src/other/");
+    repo.run(&[
+        "lease",
+        "other",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_other",
+    ]);
+
+    // ready lists the scope-disjoint example task...
+    let ready = repo.run(&["ready", "--spec", "example", "--explain"]);
+    let ready_tasks: Vec<&str> = ready["ready"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["task"].as_str().unwrap())
+        .collect();
+    assert!(ready_tasks.contains(&"example/T001"));
+
+    // ...and next, while still waiting under the serial default, now surfaces the same
+    // ready tasks instead of an empty, contradictory wait.
+    let next = repo.run(&["next", "--spec", "example", "--explain"]);
+    assert_eq!(next["phase"], "wait");
+    let next_ready: Vec<&str> = next["ready"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["task"].as_str().unwrap())
+        .collect();
+    assert!(next_ready.contains(&"example/T001"));
+}
+
+#[test]
 fn next_spec_does_not_surface_foreign_spec_cleanup() {
     let repo = Repo::new();
     repo.write_task_file("other", "T001", "todo", "src/other/");

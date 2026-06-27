@@ -225,6 +225,10 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
     if !active.is_empty() {
         let mut details = Map::new();
         details.insert("active".to_string(), compact_array(active));
+        // Surface scope-disjoint ready tasks (the same ones `ready` lists) so `next` and
+        // `ready` don't appear to contradict each other: the serial default still waits,
+        // but the coordinator can see what is dispatchable in parallel.
+        insert_non_empty(&mut details, "ready", ready_array(ready));
         insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
         return NextDecision {
             phase: Phase::Wait,
