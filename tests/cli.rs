@@ -1875,6 +1875,33 @@ fn corrupt_lease_file_fails_scope_enumeration_closed() {
 }
 
 #[test]
+fn next_spec_does_not_surface_foreign_spec_cleanup() {
+    let repo = Repo::new();
+    repo.write_task_file("other", "T001", "todo", "src/other/");
+    // Complete a lease in another spec so it becomes a cleanup candidate.
+    repo.run(&[
+        "lease",
+        "other",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_other",
+    ]);
+    repo.run(&["complete", "--lease", "l_other", "--verified-by", "mayor"]);
+
+    // next scoped to example must dispatch example work, not close the other spec's lease.
+    let payload = repo.run(&["next", "--spec", "example", "--explain"]);
+    assert_eq!(payload["phase"], "dispatch");
+    assert!(payload.get("cleanup").is_none());
+
+    // next scoped to other still surfaces its own cleanup.
+    let other = repo.run(&["next", "--spec", "other", "--explain"]);
+    assert_eq!(other["phase"], "cleanup");
+    assert_eq!(other["cleanup"][0]["lease_id"], "l_other");
+}
+
+#[test]
 fn block_rejects_task_with_active_lease() {
     let repo = Repo::new();
     repo.run(&[

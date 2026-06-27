@@ -516,7 +516,7 @@ pub(crate) fn lease_attach_agent(
 pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String, Value>> {
     let stale_after = parse_duration(&request.older_than)?;
     let now = Utc::now();
-    let (tasks, _) = select_tasks(root, specs_arg(&request.specs), request.all_open)?;
+    let (tasks, selected_specs) = select_tasks(root, specs_arg(&request.specs), request.all_open)?;
     let active = active_leases(root)?;
     let (ready, blocked, _) = ready_tasks(
         root,
@@ -531,6 +531,9 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
         .collect::<OrchResult<Vec<_>>>()?;
     let mut reports_ready = Vec::new();
     for lease in &active {
+        if !lease_in_selected_specs(lease, &selected_specs) {
+            continue;
+        }
         let report = report_path_for_lease(root, lease)?;
         if report.exists() {
             reports_ready.push(ReportReady {
@@ -545,7 +548,10 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
             });
         }
     }
-    let completed = completed_runtime_leases(root)?;
+    let completed: Vec<_> = completed_runtime_leases(root)?
+        .into_iter()
+        .filter(|lease| lease_in_selected_specs(lease, &selected_specs))
+        .collect();
     let stage = completed
         .iter()
         .map(|lease| stage_plan_for_lease(root, lease))
@@ -1572,6 +1578,15 @@ fn nonzero_counts(counts: Map<String, Value>) -> Map<String, Value> {
         .into_iter()
         .filter(|(_, value)| value.as_i64().unwrap_or(0) != 0)
         .collect()
+}
+
+/// True when a lease's task belongs to one of the specs `next` resolved its scope to.
+/// Lease task values are `spec_id/task_id`; leases without a spec (e.g. buds) never match,
+/// so spec-scoped `next` never directs stage/cleanup/validate at a foreign lease.
+fn lease_in_selected_specs(lease: &LeaseRecord, selected_specs: &[String]) -> bool {
+    let task = lease.get_str("task").unwrap_or("");
+    let spec = task.split_once('/').map(|(spec, _)| spec).unwrap_or("");
+    !spec.is_empty() && selected_specs.iter().any(|selected| selected == spec)
 }
 
 fn specs_arg(specs: &[String]) -> Option<&[String]> {
