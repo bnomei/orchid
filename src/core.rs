@@ -258,6 +258,14 @@ pub(crate) fn parse_duration(value: &str) -> OrchResult<TimeDelta> {
     let amount: i64 = amount.parse().map_err(|_| {
         OrchError::coded("invalid duration", ErrorCode::InvalidDuration).detail("duration", value)
     })?;
+    // Non-positive durations invert stale comparisons (negative) or mark everything stale
+    // (zero), so reject them rather than silently producing a misleading cutoff.
+    if amount <= 0 {
+        return Err(
+            OrchError::coded("invalid duration", ErrorCode::InvalidDuration)
+                .detail("duration", value),
+        );
+    }
     match unit {
         "s" => Ok(TimeDelta::seconds(amount)),
         "m" => Ok(TimeDelta::minutes(amount)),
@@ -284,6 +292,14 @@ mod tests {
         assert_eq!(parse_duration("15m").unwrap().num_minutes(), 15);
         assert_eq!(parse_duration("2h").unwrap().num_hours(), 2);
         assert_eq!(parse_duration("3d").unwrap().num_days(), 3);
+    }
+
+    #[test]
+    fn duration_parser_rejects_non_positive_amounts() {
+        for value in ["-1m", "-30s", "0m", "0s"] {
+            let err = parse_duration(value).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidDuration.as_str());
+        }
     }
 
     #[test]
