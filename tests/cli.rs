@@ -1107,6 +1107,31 @@ fn all_open_selects_first_open_numerical_spec_and_skips_inactive() {
 }
 
 #[test]
+fn status_all_open_echoes_selected_and_skipped_specs() {
+    let repo = Repo::new();
+    repo.write_task_file("00-done", "T001", "done", "src/done/");
+    repo.write_task_file("01-first", "T001", "todo", "src/first/");
+    repo.write_task_file("01-first", "T002", "todo", "src/first2/");
+    repo.write_task_file("02-second", "T001", "todo", "src/second/");
+    repo.write_task_file("DONE-99-closed", "T001", "todo", "src/closed/");
+
+    // Bare status counts tasks across all specs and does not narrow, so it echoes no `specs`.
+    let bare = repo.run(&["status"]);
+    assert!(bare.get("specs").is_none());
+
+    // --all-open narrows to the first open spec (01-first), counting fewer tasks. The payload
+    // now names the selected spec and the skipped inactive specs so the narrowing is explicit.
+    let all_open = repo.run(&["status", "--all-open"]);
+    assert!(all_open["tasks"].as_i64().unwrap() < bare["tasks"].as_i64().unwrap());
+    assert_eq!(all_open["tasks"], 2);
+    assert_eq!(all_open["specs"], serde_json::json!(["01-first"]));
+    assert_eq!(
+        all_open["skipped_inactive_specs"],
+        serde_json::json!(["DONE-99-closed"])
+    );
+}
+
+#[test]
 fn numeric_spec_selector_resolves_unique_active_prefix() {
     let repo = Repo::new();
     repo.write_task_file("003", "T001", "todo", "src/exact/");

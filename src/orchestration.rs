@@ -232,7 +232,7 @@ pub(crate) fn status(root: &Path, request: &StatusRequest) -> OrchResult<Map<Str
         return status_for_agent(root, agent_id);
     }
 
-    let (tasks, _) = if specs_arg(&request.specs).is_some() || request.all_open {
+    let (tasks, selected_specs) = if specs_arg(&request.specs).is_some() || request.all_open {
         select_tasks(root, specs_arg(&request.specs), request.all_open)?
     } else {
         (load_tasks(root, None)?, Vec::new())
@@ -242,6 +242,17 @@ pub(crate) fn status(root: &Path, request: &StatusRequest) -> OrchResult<Map<Str
     let mut payload = json_ok();
     insert(&mut payload, "tasks", tasks.len() as i64);
     insert(&mut payload, "counts", Value::Object(counts));
+    // Echo which spec(s) the task count was scoped to. Without this, `status --all-open` (and
+    // `status --spec`) silently count a narrower task set than bare `status`, with no field to
+    // explain the discrepancy to monitoring/coordinator scripts.
+    insert_non_empty(&mut payload, "specs", string_values(selected_specs));
+    if request.all_open {
+        insert_non_empty(
+            &mut payload,
+            "skipped_inactive_specs",
+            string_values(inactive_spec_names(root)?),
+        );
+    }
     if active != 0 {
         insert(&mut payload, "active", active as i64);
     }
