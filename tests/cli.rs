@@ -2111,6 +2111,36 @@ fn corrupt_lease_file_fails_scope_enumeration_closed() {
 }
 
 #[test]
+fn active_serial_lease_blocks_later_parallel_lease() {
+    let repo = Repo::new();
+    repo.write_task_file("sa", "T001", "todo", "src/a/");
+    repo.write_task_file("sb", "T001", "todo", "src/b/");
+    repo.run(&[
+        "lease",
+        "sa",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_serial",
+        "--serial",
+    ]);
+    // A later parallel lease on a disjoint scope must still be blocked by the serial lease.
+    let failed = repo.run_fail(&[
+        "lease",
+        "sb",
+        "T001",
+        "--owner",
+        "worker:b",
+        "--lease-id",
+        "l_par",
+        "--allow-parallel",
+    ]);
+    assert_eq!(failed["code"], "serial_blocked");
+    assert_eq!(failed["lease_id"], "l_serial");
+}
+
+#[test]
 fn lease_rejects_allow_parallel_for_serial_fanout_spec() {
     let repo = Repo::new();
     repo.write_task_file("serialspec", "T001", "todo", "src/a/");

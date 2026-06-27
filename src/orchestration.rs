@@ -290,6 +290,18 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
                 .detail("scope", string_values(effective_scope)));
         }
     }
+    // An active serial lease demands single-flight execution, so it blocks any new lease
+    // (not just at its own creation time) until it is released or closed.
+    if let Some(serial_lease) = active
+        .iter()
+        .find(|lease| lease.mode() == LeaseMode::Serial.as_str())
+    {
+        return Err(OrchError::coded(
+            "an active serial lease blocks new leases",
+            ErrorCode::SerialBlocked,
+        )
+        .detail("lease_id", serial_lease.id_value()));
+    }
     if request.serial && !active.is_empty() {
         return Err(OrchError::coded(
             "serial lease blocked by active leases",
