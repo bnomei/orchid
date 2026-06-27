@@ -386,6 +386,11 @@ pub(crate) fn ready_tasks(
             reason = Some("invalid worker_model".to_string());
         } else {
             for dep in task.depends() {
+                // "-" is the no-dependency sentinel that lint and task_by_ref already exempt;
+                // skip it here too so a lint-clean task is not blocked with missing dependency:-.
+                if dep == "-" {
+                    continue;
+                }
                 match task_by_ref(&tasks, &task.spec_id, &dep) {
                     None => {
                         reason = Some(format!("missing dependency:{dep}"));

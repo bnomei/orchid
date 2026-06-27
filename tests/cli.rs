@@ -2001,6 +2001,20 @@ fn corrupt_lease_file_fails_scope_enumeration_closed() {
 }
 
 #[test]
+fn depends_dash_sentinel_is_ready_and_lint_clean() {
+    let repo = Repo::new();
+    let path = repo.write_task_file("dashspec", "T001", "todo", "src/dash/");
+    let task = fs::read_to_string(&path).unwrap();
+    fs::write(&path, task.replace("depends = []", "depends = [\"-\"]")).unwrap();
+
+    // lint already exempts "-"; ready must agree and dispatch the task.
+    let lint = repo.run(&["lint"]);
+    assert!(lint.get("errors").is_none() || lint["errors"].as_array().unwrap().is_empty());
+    let ready = repo.run(&["ready", "--spec", "dashspec", "--explain"]);
+    assert_eq!(ready["ready"][0]["task"], "dashspec/T001");
+}
+
+#[test]
 fn next_wait_surfaces_scope_disjoint_ready_tasks() {
     let repo = Repo::new();
     repo.write_task_file("example", "T005", "todo", "src/feature/");
