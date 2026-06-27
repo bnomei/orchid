@@ -680,6 +680,16 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     }
     let task_path = lease.task_path();
     let task = load_task(repo_path(root, task_path, "task_path")?, root)?;
+    // Symmetric with lease's todo guard: don't let complete jump a blocked/done/unknown task
+    // straight to done, skipping its intended gates.
+    if !task.status_model().is_completable() {
+        return Err(OrchError::coded(
+            "task cannot be completed from its current status",
+            ErrorCode::TaskNotCompletable,
+        )
+        .detail("task", task_key(&task))
+        .detail("status", task.status()));
+    }
     let mut frontmatter = task.frontmatter().clone();
     let meta = frontmatter.raw_mut();
     insert(meta, "status", "done");

@@ -40,6 +40,7 @@ pub(crate) enum ErrorCode {
     SpecSelectorAmbiguous,
     TaskAlreadyLeased,
     TaskIdRequired,
+    TaskNotCompletable,
     TaskNotTodo,
 }
 
@@ -81,6 +82,7 @@ impl ErrorCode {
             ErrorCode::SpecSelectorAmbiguous => "spec_selector_ambiguous",
             ErrorCode::TaskAlreadyLeased => "task_already_leased",
             ErrorCode::TaskIdRequired => "task_id_required",
+            ErrorCode::TaskNotCompletable => "task_not_completable",
             ErrorCode::TaskNotTodo => "task_not_todo",
         }
     }

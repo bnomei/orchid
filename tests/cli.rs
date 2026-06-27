@@ -2400,6 +2400,35 @@ fn complete_rolls_back_task_when_lease_save_fails() {
 }
 
 #[test]
+fn complete_rejects_task_not_in_completable_status() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_x",
+    ]);
+    // Force the task into a non-completable status while the lease is still active.
+    let task_path = repo.root.join("specs/example/tasks/T001.md");
+    let task = fs::read_to_string(&task_path).unwrap();
+    fs::write(
+        &task_path,
+        task.replace("status = \"todo\"", "status = \"blocked\""),
+    )
+    .unwrap();
+
+    let failed = repo.run_fail(&["complete", "--lease", "l_x", "--verified-by", "mayor"]);
+    assert_eq!(failed["code"], "task_not_completable");
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "blocked"
+    );
+}
+
+#[test]
 fn complete_rejects_released_lease_after_release() {
     let repo = Repo::new();
     repo.run(&[

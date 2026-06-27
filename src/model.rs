@@ -183,6 +183,15 @@ impl TaskStatus {
     pub(crate) fn is_done(&self) -> bool {
         matches!(self, TaskStatus::Done)
     }
+
+    /// Statuses from which `complete` may legitimately transition a task to `done`: the
+    /// in-progress `todo` plus the review states. Blocked/done/unknown are rejected.
+    pub(crate) fn is_completable(&self) -> bool {
+        matches!(
+            self,
+            TaskStatus::Todo | TaskStatus::PendingValidation | TaskStatus::PendingReview
+        )
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
