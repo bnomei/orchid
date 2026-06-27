@@ -2963,6 +2963,40 @@ fn report_check_rejects_report_path_that_claims_another_lease() {
 }
 
 #[test]
+fn report_check_ignores_tampered_lease_report_path() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_123",
+    ]);
+
+    // Tamper the lease JSON to redirect report_path at an arbitrary in-repo file.
+    let lease_path = repo.root.join(".orchid/leases/l_123.json");
+    let mut lease: Value = serde_json::from_str(&fs::read_to_string(&lease_path).unwrap()).unwrap();
+    lease["report_path"] = Value::String("specs/example/redirected.md".to_string());
+    fs::write(&lease_path, serde_json::to_string(&lease).unwrap()).unwrap();
+
+    // Plant a valid-looking report at the redirected location.
+    fs::write(
+        repo.root.join("specs/example/redirected.md"),
+        "+++\nlease_id = \"l_123\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
+    )
+    .unwrap();
+
+    // report-check must pin the expected path to the canonical .orchid/reports/l_123.md and
+    // reject the redirected file rather than validating it.
+    let report = repo.run_fail(&["report-check", "specs/example/redirected.md"]);
+    assert_eq!(report["code"], "report_lease_mismatch");
+    assert_eq!(report["report"], "specs/example/redirected.md");
+    assert_eq!(report["expected_report"], ".orchid/reports/l_123.md");
+}
+
+#[test]
 fn root_discovery_walks_up_to_orchid_runtime_from_subdir() {
     let repo = Repo::new();
     repo.run(&[

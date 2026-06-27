@@ -218,9 +218,11 @@ pub(crate) fn compact_lease(
 }
 
 pub(crate) fn report_path_for_lease(root: &Path, lease: &LeaseRecord) -> OrchResult<PathBuf> {
-    if let Some(report_path) = lease.report_path() {
-        return repo_path(root, report_path, "report_path");
-    }
+    // Always resolve the canonical `.orchid/reports/{lease_id}.md` location rather than trusting
+    // the `report_path` stored in lease JSON. Lease creation always writes that canonical value
+    // (orchestration.rs), and close_lease_files deletes that exact path, so honoring a divergent
+    // stored value would let a tampered/redirected lease drive report-check and packet rendering
+    // at an arbitrary in-repo file while the canonical report goes unchecked and undeleted.
     let lease_id = lease
         .id()
         .ok_or_else(|| OrchError::new("lease missing lease_id"))?;
