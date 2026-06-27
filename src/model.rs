@@ -101,7 +101,10 @@ impl Scope {
     }
 
     pub(crate) fn contains_path(&self, path: &str) -> bool {
-        let norm_path = normalize_scope_entry(path);
+        // Normalize the git-reported path WITHOUT rewriting backslashes: a scope entry may be
+        // authored Windows-style, but a path is a real filename where `\` is a literal byte on
+        // Unix/macOS. Rewriting it would misclassify a top-level `src\evil.rs` as inside `src/`.
+        let norm_path = normalize_path_for_scope(path);
         self.entries.iter().any(|scope| {
             let norm_scope = normalize_scope_entry(scope);
             !norm_scope.is_empty()
@@ -126,13 +129,21 @@ impl Scope {
 }
 
 pub(crate) fn normalize_scope_entry(value: &str) -> String {
-    let mut cleaned = value.trim().replace('\\', "/");
+    // Scope ENTRIES are user-authored and may use Windows-style separators, so accept them by
+    // rewriting `\` -> `/`. This must NOT be applied to git-reported paths (see contains_path).
+    normalize_path_for_scope(&value.replace('\\', "/"))
+}
+
+/// Normalize a repo-relative path for scope comparison: collapse leading `./`, trim surrounding
+/// slashes, and treat a bare "." as the whole-repo (empty) spelling. Unlike
+/// `normalize_scope_entry`, this does NOT rewrite backslashes — git's `-z` porcelain already
+/// reports paths with canonical separators, and a literal `\` is a valid filename byte.
+fn normalize_path_for_scope(value: &str) -> String {
+    let mut cleaned = value.trim();
     while let Some(rest) = cleaned.strip_prefix("./") {
-        cleaned = rest.to_string();
+        cleaned = rest;
     }
     let cleaned = cleaned.trim_matches('/');
-    // A bare "." is the whole-repo spelling, like "", "/", and "./"; collapse it to empty
-    // so it is handled by the root guard instead of surviving as a token that matches nothing.
     if cleaned == "." {
         String::new()
     } else {
@@ -738,6 +749,19 @@ mod tests {
         assert!(parent.contains_path("src/feature/file.rs"));
         assert!(parent.overlaps(&child));
         assert!(!parent.overlaps(&sibling));
+    }
+
+    #[test]
+    fn contains_path_does_not_rewrite_backslash_in_git_path() {
+        // Scope entries still accept Windows-style separators...
+        let scope = Scope::from_entries(vec!["src".to_string()]);
+        assert!(scope.contains_path("src/evil.rs"));
+        // ...but a literal top-level file named `src\evil.rs` (one path component, backslash is a
+        // valid byte on Unix/macOS) must NOT be treated as living inside the `src/` directory.
+        assert!(!scope.contains_path("src\\evil.rs"));
+        // A scope authored Windows-style still matches the corresponding real path.
+        let win_scope = Scope::from_entries(vec!["src\\feature".to_string()]);
+        assert!(win_scope.contains_path("src/feature/file.rs"));
     }
 
     #[test]
