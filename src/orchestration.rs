@@ -1477,7 +1477,9 @@ fn ensure_agent_id_available(
     let Some(agent_id) = agent_id.filter(|value| !value.is_empty()) else {
         return Ok(());
     };
-    for lease in all_leases(root)? {
+    // Only active leases reserve an agent_id; a terminal lease still on disk must not
+    // block the same coordinator from attaching the id to its next task.
+    for lease in active_leases(root)? {
         if lease.id() == except_lease {
             continue;
         }

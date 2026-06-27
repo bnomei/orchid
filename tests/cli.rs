@@ -1387,6 +1387,37 @@ fn lease_agent_metadata_attach_and_status_lookup_work() {
 }
 
 #[test]
+fn agent_id_is_reusable_after_lease_completes() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--agent-id",
+        "agent_123",
+        "--lease-id",
+        "l_old",
+    ]);
+    repo.run(&["complete", "--lease", "l_old", "--verified-by", "mayor"]);
+    // The terminal lease still exists on disk, but its agent_id must be reusable
+    // without requiring cleanup --completed first.
+    let lease = repo.run(&[
+        "lease",
+        "example",
+        "T002",
+        "--owner",
+        "worker:agent_123",
+        "--agent-id",
+        "agent_123",
+        "--lease-id",
+        "l_new",
+    ]);
+    assert_eq!(lease["lease_id"], "l_new");
+}
+
+#[test]
 fn worker_execution_metadata_flows_through_task_leases() {
     let repo = Repo::new();
     let ready = repo.run(&["ready", "--spec", "example", "--explain"]);
