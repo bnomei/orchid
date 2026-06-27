@@ -2174,6 +2174,44 @@ fn next_spec_does_not_surface_foreign_spec_cleanup() {
 }
 
 #[test]
+fn close_force_records_audit_trail_on_active_task() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    let close = repo.run(&["close", "--lease", "l_1", "--force"]);
+    assert!(close["deleted"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(".orchid/leases/l_1.json".to_string())));
+
+    // The forced closure leaves an audit trail on the task and keeps it re-leasable.
+    let task = fs::read_to_string(repo.root.join("specs/example/tasks/T001.md")).unwrap();
+    assert!(task.contains("last_lease_id = \"l_1\""));
+    assert!(task.contains("force_closed_at"));
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+    let released = repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:b",
+        "--lease-id",
+        "l_2",
+    ]);
+    assert_eq!(released["lease_id"], "l_2");
+}
+
+#[test]
 fn release_and_heartbeat_reject_completed_leases() {
     let repo = Repo::new();
     repo.run(&[

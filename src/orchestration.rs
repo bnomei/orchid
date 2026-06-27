@@ -880,6 +880,21 @@ pub(crate) fn close(root: &Path, request: &CloseRequest) -> OrchResult<Map<Strin
         )
         .detail("lease_id", request.lease.clone()));
     }
+    // Force-closing an active lease deletes its runtime artifacts; leave a minimal audit
+    // trail on the task (as complete does with last_lease_id) so the forced closure is not
+    // invisible. The task status is left unchanged, so it stays re-leasable. Best effort:
+    // never fail the close if the task can no longer be loaded.
+    if request.force && lease.status().is_active() && !lease.is_bud() {
+        if let Ok(task_path) = repo_path(root, lease.task_path(), "task_path") {
+            if let Ok(task) = load_task(task_path, root) {
+                let mut frontmatter = task.frontmatter().clone();
+                let meta = frontmatter.raw_mut();
+                insert(meta, "last_lease_id", request.lease.clone());
+                insert(meta, "force_closed_at", now_iso());
+                let _ = write_task_frontmatter(&task, frontmatter);
+            }
+        }
+    }
     let (deleted, pruned) = close_lease_files(root, &lease)?;
     let mut payload = json_ok();
     insert(&mut payload, "lease_id", request.lease.clone());
