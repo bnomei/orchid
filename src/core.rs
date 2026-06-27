@@ -254,7 +254,12 @@ pub(crate) fn parse_duration(value: &str) -> OrchResult<TimeDelta> {
                 .detail("duration", value),
         );
     }
-    let (amount, unit) = raw.split_at(raw.len() - 1);
+    // Split on the final character, not a byte offset: `split_at(len - 1)` panics when the
+    // last character is multi-byte (the index lands mid-codepoint).
+    let unit = raw.chars().next_back().ok_or_else(|| {
+        OrchError::coded("invalid duration", ErrorCode::InvalidDuration).detail("duration", value)
+    })?;
+    let amount = &raw[..raw.len() - unit.len_utf8()];
     let amount: i64 = amount.parse().map_err(|_| {
         OrchError::coded("invalid duration", ErrorCode::InvalidDuration).detail("duration", value)
     })?;
@@ -267,10 +272,10 @@ pub(crate) fn parse_duration(value: &str) -> OrchResult<TimeDelta> {
         );
     }
     match unit {
-        "s" => Ok(TimeDelta::seconds(amount)),
-        "m" => Ok(TimeDelta::minutes(amount)),
-        "h" => Ok(TimeDelta::hours(amount)),
-        "d" => Ok(TimeDelta::days(amount)),
+        's' => Ok(TimeDelta::seconds(amount)),
+        'm' => Ok(TimeDelta::minutes(amount)),
+        'h' => Ok(TimeDelta::hours(amount)),
+        'd' => Ok(TimeDelta::days(amount)),
         _ => Err(
             OrchError::coded("invalid duration", ErrorCode::InvalidDuration)
                 .detail("duration", value),
@@ -297,6 +302,14 @@ mod tests {
     #[test]
     fn duration_parser_rejects_non_positive_amounts() {
         for value in ["-1m", "-30s", "0m", "0s"] {
+            let err = parse_duration(value).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidDuration.as_str());
+        }
+    }
+
+    #[test]
+    fn duration_parser_rejects_multibyte_suffix_without_panicking() {
+        for value in ["3€", "30µ", "5é"] {
             let err = parse_duration(value).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidDuration.as_str());
         }
