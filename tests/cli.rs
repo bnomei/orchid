@@ -1946,6 +1946,34 @@ fn complete_updates_only_task_and_next_finds_stage_or_cleanup() {
 }
 
 #[test]
+fn stray_misnamed_json_does_not_abort_lease_scan() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_real",
+    ]);
+    // A Finder-style duplicate / stray .json whose stem is not a valid lease id must be
+    // ignored, not abort every lease command.
+    let leases_dir = repo.root.join(".orchid/leases");
+    fs::copy(
+        leases_dir.join("l_real.json"),
+        leases_dir.join("l_real copy.json"),
+    )
+    .unwrap();
+    fs::write(leases_dir.join("notes-1.json"), "{}").unwrap();
+
+    let running = repo.run(&["running"]);
+    let leases = running["leases"].as_array().unwrap();
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0]["id"], "l_real");
+}
+
+#[test]
 fn corrupt_lease_file_fails_scope_enumeration_closed() {
     let repo = Repo::new();
     repo.run(&[

@@ -92,7 +92,12 @@ pub(crate) fn all_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
         let Some(expected_lease_id) = lease_path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
-        validate_lease_id(expected_lease_id)?;
+        if validate_lease_id(expected_lease_id).is_err() {
+            // A filename orchid never produces (e.g. a Finder "l_x copy.json" duplicate or a
+            // stray .json) is not a lease reservation; skip it instead of aborting every lease
+            // command. Files with a valid stem but corrupt content still fail closed below.
+            continue;
+        }
         let lease_path = repo_path(root, &lease_path, "lease_path")?;
         // Fail closed: an unreadable or unparseable lease file must not silently drop
         // out of scope/task exclusivity checks while its filename still reserves the id.
