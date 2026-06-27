@@ -415,6 +415,15 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
             ErrorCode::ScopeRequired,
         ));
     }
+    if let Some(bad) = scope
+        .iter()
+        .find(|entry| crate::model::scope_entry_escapes_root(entry))
+    {
+        return Err(
+            OrchError::coded("scope escapes repo root", ErrorCode::InvalidScope)
+                .detail("scope", bad.to_string()),
+        );
+    }
     let worker_reasoning_effort =
         resolve_worker_reasoning_effort_value(request.worker_reasoning_effort.as_deref())?;
     let worker_model = normalize_optional_string(&request.worker_model);
@@ -1516,6 +1525,12 @@ pub(crate) fn lint(root: &Path) -> OrchResult<Map<String, Value>> {
         }
         if task.scope().is_empty() {
             errors.push(error_item(&key, "missing scope"));
+        } else if task
+            .scope()
+            .iter()
+            .any(|entry| crate::model::scope_entry_escapes_root(entry))
+        {
+            errors.push(error_item(&key, "scope escapes repo root"));
         }
         if !crate::model::VerificationMode::parse(task.verification_mode()).is_dispatchable() {
             errors.push(error_item(&key, "invalid verification_mode"));

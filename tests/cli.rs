@@ -1926,6 +1926,19 @@ fn bud_enforces_scope_and_parallel_guards() {
     ]);
     assert_eq!(missing_scope["code"], "scope_required");
 
+    // A `..` scope is non-empty but inert/escaping; bud must reject it rather than create a
+    // phantom-scoped lease.
+    let escapes = repo.run_fail(&[
+        "bud",
+        "--title",
+        "Escapes",
+        "--scope",
+        "..",
+        "--instructions",
+        instructions.to_str().unwrap(),
+    ]);
+    assert_eq!(escapes["code"], "invalid_scope");
+
     repo.run(&[
         "bud",
         "--title",
@@ -2487,6 +2500,20 @@ fn depends_dash_sentinel_is_ready_and_lint_clean() {
     assert!(lint.get("errors").is_none() || lint["errors"].as_array().unwrap().is_empty());
     let ready = repo.run(&["ready", "--spec", "dashspec", "--explain"]);
     assert_eq!(ready["ready"][0]["task"], "dashspec/T001");
+}
+
+#[test]
+fn lint_rejects_parent_traversal_scope() {
+    let repo = Repo::new();
+    repo.write_task_file("escapespec", "T001", "todo", "..");
+
+    // A `..` scope entry is non-empty (so it passes the missing-scope check) but matches no repo
+    // path and never overlaps real scopes; lint must flag it as escaping the repo root.
+    let lint = repo.run_fail(&["lint"]);
+    assert_eq!(lint["ok"], false);
+    let errors = lint["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|err| err["task"] == "escapespec/T001"
+        && err["error"] == "scope escapes repo root"));
 }
 
 #[test]

@@ -140,6 +140,17 @@ pub(crate) fn normalize_scope_entry(value: &str) -> String {
     }
 }
 
+/// True when a scope entry contains a `..` path segment. Such an entry survives
+/// `normalize_scope_entry` as a non-empty token but matches no normal repo path and never
+/// overlaps real scopes, so it would pass the non-empty scope check while providing neither
+/// staging attribution nor exclusivity (a phantom scope). It also names a location outside the
+/// repository. Callers reject these at task lint and bud creation.
+pub(crate) fn scope_entry_escapes_root(value: &str) -> bool {
+    normalize_scope_entry(value)
+        .split('/')
+        .any(|segment| segment == "..")
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum TaskStatus {
     Blocked,
