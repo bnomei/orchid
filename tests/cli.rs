@@ -1,3 +1,8 @@
+//! End-to-end CLI contract tests against fixture repos and golden JSON snapshots.
+//!
+//! Spawns the `orchid` binary with `--root` isolation; each test exercises one
+//! coordinator workflow boundary (lease, next, goal, Git staging, or security gate).
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -478,16 +483,12 @@ fn bare_goal_advances_ready_cycle_to_running() {
         "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":118.5,\"delta\":1.5,\"reason\":\"baseline\"}'",
         "10",
     );
-    // `goal init` leaves the freshly established cycle in `ready` (not started yet).
     assert_eq!(goal_state(&repo, "run-goal")["status"], "ready");
 
-    // The first standalone `orchid goal` still shows the ready kickoff prompt, but advances the
-    // durable state to `running` so coordinators can tell the cycle is in progress.
     let stdout = repo.run_stdout(&["goal"]);
     assert!(stdout.starts_with("# Goal Ready"));
     assert_eq!(goal_state(&repo, "run-goal")["status"], "running");
 
-    // Subsequent calls (still no cycle report) render the running prompt.
     let stdout = repo.run_stdout(&["goal"]);
     assert!(stdout.starts_with("# Goal Running"));
     assert_eq!(goal_state(&repo, "run-goal")["status"], "running");
@@ -629,7 +630,6 @@ fn goal_keep_commits_only_in_scope_changes() {
         "src/ranker.rs",
     ]);
 
-    // The cycle edits one in-scope file and one out-of-scope file.
     fs::create_dir_all(repo.root.join("src")).unwrap();
     fs::write(repo.root.join("src/ranker.rs"), "fn rank() {}\n").unwrap();
     fs::write(repo.root.join("incidental.md"), "incidental\n").unwrap();
@@ -638,11 +638,15 @@ fn goal_keep_commits_only_in_scope_changes() {
     let stdout = repo.run_stdout(&["goal"]);
     assert!(stdout.starts_with("# Goal Ready"));
 
-    // Only the in-scope file is folded into the goal baseline; the out-of-scope file is left
-    // uncommitted in the working tree rather than silently absorbed into the cycle.
     let committed = git_stdout(&repo.root, &["show", "--pretty=", "--name-only", "HEAD"]);
-    assert!(committed.contains("src/ranker.rs"), "committed: {committed}");
-    assert!(!committed.contains("incidental.md"), "committed: {committed}");
+    assert!(
+        committed.contains("src/ranker.rs"),
+        "committed: {committed}"
+    );
+    assert!(
+        !committed.contains("incidental.md"),
+        "committed: {committed}"
+    );
     let porcelain = git_stdout(&repo.root, &["status", "--porcelain", "incidental.md"]);
     assert!(porcelain.contains("incidental.md"), "status: {porcelain}");
 }
@@ -712,13 +716,9 @@ fn goal_keep_retry_after_crash_does_not_wedge() {
         "precompute static rank weights",
     );
     let state_path = repo.root.join(".orchid/goals/crash-goal/state.json");
-    // Capture the pre-evaluation durable state, then evaluate (commits the keep).
     let pre_state = fs::read_to_string(&state_path).unwrap();
     repo.run_stdout(&["goal"]);
 
-    // Simulate a crash after the keep commit but before state.json was advanced: the
-    // working tree is now clean and the C001 report is still present. The retry must not
-    // wedge on `git commit` against a clean tree.
     fs::write(&state_path, &pre_state).unwrap();
     let stdout = repo.run_stdout(&["goal"]);
     assert!(stdout.starts_with("# Goal Ready"));
@@ -753,12 +753,8 @@ fn goal_init_rejects_zero_budgets() {
     let mut zero_iters = base.to_vec();
     zero_iters.extend(["--max-iterations", "0"]);
     let failed = repo.run_fail(&zero_iters);
-    assert!(failed["error"]
-        .as_str()
-        .unwrap()
-        .contains("max-iterations"));
+    assert!(failed["error"].as_str().unwrap().contains("max-iterations"));
 
-    // Zero duration is rejected by the duration parser.
     let zero_dur = [
         "goal",
         "init",
@@ -811,8 +807,6 @@ fn goal_init_rejects_non_finite_min_delta() {
             "--max-duration",
             "30m",
         ]);
-        // A non-finite min-delta must be rejected at init rather than written as the invalid
-        // TOML literal `NaN`, which would wedge every later goal command. No goal.toml is left.
         assert!(
             failed["error"]
                 .as_str()
@@ -827,8 +821,6 @@ fn goal_init_rejects_non_finite_min_delta() {
 #[test]
 fn stale_rejects_out_of_range_duration_with_structured_error() {
     let repo = Repo::new();
-    // An in-i64 but TimeDelta-overflowing magnitude must produce a JSON invalid_duration ACK,
-    // not a chrono panic that aborts the process with no structured output.
     let failed = repo.run_fail(&["stale", "--older-than", "99999999999999d"]);
     assert_eq!(failed["code"], "invalid_duration");
 }
@@ -837,7 +829,6 @@ fn stale_rejects_out_of_range_duration_with_structured_error() {
 fn goal_non_pass_status_blocks_keep() {
     let repo = Repo::new();
     repo.init_git();
-    // status=fail but recommendation=keep must not keep.
     init_ready_goal(
         &repo,
         "status-goal",
@@ -865,7 +856,6 @@ fn goal_non_pass_status_blocks_keep() {
 fn goal_keep_below_min_delta_is_downgraded_to_discard() {
     let repo = Repo::new();
     repo.init_git();
-    // Baseline 120, candidate 118 => improvement 2, below the --min-delta of 5.
     init_ready_goal(
         &repo,
         "delta-goal",
@@ -884,7 +874,6 @@ fn goal_keep_below_min_delta_is_downgraded_to_discard() {
     let stdout = repo.run_stdout(&["goal"]);
     assert!(stdout.starts_with("# Goal Ready"));
     let state = goal_state(&repo, "delta-goal");
-    // The sub-threshold keep must not be committed; it is downgraded to discard.
     assert_eq!(state["last_decision"], "discard");
     let status = repo.run_stdout(&["goal", "status"]);
     assert!(status.contains("- Kept cycles: `0`"));
@@ -1061,11 +1050,8 @@ fn protected_surface_change_blocks_automatic_decision() {
 #[test]
 fn protected_surface_edited_during_evaluation_blocks_keep() {
     let repo = Repo::new();
-    // Commit an initial justfile so it is clean at the pre-evaluator check.
     fs::write(repo.root.join("justfile"), "orig\n").unwrap();
     repo.init_git();
-    // The evaluator edits the protected file during the cycle run (only when a baseline value
-    // is set, so baseline establishment leaves it clean), then recommends keep.
     repo.run_stdout(&[
         "goal",
         "init",
@@ -1133,8 +1119,6 @@ fn protected_surface_committed_in_cycle_blocks_automatic_decision() {
         "--protected-surface",
         "justfile",
     ]);
-    // Commit the protected-surface edit during the cycle so the working tree is clean
-    // and porcelain status alone would miss it.
     fs::write(repo.root.join("justfile"), "goal-eval:\n\t@echo changed\n").unwrap();
     git(&repo.root, &["add", "justfile"]);
     git(&repo.root, &["commit", "-m", "tweak evaluator"]);
@@ -1210,12 +1194,9 @@ fn status_all_open_echoes_selected_and_skipped_specs() {
     repo.write_task_file("02-second", "T001", "todo", "src/second/");
     repo.write_task_file("DONE-99-closed", "T001", "todo", "src/closed/");
 
-    // Bare status counts tasks across all specs and does not narrow, so it echoes no `specs`.
     let bare = repo.run(&["status"]);
     assert!(bare.get("specs").is_none());
 
-    // --all-open narrows to the first open spec (01-first), counting fewer tasks. The payload
-    // now names the selected spec and the skipped inactive specs so the narrowing is explicit.
     let all_open = repo.run(&["status", "--all-open"]);
     assert!(all_open["tasks"].as_i64().unwrap() < bare["tasks"].as_i64().unwrap());
     assert_eq!(all_open["tasks"], 2);
@@ -1722,7 +1703,6 @@ fn attach_agent_refreshes_existing_worker_packet() {
         "agent_456",
     ]);
 
-    // The packet a worker reads must reflect the post-attach identity.
     let after = fs::read_to_string(&packet_path).unwrap();
     assert!(after.contains("agent_456"));
     assert!(!after.contains("worker:unassigned"));
@@ -1743,8 +1723,6 @@ fn agent_id_is_reusable_after_lease_completes() {
         "l_old",
     ]);
     repo.run(&["complete", "--lease", "l_old", "--verified-by", "mayor"]);
-    // The terminal lease still exists on disk, but its agent_id must be reusable
-    // without requiring cleanup --completed first.
     let lease = repo.run(&[
         "lease",
         "example",
@@ -1774,14 +1752,10 @@ fn status_agent_id_ignores_terminal_lease() {
         "l_old",
     ]);
     repo.run(&["complete", "--lease", "l_old", "--verified-by", "mayor"]);
-    // A completed lease still carries agent_id on disk, but it is no longer the agent's
-    // current assignment; status must not present it as active work.
     let terminal = repo.run_fail(&["status", "--agent-id", "agent_123"]);
     assert_eq!(terminal["code"], "agent_lease_not_found");
     assert_eq!(terminal["terminal_leases"][0], "l_old");
 
-    // Re-leasing the reusable agent_id yields a single active lease; status prefers it over
-    // the lingering terminal lease instead of reporting an ambiguous match.
     repo.run(&[
         "lease",
         "example",
@@ -2021,8 +1995,6 @@ fn bud_enforces_scope_and_parallel_guards() {
     ]);
     assert_eq!(missing_scope["code"], "scope_required");
 
-    // A `..` scope is non-empty but inert/escaping; bud must reject it rather than create a
-    // phantom-scoped lease.
     let escapes = repo.run_fail(&[
         "bud",
         "--title",
@@ -2311,7 +2283,6 @@ fn complete_updates_only_task_and_next_finds_stage_or_cleanup() {
 #[test]
 fn bud_rejects_instructions_outside_repo() {
     let repo = Repo::new();
-    // A file outside the repository root must not be readable into a bud packet.
     let outside = repo.root.parent().unwrap().join("secret.txt");
     fs::write(&outside, "host secret\n").unwrap();
 
@@ -2341,8 +2312,6 @@ fn stray_misnamed_json_does_not_abort_lease_scan() {
         "--lease-id",
         "l_real",
     ]);
-    // A Finder-style duplicate / stray .json whose stem is not a valid lease id must be
-    // ignored, not abort every lease command.
     let leases_dir = repo.root.join(".orchid/leases");
     fs::copy(
         leases_dir.join("l_real.json"),
@@ -2369,7 +2338,6 @@ fn corrupt_lease_file_fails_scope_enumeration_closed() {
         "--lease-id",
         "l_real",
     ]);
-    // A truncated lease file must not silently disappear from exclusivity checks.
     let leases_dir = repo.root.join(".orchid/leases");
     fs::write(leases_dir.join("l_ghost.json"), "{").unwrap();
     let payload = repo.run_fail(&[
@@ -2399,7 +2367,6 @@ fn active_serial_lease_blocks_later_parallel_lease() {
         "l_serial",
         "--serial",
     ]);
-    // A later parallel lease on a disjoint scope must still be blocked by the serial lease.
     let failed = repo.run_fail(&[
         "lease",
         "sb",
@@ -2433,7 +2400,6 @@ fn lease_rejects_allow_parallel_for_serial_fanout_spec() {
         "--lease-id",
         "l_1",
     ]);
-    // A serial-fanout spec must reject parallel leasing even on a disjoint scope.
     let failed = repo.run_fail(&[
         "lease",
         "serialspec",
@@ -2488,7 +2454,6 @@ fn lease_overlap_uses_live_task_scope_after_expansion() {
         "--lease-id",
         "l_1",
     ]);
-    // Expand T001's scope on disk while it is leased.
     let task = fs::read_to_string(&t1).unwrap();
     fs::write(
         &t1,
@@ -2496,7 +2461,6 @@ fn lease_overlap_uses_live_task_scope_after_expansion() {
     )
     .unwrap();
 
-    // Leasing T002 (src/b) must now conflict with l_1's expanded live scope.
     let failed = repo.run_fail(&[
         "lease",
         "sx",
@@ -2517,7 +2481,6 @@ fn lease_rejects_task_id_path_traversal() {
     repo.write_task_file("001-foo", "T001", "todo", "src/foo/");
     repo.write_task_file("002-bar", "T001", "todo", "src/bar/");
 
-    // A task id with .. must not escape the target spec's tasks directory.
     let failed = repo.run_fail(&[
         "lease",
         "001-foo",
@@ -2529,7 +2492,6 @@ fn lease_rejects_task_id_path_traversal() {
     ]);
     assert_eq!(failed["code"], "invalid_task_id");
 
-    // The spec/task target form is guarded the same way.
     let failed = repo.run_fail(&[
         "lease",
         "001-foo/../../002-bar/tasks/T001",
@@ -2548,14 +2510,15 @@ fn lease_rejects_invalid_verification_mode() {
     let task = fs::read_to_string(&path).unwrap();
     fs::write(
         &path,
-        task.replace("verification_mode = \"mayor\"", "verification_mode = \"strange\""),
+        task.replace(
+            "verification_mode = \"mayor\"",
+            "verification_mode = \"strange\"",
+        ),
     )
     .unwrap();
 
-    // ready blocks it...
     let ready = repo.run(&["ready", "--spec", "vmspec", "--explain"]);
     assert_eq!(ready["blocked"][0]["reason"], "invalid verification_mode");
-    // ...and direct leasing must reject it too, not bypass the contract.
     let leased = repo.run_fail(&[
         "lease",
         "vmspec",
@@ -2573,7 +2536,6 @@ fn research_commands_resolve_numeric_spec_prefix() {
     let repo = Repo::new();
     repo.write_task_file("001-feature", "T001", "todo", "src/feat/");
 
-    // Numeric selector must resolve to the prefixed spec dir, matching ready/lease.
     let created = repo.run(&["research-path", "001", "--create"]);
     assert_eq!(created["spec"], "001-feature");
     assert_eq!(created["path"], ".orchid/spec-research/001-feature");
@@ -2598,8 +2560,6 @@ fn all_open_resolves_satisfied_cross_spec_dependency() {
     )
     .unwrap();
 
-    // The cross-spec dependency is satisfied (002-done/T010 is done), so the task is ready,
-    // not falsely blocked as a missing dependency.
     let payload = repo.run(&["ready", "--all-open", "--explain"]);
     assert_eq!(payload["ready"][0]["task"], "001-active/T005");
 }
@@ -2619,7 +2579,6 @@ fn depends_dash_sentinel_is_ready_and_lint_clean() {
     let task = fs::read_to_string(&path).unwrap();
     fs::write(&path, task.replace("depends = []", "depends = [\"-\"]")).unwrap();
 
-    // lint already exempts "-"; ready must agree and dispatch the task.
     let lint = repo.run(&["lint"]);
     assert!(lint.get("errors").is_none() || lint["errors"].as_array().unwrap().is_empty());
     let ready = repo.run(&["ready", "--spec", "dashspec", "--explain"]);
@@ -2631,13 +2590,12 @@ fn lint_rejects_parent_traversal_scope() {
     let repo = Repo::new();
     repo.write_task_file("escapespec", "T001", "todo", "..");
 
-    // A `..` scope entry is non-empty (so it passes the missing-scope check) but matches no repo
-    // path and never overlaps real scopes; lint must flag it as escaping the repo root.
     let lint = repo.run_fail(&["lint"]);
     assert_eq!(lint["ok"], false);
     let errors = lint["errors"].as_array().unwrap();
-    assert!(errors.iter().any(|err| err["task"] == "escapespec/T001"
-        && err["error"] == "scope escapes repo root"));
+    assert!(errors
+        .iter()
+        .any(|err| err["task"] == "escapespec/T001" && err["error"] == "scope escapes repo root"));
 }
 
 #[test]
@@ -2671,7 +2629,6 @@ fn next_prefers_validate_over_recover_for_stale_lease_with_report() {
         "--lease-id",
         "l_123",
     ]);
-    // Worker wrote a report, then went stale (age the heartbeat).
     fs::write(
         repo.root.join(".orchid/reports/l_123.md"),
         "+++\nlease_id = \"l_123\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
@@ -2683,7 +2640,6 @@ fn next_prefers_validate_over_recover_for_stale_lease_with_report() {
     lease["started_at"] = Value::String("2020-01-01T00:00:00Z".to_string());
     fs::write(&lease_path, serde_json::to_string_pretty(&lease).unwrap()).unwrap();
 
-    // The finished report must steer next to validate, not recover.
     let payload = repo.run(&["next", "--spec", "example", "--older-than", "1m"]);
     assert_eq!(payload["phase"], "validate");
 }
@@ -2692,7 +2648,6 @@ fn next_prefers_validate_over_recover_for_stale_lease_with_report() {
 fn next_dispatches_scope_disjoint_ready_tasks_with_parallel_flag() {
     let repo = Repo::new();
     repo.write_task_file("example", "T005", "todo", "src/feature/");
-    // Active lease in a disjoint scope.
     repo.write_task_file("other", "T001", "todo", "src/other/");
     repo.run(&[
         "lease",
@@ -2704,7 +2659,6 @@ fn next_dispatches_scope_disjoint_ready_tasks_with_parallel_flag() {
         "l_other",
     ]);
 
-    // ready lists the scope-disjoint example task...
     let ready = repo.run(&["ready", "--spec", "example", "--explain"]);
     let ready_tasks: Vec<&str> = ready["ready"]
         .as_array()
@@ -2714,8 +2668,6 @@ fn next_dispatches_scope_disjoint_ready_tasks_with_parallel_flag() {
         .collect();
     assert!(ready_tasks.contains(&"example/T001"));
 
-    // ...and next dispatches the same scope-disjoint task with explicit parallel confirmation
-    // instead of returning an empty, contradictory wait.
     let next = repo.run(&["next", "--spec", "example", "--explain"]);
     assert_eq!(next["phase"], "dispatch");
     assert_eq!(
@@ -2742,7 +2694,6 @@ fn next_dispatches_scope_disjoint_ready_tasks_with_parallel_flag() {
 fn next_spec_does_not_surface_foreign_spec_cleanup() {
     let repo = Repo::new();
     repo.write_task_file("other", "T001", "todo", "src/other/");
-    // Complete a lease in another spec so it becomes a cleanup candidate.
     repo.run(&[
         "lease",
         "other",
@@ -2754,13 +2705,10 @@ fn next_spec_does_not_surface_foreign_spec_cleanup() {
     ]);
     repo.run(&["complete", "--lease", "l_other", "--verified-by", "mayor"]);
 
-    // next scoped to example must dispatch example work, not close the other spec's lease.
     let payload = repo.run(&["next", "--spec", "example", "--explain"]);
     assert_eq!(payload["phase"], "dispatch");
     assert!(payload.get("cleanup").is_none());
 
-    // next scoped to other still surfaces its own completed lease, now as an unsafe gitless stage
-    // plan rather than cleanup.
     let other = repo.run(&["next", "--spec", "other", "--explain"]);
     assert_eq!(other["phase"], "stage");
     assert_eq!(other["stage"][0]["lease_id"], "l_other");
@@ -2783,7 +2731,6 @@ fn close_keeps_lease_json_when_dependent_delete_fails() {
         "l_1",
     ]);
     repo.run(&["complete", "--lease", "l_1", "--verified-by", "mayor"]);
-    // Give the lease a report file, then make the reports dir read-only so its delete fails.
     let reports_dir = repo.root.join(".orchid/reports");
     fs::create_dir_all(&reports_dir).unwrap();
     fs::write(reports_dir.join("l_1.md"), "report\n").unwrap();
@@ -2795,7 +2742,6 @@ fn close_keeps_lease_json_when_dependent_delete_fails() {
 
     fs::set_permissions(&reports_dir, original).unwrap();
 
-    // The lease JSON must survive so the close can be retried instead of orphaning artifacts.
     assert!(repo.root.join(".orchid/leases/l_1.json").exists());
 }
 
@@ -2815,11 +2761,9 @@ fn close_blocks_completed_lease_with_unstaged_changes() {
     fs::write(repo.root.join("src/feature/work.txt"), "work\n").unwrap();
     repo.run(&["complete", "--lease", "l_1", "--verified-by", "mayor"]);
 
-    // Closing before staging would orphan the unstaged work.
     let failed = repo.run_fail(&["close", "--lease", "l_1"]);
     assert_eq!(failed["code"], "close_has_unstaged_changes");
 
-    // --force overrides.
     let closed = repo.run(&["close", "--lease", "l_1", "--force"]);
     assert!(closed["deleted"]
         .as_array()
@@ -2842,7 +2786,6 @@ fn close_succeeds_after_changes_are_committed() {
     ]);
     fs::write(repo.root.join("src/feature/work.txt"), "work\n").unwrap();
     repo.run(&["complete", "--lease", "l_1", "--verified-by", "mayor"]);
-    // Documented workflow: stage and commit before close.
     git(&repo.root, &["add", "-A"]);
     git(&repo.root, &["commit", "-m", "stage work"]);
 
@@ -2868,7 +2811,6 @@ fn close_force_records_audit_trail_on_active_task() {
         .unwrap()
         .contains(&Value::String(".orchid/leases/l_1.json".to_string())));
 
-    // The forced closure leaves an audit trail on the task and keeps it re-leasable.
     let task = fs::read_to_string(repo.root.join("specs/example/tasks/T001.md")).unwrap();
     assert!(task.contains("last_lease_id = \"l_1\""));
     assert!(task.contains("force_closed_at"));
@@ -2902,12 +2844,8 @@ fn release_and_heartbeat_reject_completed_leases() {
     ]);
     repo.run(&["complete", "--lease", "l_abc", "--verified-by", "mayor"]);
 
-    // Releasing a completed lease would drop it from completed_runtime_leases and orphan
-    // its stage/cleanup work.
     let released = repo.run_fail(&["release", "l_abc", "--reason", "superseded"]);
     assert_eq!(released["code"], "lease_not_active");
-    // The lease stays completed and remains visible to next; without git it is an unsafe stage
-    // candidate rather than cleanup.
     let next = repo.run(&["next", "--spec", "example", "--explain"]);
     assert_eq!(next["phase"], "stage");
     assert_eq!(next["stage"][0]["lease_id"], "l_abc");
@@ -2924,8 +2862,6 @@ fn runtime_lock_reclaims_stale_lock_but_respects_fresh_one() {
     fs::create_dir_all(&lock_dir).unwrap();
     let lock_path = lock_dir.join("state.lock");
 
-    // A lock whose recorded owner is long gone (old created_at) must be reclaimed so a
-    // crash between acquire and Drop cannot wedge every later command.
     let stale = (Utc::now() - Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, false);
     fs::write(
         &lock_path,
@@ -2943,8 +2879,6 @@ fn runtime_lock_reclaims_stale_lock_but_respects_fresh_one() {
     ]);
     assert_eq!(lease["lease_id"], "l_reclaim");
 
-    // A fresh lock (current created_at) still means another command holds it: respect it.
-    // (The successful lease above released and pruned the lock dir, so recreate it.)
     fs::create_dir_all(&lock_dir).unwrap();
     let fresh = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, false);
     fs::write(
@@ -2968,8 +2902,6 @@ fn save_lease_does_not_persist_internal_path_metadata() {
         "--lease-id",
         "l_meta",
     ]);
-    // A load -> mutate -> save cycle (heartbeat) must not leak the in-memory `_path` key, which
-    // load_lease injects for runtime bookkeeping, into the durable lease JSON.
     repo.run(&["heartbeat", "l_meta"]);
     let lease: Value = serde_json::from_str(
         &fs::read_to_string(repo.root.join(".orchid/leases/l_meta.json")).expect("lease json"),
@@ -2987,11 +2919,13 @@ fn save_lease_does_not_persist_internal_path_metadata() {
 fn block_rewrites_task_with_nested_table_frontmatter() {
     let repo = Repo::new();
     let path = repo.write_task_file("metaspec", "T001", "todo", "src/meta/");
-    // Add a nested TOML table section; a mutator must still be able to rewrite the frontmatter.
     let task = fs::read_to_string(&path).unwrap();
     fs::write(
         &path,
-        task.replace("+++\n\n## Context\n", "[metadata]\nowner = \"team-a\"\n+++\n\n## Context\n"),
+        task.replace(
+            "+++\n\n## Context\n",
+            "[metadata]\nowner = \"team-a\"\n+++\n\n## Context\n",
+        ),
     )
     .unwrap();
 
@@ -3001,7 +2935,6 @@ fn block_rewrites_task_with_nested_table_frontmatter() {
         task_status(&repo.root, "specs/metaspec/tasks/T001.md"),
         "blocked"
     );
-    // The nested metadata survives the rewrite.
     let rewritten = fs::read_to_string(&path).unwrap();
     assert!(rewritten.contains("owner"));
     assert!(rewritten.contains("team-a"));
@@ -3025,7 +2958,6 @@ fn block_rejects_completed_task() {
         "done"
     );
 
-    // block must not regress a done task back to blocked.
     let failed = repo.run_fail(&["block", "example", "T001", "--reason", "decision"]);
     assert_eq!(failed["code"], "cannot_block_done_task");
     assert_eq!(
@@ -3040,7 +2972,6 @@ fn block_on_fresh_repo_preserves_orchid_marker() {
     assert!(!repo.root.join(".orchid").exists());
     let block = repo.run(&["block", "example", "T001", "--reason", "waiting"]);
     assert_eq!(block["task"], "example/T001");
-    // The runtime marker directory must survive a lock-only command so root discovery works.
     assert!(repo.root.join(".orchid").exists());
 }
 
@@ -3058,12 +2989,10 @@ fn block_rejects_task_with_active_lease() {
     ]);
     let payload = repo.run_fail(&["block", "example", "T001", "--reason", "needs decision"]);
     assert_eq!(payload["code"], "task_already_leased");
-    // Task must remain todo, not blocked, while the lease is active.
     assert_eq!(
         task_status(&repo.root, "specs/example/tasks/T001.md"),
         "todo"
     );
-    // After releasing the lease, block succeeds.
     repo.run(&["release", "l_test", "--reason", "paused"]);
     let block = repo.run(&["block", "example", "T001", "--reason", "needs decision"]);
     assert_eq!(block["task"], "example/T001");
@@ -3084,7 +3013,6 @@ fn complete_rolls_back_task_when_lease_save_fails() {
         "--lease-id",
         "l_abc",
     ]);
-    // Force save_lease to fail (read-only leases dir) while the task write still succeeds.
     let leases_dir = repo.root.join(".orchid/leases");
     let original = fs::metadata(&leases_dir).unwrap().permissions();
     fs::set_permissions(&leases_dir, fs::Permissions::from_mode(0o555)).unwrap();
@@ -3094,16 +3022,12 @@ fn complete_rolls_back_task_when_lease_save_fails() {
 
     fs::set_permissions(&leases_dir, original).unwrap();
 
-    // The task must not be left done with an active lease: it is rolled back to todo and the
-    // lease stays active, so re-dispatch is still possible.
     assert_eq!(
         task_status(&repo.root, "specs/example/tasks/T001.md"),
         "todo"
     );
-    let lease: Value = serde_json::from_str(
-        &fs::read_to_string(leases_dir.join("l_abc.json")).unwrap(),
-    )
-    .unwrap();
+    let lease: Value =
+        serde_json::from_str(&fs::read_to_string(leases_dir.join("l_abc.json")).unwrap()).unwrap();
     assert_eq!(lease["status"], "active");
 }
 
@@ -3121,8 +3045,6 @@ fn complete_clean_spec_research_failure_keeps_completion() {
         "--lease-id",
         "l_123",
     ]);
-    // Populate a spec-research workspace, then make its directory undeletable so the bundled
-    // cleanup fails while the core completion still succeeds.
     let research_dir = repo.root.join(".orchid/spec-research/example");
     fs::create_dir_all(&research_dir).unwrap();
     fs::write(research_dir.join("notes.md"), "notes\n").unwrap();
@@ -3140,9 +3062,6 @@ fn complete_clean_spec_research_failure_keeps_completion() {
 
     fs::set_permissions(&research_dir, original).unwrap();
 
-    // The cleanup failure is surfaced as a detail, but completion is durable: task done, lease
-    // completed. The coordinator can run research-clean separately rather than seeing a failed
-    // complete against an already-done task.
     assert_eq!(payload["task"], "example/T001");
     assert_eq!(payload["lease_id"], "l_123");
     assert!(payload.get("spec_research_clean_error").is_some());
@@ -3150,9 +3069,10 @@ fn complete_clean_spec_research_failure_keeps_completion() {
         task_status(&repo.root, "specs/example/tasks/T001.md"),
         "done"
     );
-    let lease: Value =
-        serde_json::from_str(&fs::read_to_string(repo.root.join(".orchid/leases/l_123.json")).unwrap())
-            .unwrap();
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_123.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(lease["status"], "completed");
 }
 
@@ -3168,7 +3088,6 @@ fn complete_rejects_task_not_in_completable_status() {
         "--lease-id",
         "l_x",
     ]);
-    // Force the task into a non-completable status while the lease is still active.
     let task_path = repo.root.join("specs/example/tasks/T001.md");
     let task = fs::read_to_string(&task_path).unwrap();
     fs::write(
@@ -3198,7 +3117,6 @@ fn complete_rejects_released_lease_after_release() {
         "l_old",
     ]);
     repo.run(&["release", "l_old", "--reason", "paused"]);
-    // Re-leasing the same todo task must succeed now that the old lease is released.
     repo.run(&[
         "lease",
         "example",
@@ -3208,9 +3126,13 @@ fn complete_rejects_released_lease_after_release() {
         "--lease-id",
         "l_new",
     ]);
-    // Completing the released lease must be rejected so it cannot mark the task done
-    // while l_new is still active.
-    let payload = repo.run_fail(&["complete", "--lease", "l_old", "--verified-by", "validator:x"]);
+    let payload = repo.run_fail(&[
+        "complete",
+        "--lease",
+        "l_old",
+        "--verified-by",
+        "validator:x",
+    ]);
     assert_eq!(payload["code"], "complete_requires_active_lease");
     assert_eq!(
         task_status(&repo.root, "specs/example/tasks/T001.md"),
@@ -3273,21 +3195,17 @@ fn report_check_ignores_tampered_lease_report_path() {
         "l_123",
     ]);
 
-    // Tamper the lease JSON to redirect report_path at an arbitrary in-repo file.
     let lease_path = repo.root.join(".orchid/leases/l_123.json");
     let mut lease: Value = serde_json::from_str(&fs::read_to_string(&lease_path).unwrap()).unwrap();
     lease["report_path"] = Value::String("specs/example/redirected.md".to_string());
     fs::write(&lease_path, serde_json::to_string(&lease).unwrap()).unwrap();
 
-    // Plant a valid-looking report at the redirected location.
     fs::write(
         repo.root.join("specs/example/redirected.md"),
         "+++\nlease_id = \"l_123\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
     )
     .unwrap();
 
-    // report-check must pin the expected path to the canonical .orchid/reports/l_123.md and
-    // reject the redirected file rather than validating it.
     let report = repo.run_fail(&["report-check", "specs/example/redirected.md"]);
     assert_eq!(report["code"], "report_lease_mismatch");
     assert_eq!(report["report"], "specs/example/redirected.md");
@@ -3361,8 +3279,6 @@ fn report_check_accepts_report_from_external_orchid_reports_dir() {
         "l_test",
     ]);
 
-    // A genuine linked worktree of the same repository is the only out-of-root location the
-    // report-check fallback is allowed to read from.
     let worktree = repo.root.parent().unwrap().join("other-worktree");
     git(
         &repo.root,
@@ -3428,9 +3344,6 @@ fn report_check_rejects_external_orchid_reports_dir_in_unrelated_repo() {
         "l_test",
     ]);
 
-    // A correctly shaped `<x>/.orchid/reports/<lease>.md` that is NOT a linked worktree of this
-    // repository must not be admitted by the fallback; otherwise a worker could plant an
-    // out-of-root report and spoof the report-check gate (default report paths even match).
     let outside = repo.root.parent().unwrap().join("evil");
     fs::create_dir_all(outside.join(".orchid/reports")).unwrap();
     let report_path = outside.join(".orchid/reports/l_test.md");
@@ -3608,7 +3521,6 @@ fn git_touched_and_stage_plan_split_scope_and_baseline() {
 
 #[test]
 fn stage_plan_marks_unsafe_when_git_unavailable() {
-    // No init_git: the repo has no git, so attribution is impossible.
     let repo = Repo::new();
     repo.run(&[
         "lease",
@@ -3621,8 +3533,6 @@ fn stage_plan_marks_unsafe_when_git_unavailable() {
     ]);
     fs::write(repo.root.join("src/feature/work.txt"), "work\n").unwrap();
 
-    // Without git there is nothing to stage, but the payload must signal git is unavailable
-    // so a coordinator doesn't read the empty plan as "staging confirmed safe".
     let touched = repo.run(&["git-touched", "--lease", "l_1"]);
     assert_eq!(touched["git"], false);
     assert_eq!(touched["safe_to_stage"], false);
@@ -3647,12 +3557,13 @@ fn stage_plan_excludes_in_scope_edits_made_after_complete() {
     ]);
     fs::write(repo.root.join("src/feature/work.txt"), "worker edit\n").unwrap();
     repo.run(&["complete", "--lease", "l_test", "--verified-by", "mayor"]);
-    // Coordinator edits another in-scope file AFTER completing the lease.
-    fs::write(repo.root.join("src/feature/extra.txt"), "post-complete edit\n").unwrap();
+    fs::write(
+        repo.root.join("src/feature/extra.txt"),
+        "post-complete edit\n",
+    )
+    .unwrap();
 
     let plan = repo.run(&["git-stage-plan", "--lease", "l_test"]);
-    // The lease-window edits (worker file + the task file complete updated) are staged;
-    // the post-complete extra.txt is excluded.
     assert_eq!(
         plan["pathspecs"],
         serde_json::json!([

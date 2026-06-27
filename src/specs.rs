@@ -1,3 +1,8 @@
+//! Spec discovery, task indexing, dependency resolution, and ready-task selection.
+//!
+//! Loads `specs/<id>/` trees, filters inactive specs, and decides which tasks are
+//! dispatchable given scope, fanout policy, and cross-spec dependencies.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -104,8 +109,6 @@ fn resolve_spec_selector(root: &Path, specs: &Path, selector: &str) -> OrchResul
         .collect();
     match matches.as_slice() {
         [resolved] => Ok(resolved.clone()),
-        // A hyphen-suffixed prefix match takes precedence; only when none exists do we fall
-        // back to a directory named exactly the numeric selector (e.g. specs/001 for `001`).
         [] => {
             let exact_dir = repo_path(root, specs.join(&name), "spec_dir")?;
             if exact_dir.is_dir() {
@@ -124,8 +127,6 @@ fn resolve_spec_selector(root: &Path, specs: &Path, selector: &str) -> OrchResul
     }
 }
 
-/// Resolve a single spec selector (including numeric prefixes like `001`) to its directory
-/// name, so research commands target the same spec that dispatch commands do.
 pub(crate) fn resolve_spec(root: &Path, selector: &str) -> OrchResult<String> {
     let specs = repo_path(root, root.join("specs"), "specs_dir")?;
     resolve_spec_selector(root, &specs, selector)
@@ -321,8 +322,6 @@ pub(crate) fn task_key(task: &Task) -> String {
     format!("{}/{}", task.spec_id, task.id())
 }
 
-/// A task id must be a single filename segment so it cannot escape the target spec's
-/// tasks directory (e.g. `../../other-spec/tasks/T001`).
 fn safe_task_id(task_id: &str) -> OrchResult<&str> {
     let valid = !task_id.is_empty()
         && task_id != "."
@@ -332,7 +331,8 @@ fn safe_task_id(task_id: &str) -> OrchResult<&str> {
         && !task_id.contains("..");
     if !valid {
         return Err(
-            OrchError::coded("invalid task id", ErrorCode::InvalidTaskId).detail("task_id", task_id),
+            OrchError::coded("invalid task id", ErrorCode::InvalidTaskId)
+                .detail("task_id", task_id),
         );
     }
     Ok(task_id)
@@ -391,6 +391,7 @@ pub(crate) fn task_by_ref<'a>(
         .find(|task| task.spec_id == spec && task.id() == task_id)
 }
 
+/// Return dispatchable tasks plus blocked entries and lint messages for `ready`.
 pub(crate) fn ready_tasks(
     root: &Path,
     spec_names: Option<&[String]>,
@@ -398,8 +399,6 @@ pub(crate) fn ready_tasks(
     active: Option<&[LeaseRecord]>,
 ) -> OrchResult<ReadyTasksResult> {
     let (tasks, selected_specs) = select_tasks(root, spec_names, all_open)?;
-    // Resolve dependencies against the full task index (not just the selected spec) so a
-    // satisfied cross-spec dependency like other-spec/T010 isn't falsely reported missing.
     let all_tasks = load_tasks(root, None)?;
     let active = active.unwrap_or(&[]);
     let mut ready = Vec::new();
@@ -422,8 +421,6 @@ pub(crate) fn ready_tasks(
             reason = Some("invalid worker_model".to_string());
         } else {
             for dep in task.depends() {
-                // "-" is the no-dependency sentinel that lint and task_by_ref already exempt;
-                // skip it here too so a lint-clean task is not blocked with missing dependency:-.
                 if dep == "-" {
                     continue;
                 }

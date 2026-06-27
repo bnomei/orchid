@@ -1,8 +1,14 @@
+//! Shared CLI infrastructure: structured errors, JSON ACK emission, and time parsing.
+//!
+//! Every command surfaces failures through [`OrchError`] with stable [`ErrorCode`]
+//! values so coordinators can branch on machine-readable codes instead of prose.
+
 use chrono::{DateTime, Local, SecondsFormat, TimeDelta, Utc};
 use serde_json::{Map, Value};
 
 pub(crate) const DEFAULT_STALE_AFTER: &str = "30m";
 
+/// Stable machine-readable codes attached to orchestration failures.
 #[derive(Debug, Copy, Clone)]
 pub(crate) enum ErrorCode {
     ActiveLeaseCloseRequiresForce,
@@ -96,6 +102,7 @@ impl ErrorCode {
     }
 }
 
+/// Structured command failure with a stable code and optional detail fields for JSON ACKs.
 #[derive(Debug, Clone)]
 pub(crate) struct OrchError {
     pub(crate) message: String,
@@ -137,6 +144,7 @@ impl From<std::io::Error> for OrchError {
     }
 }
 
+/// Result alias used by every command handler and filesystem helper.
 pub(crate) type OrchResult<T> = Result<T, OrchError>;
 
 pub(crate) fn error_code(message: &str) -> String {
@@ -262,6 +270,7 @@ pub(crate) fn elapsed_seconds(value: Option<&Value>, now: DateTime<Utc>) -> i64 
         .unwrap_or(0)
 }
 
+/// Parse a positive duration such as `30m`, `2h`, or `1d` without panicking on overflow.
 pub(crate) fn parse_duration(value: &str) -> OrchResult<TimeDelta> {
     let raw = value.trim();
     if raw.len() < 2 {
@@ -270,8 +279,6 @@ pub(crate) fn parse_duration(value: &str) -> OrchResult<TimeDelta> {
                 .detail("duration", value),
         );
     }
-    // Split on the final character, not a byte offset: `split_at(len - 1)` panics when the
-    // last character is multi-byte (the index lands mid-codepoint).
     let unit = raw.chars().next_back().ok_or_else(|| {
         OrchError::coded("invalid duration", ErrorCode::InvalidDuration).detail("duration", value)
     })?;
@@ -279,17 +286,12 @@ pub(crate) fn parse_duration(value: &str) -> OrchResult<TimeDelta> {
     let amount: i64 = amount.parse().map_err(|_| {
         OrchError::coded("invalid duration", ErrorCode::InvalidDuration).detail("duration", value)
     })?;
-    // Non-positive durations invert stale comparisons (negative) or mark everything stale
-    // (zero), so reject them rather than silently producing a misleading cutoff.
     if amount <= 0 {
         return Err(
             OrchError::coded("invalid duration", ErrorCode::InvalidDuration)
                 .detail("duration", value),
         );
     }
-    // Use the non-panicking `try_*` constructors: chrono's bare `seconds/minutes/hours/days`
-    // panic ("out of bounds") for a large-magnitude (but in-i64) amount, which would abort the
-    // process instead of returning the documented InvalidDuration error.
     let delta = match unit {
         's' => TimeDelta::try_seconds(amount),
         'm' => TimeDelta::try_minutes(amount),
@@ -336,8 +338,6 @@ mod tests {
 
     #[test]
     fn duration_parser_rejects_out_of_range_magnitude_without_panicking() {
-        // In-i64 but beyond chrono's TimeDelta range: the bare constructors would panic; the
-        // try_* variants must yield a structured InvalidDuration instead.
         for value in [
             "99999999999999d",
             "9999999999999999s",

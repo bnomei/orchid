@@ -1,3 +1,8 @@
+//! Markdown task files with TOML frontmatter: load, mutate, and round-trip write-back.
+//!
+//! Preserves field order, inline array style, and typed values so `complete` and
+//! `block` can update task state without corrupting hand-authored frontmatter.
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -35,6 +40,7 @@ const TASK_FIELD_ORDER: &[&str] = &[
     "report",
 ];
 
+/// Parsed TOML frontmatter for a task file, including per-field array style metadata.
 #[derive(Debug, Clone)]
 pub(crate) struct TaskFrontmatter {
     raw: Map<String, Value>,
@@ -124,6 +130,7 @@ enum ArrayStyle {
 }
 
 #[derive(Debug, Clone)]
+/// Loaded task file with parsed frontmatter and on-disk path under `specs/<id>/tasks/`.
 pub(crate) struct Task {
     pub(crate) path: PathBuf,
     pub(crate) spec_id: String,
@@ -279,12 +286,8 @@ fn dump_toml_value(value: &Value, array_style: Option<ArrayStyle>) -> OrchResult
     match value {
         Value::String(raw) => Ok(quote_toml_string(raw)),
         Value::Bool(raw) => Ok(if *raw { "true" } else { "false" }.to_string()),
-        // serde_json renders integers without and finite floats with a decimal point or
-        // exponent, both of which TOML accepts. Floats are always finite here (the loader
-        // maps non-finite TOML floats to Null), so any Number is dumpable.
         Value::Number(raw) => Ok(raw.to_string()),
         Value::Object(map) => {
-            // Emit a TOML inline table so a loaded nested table round-trips on write-back.
             let mut parts = Vec::with_capacity(map.len());
             for (key, item) in map {
                 parts.push(format!(
@@ -306,12 +309,6 @@ fn dump_toml_value(value: &Value, array_style: Option<ArrayStyle>) -> OrchResult
                 return Ok("[]".to_string());
             }
 
-            // Dump each element recursively so numbers, bools, inline tables, and nested arrays
-            // preserve their type/structure (or hit the existing unsupported-type error) instead
-            // of being silently coerced to quoted strings via value_to_string.
-            // Dump each element recursively so numbers, bools, inline tables, and nested arrays
-            // preserve their type/structure (or hit the existing unsupported-type error) instead
-            // of being silently coerced to quoted strings via value_to_string.
             let mut dumped = Vec::with_capacity(items.len());
             for item in items {
                 dumped.push(dump_toml_value(item, Some(ArrayStyle::Inline))?);
@@ -435,8 +432,6 @@ mod tests {
         meta.insert("priority".to_string(), json!(0.5));
         meta.insert("meta".to_string(), json!({ "owner": "x" }));
 
-        // The loader accepts floats and tables, so the dumper must be able to write them back
-        // (otherwise complete/block/lease would wedge the task).
         let dumped = dump_frontmatter(&meta).unwrap();
         let text = dumped + "\n## Context\n";
         let (parsed, _) = split_frontmatter(&text, Path::new("task.md")).unwrap();
@@ -450,8 +445,6 @@ mod tests {
         let mut meta = Map::new();
         meta.insert("id".to_string(), json!("T900"));
         meta.insert("status".to_string(), json!("todo"));
-        // Arrays of inline tables and typed numbers must keep their type/structure on write-back
-        // rather than being silently coerced to quoted strings.
         meta.insert("covers".to_string(), json!([{ "id": "T1" }]));
         meta.insert("extra".to_string(), json!([1, 2]));
 

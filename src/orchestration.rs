@@ -1,3 +1,8 @@
+//! Command handlers backing the CLI: lease, complete, next, goal hooks, and Git checks.
+//!
+//! Each handler acquires the runtime lock, validates scope and task contracts, mutates
+//! durable state under `.orchid/` and `specs/`, and returns JSON ACK payloads.
+
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -242,9 +247,6 @@ pub(crate) fn status(root: &Path, request: &StatusRequest) -> OrchResult<Map<Str
     let mut payload = json_ok();
     insert(&mut payload, "tasks", tasks.len() as i64);
     insert(&mut payload, "counts", Value::Object(counts));
-    // Echo which spec(s) the task count was scoped to. Without this, `status --all-open` (and
-    // `status --spec`) silently count a narrower task set than bare `status`, with no field to
-    // explain the discrepancy to monitoring/coordinator scripts.
     insert_non_empty(&mut payload, "specs", string_values(selected_specs));
     if request.all_open {
         insert_non_empty(
@@ -270,8 +272,6 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
             .detail("task", task_key(&task))
             .detail("status", task.status()));
     }
-    // Enforce the same verification_mode contract lint/ready gate on, so direct leasing can't
-    // dispatch a task those paths treat as non-dispatchable.
     if !crate::model::VerificationMode::parse(task.verification_mode()).is_dispatchable() {
         return Err(OrchError::coded(
             "invalid verification_mode",
@@ -312,8 +312,6 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
                 .detail("scope", string_values(effective_scope)));
         }
     }
-    // An active serial lease demands single-flight execution, so it blocks any new lease
-    // (not just at its own creation time) until it is released or closed.
     if let Some(serial_lease) = active
         .iter()
         .find(|lease| lease.mode() == LeaseMode::Serial.as_str())
@@ -338,7 +336,6 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
         )
         .detail("active_leases", compact_leases(active)?));
     }
-    // Enforce the spec's declared fanout policy: a serial spec must not be leased in parallel.
     if request.allow_parallel
         && crate::specs::load_spec_policy(root, &task.spec_id)?.fanout_is_serial()
     {
@@ -438,8 +435,6 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
     let worker_reasoning_effort =
         resolve_worker_reasoning_effort_value(request.worker_reasoning_effort.as_deref())?;
     let worker_model = normalize_optional_string(&request.worker_model);
-    // Confine --instructions to the repository root like other repo-bound inputs, so a host
-    // path (e.g. /etc/passwd) cannot be copied into buds and the worker packet.
     let instructions_path = repo_path(root, &request.instructions, "instructions")?;
     let instructions = fs::read_to_string(&instructions_path)?;
     ensure_runtime_dirs(root)?;
@@ -567,8 +562,6 @@ pub(crate) fn lease_attach_agent(
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, &request.lease)?;
     ensure_agent_id_available(root, Some(&request.agent_id), Some(&request.lease))?;
-    // If a worker packet was already rendered, its echoed owner/agent will go stale; refresh it
-    // after updating the identity so workers don't read pre-attach metadata.
     let worker_packet_exists = lease
         .worker_packet_path()
         .map(|rel| root.join(rel).exists())
@@ -603,8 +596,6 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
     let stale = active
         .iter()
         .filter(|lease| lease_stale(lease, now, stale_after))
-        // A lease with a finished report belongs in validate, not recover, even if its
-        // heartbeat has gone stale.
         .filter(|lease| {
             !report_path_for_lease(root, lease)
                 .map(|path| path.exists())
@@ -738,8 +729,6 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     }
     let task_path = lease.task_path();
     let task = load_task(repo_path(root, task_path, "task_path")?, root)?;
-    // Symmetric with lease's todo guard: don't let complete jump a blocked/done/unknown task
-    // straight to done, skipping its intended gates.
     if !task.status_model().is_completable() {
         return Err(OrchError::coded(
             "task cannot be completed from its current status",
@@ -778,16 +767,11 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     }
     let completed_at = meta.get("completed_at").cloned().unwrap_or(Value::Null);
     write_task_frontmatter(&task, frontmatter)?;
-    // Freeze the lease's git boundary at completion so a later stage plan attributes only
-    // the lease window's edits to it, not coordinator edits made after complete.
     let completed_status = git_status_data(root)?;
     lease.set("status", "completed");
     lease.set("completed_at", completed_at);
     lease.set("completed_changed", changed_paths_value(&completed_status));
     if let Err(err) = save_lease(root, &lease) {
-        // The task is already persisted as done; if writing the completed lease fails, roll
-        // the task back to its pre-complete frontmatter so we don't wedge it as a done task
-        // with a still-active lease (which would block re-dispatch).
         let _ = write_task_frontmatter(&task, task.frontmatter().clone());
         return Err(err);
     }
@@ -795,10 +779,6 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     insert(&mut payload, "lease_id", request.lease.clone());
     insert(&mut payload, "task", task_key(&task));
     if request.clean_spec_research {
-        // Completion (task done + lease completed) is already durable. Spec-research cleanup is
-        // a bundled best-effort convenience — `research-clean` is also a standalone recovery
-        // command — so a cleanup failure is surfaced as a detail rather than failing the whole
-        // command, which would otherwise report an error for an already-completed task.
         match clean_spec_research(root, &task.spec_id) {
             Ok((deleted, pruned)) => {
                 insert_non_empty(
@@ -812,7 +792,11 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
                 let mut detail = Map::new();
                 insert(&mut detail, "message", err.message.clone());
                 insert(&mut detail, "code", err.code.clone());
-                insert(&mut payload, "spec_research_clean_error", Value::Object(detail));
+                insert(
+                    &mut payload,
+                    "spec_research_clean_error",
+                    Value::Object(detail),
+                );
             }
         }
     }
@@ -821,22 +805,16 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
 
 pub(crate) fn block(root: &Path, request: &BlockRequest) -> OrchResult<Map<String, Value>> {
     let _lock = runtime_lock(root)?;
-    // Establish the runtime home like lease/bud/packet do. Without it, block writes nothing
-    // under .orchid, so the lock's Drop prunes the lock-only .orchid and erases the
-    // root-discovery marker.
     ensure_runtime_dirs(root)?;
     let task = resolve_task(root, &request.target, request.task_id.as_deref())?;
-    // Don't regress a terminal task: block must not overwrite a completed task back to
-    // blocked while its completion metadata stays in frontmatter.
     if task.status_model().is_done() {
-        return Err(
-            OrchError::coded("cannot block a completed task", ErrorCode::CannotBlockDoneTask)
-                .detail("task", task_key(&task))
-                .detail("status", task.status()),
-        );
+        return Err(OrchError::coded(
+            "cannot block a completed task",
+            ErrorCode::CannotBlockDoneTask,
+        )
+        .detail("task", task_key(&task))
+        .detail("status", task.status()));
     }
-    // Don't leave a task marked blocked while an active lease still claims it; the
-    // coordinator must release/close that lease first.
     let task_rel = relpath(&task.path, root);
     for lease in active_leases(root)? {
         if lease.task_path() == task_rel {
@@ -862,8 +840,6 @@ pub(crate) fn heartbeat(root: &Path, lease_id: &str) -> OrchResult<Map<String, V
     validate_lease_id(lease_id)?;
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, lease_id)?;
-    // Heartbeats only make sense for active leases; refreshing a terminal lease would
-    // return a misleading "alive" ack.
     if !lease.status().is_active() {
         return Err(OrchError::coded(
             "cannot heartbeat a lease that is not active",
@@ -922,8 +898,6 @@ pub(crate) fn release(root: &Path, lease_id: &str, reason: &str) -> OrchResult<M
     validate_lease_id(lease_id)?;
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, lease_id)?;
-    // release stops an active worker; releasing a terminal lease (e.g. completed) would
-    // drop it from completed_runtime_leases and orphan its unstaged work.
     if !lease.status().is_active() {
         return Err(OrchError::coded(
             "cannot release a lease that is not active",
@@ -989,9 +963,6 @@ pub(crate) fn close(root: &Path, request: &CloseRequest) -> OrchResult<Map<Strin
         )
         .detail("lease_id", request.lease.clone()));
     }
-    // Don't drop a completed lease's baseline before its work is staged: if the lease still
-    // has pending in-scope changes in the working tree, closing would orphan them and lose
-    // the snapshot git-stage-plan needs. Require --force to override.
     if lease.status().is_completed() && !lease.is_bud() && !request.force {
         let plan = stage_plan_for_lease(root, &lease)?;
         if !plan.pathspecs.is_empty() || !plan.safe_to_stage {
@@ -1003,10 +974,6 @@ pub(crate) fn close(root: &Path, request: &CloseRequest) -> OrchResult<Map<Strin
             .detail("pathspecs", string_values(plan.pathspecs.clone())));
         }
     }
-    // Force-closing an active lease deletes its runtime artifacts; leave a minimal audit
-    // trail on the task (as complete does with last_lease_id) so the forced closure is not
-    // invisible. The task status is left unchanged, so it stays re-leasable. Best effort:
-    // never fail the close if the task can no longer be loaded.
     if request.force && lease.status().is_active() && !lease.is_bud() {
         if let Ok(task_path) = repo_path(root, lease.task_path(), "task_path") {
             if let Ok(task) = load_task(task_path, root) {
@@ -1395,18 +1362,11 @@ fn clean_path(path: &Path) -> PathBuf {
     out
 }
 
-fn external_orchid_report_path(
-    root: &Path,
-    path: &Path,
-) -> OrchResult<Option<(PathBuf, String)>> {
+fn external_orchid_report_path(root: &Path, path: &Path) -> OrchResult<Option<(PathBuf, String)>> {
     let Ok(path) = fs::canonicalize(path) else {
         return Ok(None);
     };
     if let Some((external_root, rel)) = orchid_report_relpath(&path) {
-        // The fallback exists only to read a report written in a linked git worktree of the
-        // *same* repository (worktree support, commit 0175ba8). Without this check it would
-        // admit any `<anything>/.orchid/reports/<name>` file on the filesystem, letting a
-        // worker plant an out-of-root report and spoof the report-check gate.
         if same_git_repository(root, &external_root) {
             return Ok(Some((path.clone(), rel)));
         }
@@ -1414,8 +1374,6 @@ fn external_orchid_report_path(
     Ok(None)
 }
 
-/// True when `a` and `b` are checkouts of the same git repository (they share a git common
-/// directory). Used to confine the external report-path fallback to genuine linked worktrees.
 fn same_git_repository(a: &Path, b: &Path) -> bool {
     match (
         crate::gitstate::git_common_dir(a),
@@ -1607,9 +1565,6 @@ fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value
                 .detail("agent_id", agent_id),
         );
     }
-    // An agent_id is reusable once its previous lease reaches a terminal state, so the same id
-    // can match both a finished lease and the agent's current assignment. Only an active lease
-    // represents live work; never surface a terminal lease as the agent's current status.
     let active = matches
         .iter()
         .filter(|lease| lease.status().is_active())
@@ -1700,8 +1655,6 @@ fn ensure_agent_id_available(
     let Some(agent_id) = agent_id.filter(|value| !value.is_empty()) else {
         return Ok(());
     };
-    // Only active leases reserve an agent_id; a terminal lease still on disk must not
-    // block the same coordinator from attaching the id to its next task.
     for lease in active_leases(root)? {
         if lease.id() == except_lease {
             continue;
@@ -1809,19 +1762,12 @@ fn nonzero_counts(counts: Map<String, Value>) -> Map<String, Value> {
         .collect()
 }
 
-/// True when a lease's task belongs to one of the specs `next` resolved its scope to.
-/// Lease task values are `spec_id/task_id`; leases without a spec (e.g. buds) never match,
-/// so spec-scoped `next` never directs stage/cleanup/validate at a foreign lease.
 fn lease_in_selected_specs(lease: &LeaseRecord, selected_specs: &[String]) -> bool {
     let task = lease.get_str("task").unwrap_or("");
     let spec = task.split_once('/').map(|(spec, _)| spec).unwrap_or("");
     !spec.is_empty() && selected_specs.iter().any(|selected| selected == spec)
 }
 
-/// Scope to enforce exclusivity against for an active lease: the snapshot stored at lease
-/// time unioned with the task's current on-disk scope. This way, expanding a task's scope
-/// while it is leased still blocks overlapping leases on the newly claimed region. Best
-/// effort — a bud (no task file) or an unreadable task falls back to the stored snapshot.
 fn effective_lease_scope(root: &Path, lease: &LeaseRecord) -> Vec<String> {
     let mut scope = lease.scope();
     if !lease.is_bud() {

@@ -1,5 +1,10 @@
 #![allow(dead_code)]
 
+//! Branch-local goal cycles: contract, durable state, evaluator integration, and keep/discard.
+//!
+//! Goals live under `.orchid/goals/<id>/` with `goal.toml`, cycle reports, and JSONL
+//! traces. Cycles advance through ready, running, evaluate, and terminal decisions.
+
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -23,6 +28,7 @@ const STATE_JSON: &str = "state.json";
 const RESULTS_JSONL: &str = "results.jsonl";
 const MEASUREMENTS_JSONL: &str = "measurements.jsonl";
 
+/// Sanitized identifier for a goal directory under `.orchid/goals/`.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct GoalId(String);
@@ -109,15 +115,10 @@ impl GoalInitRequest {
     ) -> OrchResult<Self> {
         let max_duration_raw = max_duration.into();
         let max_duration = parse_duration(&max_duration_raw)?;
-        // A non-finite min-delta corrupts durable state: NaN serializes via Display as the
-        // invalid-TOML literal `NaN`, so every later goal command fails to re-parse goal.toml
-        // and the goal is wedged. Infinity is a meaningless threshold. Reject both at init.
         if !minimum_delta.is_finite() {
             return Err(OrchError::new("min-delta must be a finite number")
                 .detail("min_delta", minimum_delta.to_string()));
         }
-        // A zero iteration budget exhausts on the first cycle check, so the goal could never
-        // run. (A zero max_duration is already rejected by parse_duration.)
         if max_iterations == 0 {
             return Err(OrchError::new("max-iterations must be at least 1")
                 .detail("max_iterations", max_iterations.to_string()));
@@ -164,6 +165,7 @@ impl GoalInitRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Durable goal configuration persisted as `goal.toml` under `.orchid/goals/<id>/`.
 pub(crate) struct GoalContract {
     pub(crate) goal_id: GoalId,
     pub(crate) goal: String,
@@ -224,6 +226,7 @@ impl GoalContract {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Per-goal cycle pointer and budget counters persisted as `state.json`.
 pub(crate) struct GoalState {
     pub(crate) status: GoalStatus,
     pub(crate) cycle: String,
@@ -378,8 +381,6 @@ impl GoalDirection {
         }
     }
 
-    /// Directional improvement of `candidate` over `baseline`. `None` for `Target`, which has
-    /// no stored target value to measure distance against, so its keep gate is not enforced.
     pub(crate) fn improvement(self, baseline: f64, candidate: f64) -> Option<f64> {
         match self {
             Self::HigherIsBetter => Some(candidate - baseline),
@@ -589,14 +590,6 @@ pub(crate) fn render_goal_prompt(
     }
 }
 
-/// Render the bare `orchid goal` prompt and, on the first standalone request for a `ready`
-/// cycle whose report does not yet exist, advance the durable state into `running`. This makes
-/// the documented `ready -> running -> evaluate` transition observable (docs/goal.md) so a
-/// coordinator can distinguish "cycle not started" from "cycle in progress". The kickoff
-/// (ready) prompt is still returned for this first call; subsequent calls render the running
-/// prompt. The transition is intentionally driven from the user-facing command rather than the
-/// shared renderer so that `goal init` and post-decision cycle advances leave the new cycle in
-/// `ready` until the agent actually picks it up.
 pub(crate) fn render_goal_prompt_and_advance(
     root: &Path,
     contract: &GoalContract,
@@ -810,16 +803,12 @@ fn evaluate_cycle_report(
             .detail("expected", contract.primary_metric.clone())
             .detail("actual", evaluator.metric));
     }
-    // A non-pass evaluator status means the measurement run itself failed; never keep/discard
-    // on it regardless of the recommendation field. Treat it as a blocked cycle.
     if evaluator.status != "pass" {
         evaluator.recommendation = EvaluatorRecommendation::Blocked;
         evaluator.reason = format!("evaluator status {}", evaluator.status);
     }
     evaluator.append_measurement(root, &contract.goal_id, &state.cycle)?;
 
-    // Enforce the configured keep gate: a Keep whose improvement over the current baseline is
-    // below --min-delta is downgraded to Discard so sub-threshold (noise) cycles are not kept.
     if evaluator.recommendation == EvaluatorRecommendation::Keep {
         if let Some(baseline_value) = state.baseline_value {
             if let Some(improvement) = contract
@@ -851,9 +840,6 @@ fn evaluate_cycle_report(
     let result_next_hypothesis = next.next_hypothesis.clone();
     let result_reason = evaluator.reason.clone();
 
-    // Re-check protected surfaces immediately before keep: the pre-evaluator check is a
-    // point-in-time snapshot, so edits made during the (unbounded) evaluator subprocess must
-    // not slip into the keep commit.
     if recommendation == EvaluatorRecommendation::Keep {
         let protected_changes =
             changed_protected_surfaces(root, contract, next.baseline_commit.as_deref())?;
@@ -1014,11 +1000,12 @@ fn keep_cycle(
     state: &mut GoalState,
     evaluator: &EvaluatorResult,
 ) -> OrchResult<()> {
-    let scope: Vec<String> = contract.scope.iter().map(|path| path_to_string(path)).collect();
+    let scope: Vec<String> = contract
+        .scope
+        .iter()
+        .map(|path| path_to_string(path))
+        .collect();
     let staged = gitstate::stage_goal_candidates(root, &scope)?;
-    // Nothing to commit means either the keep cycle made no file changes, or a previous
-    // attempt already committed this cycle and crashed before advancing state. Either way,
-    // reuse HEAD instead of failing `git commit` on a clean tree (which would wedge the loop).
     let commit = if staged.is_empty() {
         gitstate::head_commit(root)?
             .ok_or_else(|| OrchError::new("goal keep requires a git head commit"))?

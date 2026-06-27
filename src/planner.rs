@@ -1,3 +1,8 @@
+//! Priority state machine that decides the next coordinator action from lease/task snapshots.
+//!
+//! [`decide_next`] ranks recover, validate, stage, cleanup, dispatch, and wait phases
+//! so `orchid next` can drive the harness loop without bespoke coordinator logic.
+
 use serde_json::{Map, Value};
 
 use crate::model::{CompactLease, LeaseMode, StagePlan};
@@ -68,7 +73,10 @@ impl ReadyTask {
         );
         map.insert("verify".to_string(), Value::String(self.verify.clone()));
         if self.fanout_is_serial {
-            map.insert("fanout_policy".to_string(), Value::String("serial".to_string()));
+            map.insert(
+                "fanout_policy".to_string(),
+                Value::String("serial".to_string()),
+            );
         }
         map.insert(
             "worker_reasoning_effort".to_string(),
@@ -126,6 +134,7 @@ impl Phase {
     }
 }
 
+/// Snapshot of leases, ready tasks, and stage/cleanup candidates fed into planning.
 pub(crate) struct NextInput {
     pub(crate) stale: Vec<CompactLease>,
     pub(crate) reports_ready: Vec<ReportReady>,
@@ -139,6 +148,7 @@ pub(crate) struct NextInput {
     pub(crate) explain: bool,
 }
 
+/// Planned coordinator phase plus suggested CLI command(s) and explanatory details.
 pub(crate) struct NextDecision {
     pub(crate) phase: Phase,
     pub(crate) commands: Vec<Vec<String>>,
@@ -181,6 +191,7 @@ impl NextDecision {
     }
 }
 
+/// Choose the highest-priority orchestration phase and command sequence for `next`.
 pub(crate) fn decide_next(input: NextInput) -> NextDecision {
     let NextInput {
         stale,
@@ -540,8 +551,10 @@ mod tests {
                 "serial-active/wait",
                 Phase::Wait,
                 Box::new(|input| {
-                    input.active =
-                        vec![compact_lease_with_mode("l_serial", LeaseMode::Serial.as_str())];
+                    input.active = vec![compact_lease_with_mode(
+                        "l_serial",
+                        LeaseMode::Serial.as_str(),
+                    )];
                     input.stage = vec![stage_plan(true, vec!["src/planner.rs"])];
                     input.cleanup = vec![cleanup_candidate()];
                     input.ready = vec![ready_task()];

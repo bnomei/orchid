@@ -1,3 +1,8 @@
+//! `.orchid/` runtime persistence: leases, packets, reports, and the command lock.
+//!
+//! Mutating commands acquire a short-lived [`RuntimeLock`]; stale locks from dead
+//! owners are reclaimed so a crash cannot wedge every later command.
+
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,6 +22,7 @@ use crate::paths::{
 };
 use crate::specs::safe_spec_id;
 
+/// RAII guard for the repo-wide runtime lock; released on drop.
 pub(crate) struct RuntimeLock {
     path: PathBuf,
 }
@@ -30,11 +36,9 @@ impl Drop for RuntimeLock {
     }
 }
 
-/// A runtime lock older than this is treated as abandoned by a dead owner and reclaimed. Mutating
-/// commands hold the lock only for their own (sub-second) duration, so this bound is far longer
-/// than any legitimate hold yet bounds recovery after a SIGKILL/OOM/power-loss.
 const LOCK_STALE_AFTER_SECONDS: i64 = 300;
 
+/// Acquire the repo-wide runtime lock, reclaiming a stale lock when the owner is gone.
 pub(crate) fn runtime_lock(root: &Path) -> OrchResult<RuntimeLock> {
     let lock_dir = repo_path(root, locks_dir(root), "lock_dir")?;
     fs::create_dir_all(&lock_dir)?;
@@ -50,9 +54,6 @@ pub(crate) fn runtime_lock(root: &Path) -> OrchResult<RuntimeLock> {
     match try_acquire_lock(&path, root) {
         Ok(lock) => Ok(lock),
         Err(err) if err.code == ErrorCode::RuntimeLockBusy.as_str() => {
-            // The lock already exists. If its owner is gone (recorded created_at / file mtime
-            // older than the staleness bound), reclaim it so a SIGKILL/OOM/power-loss between
-            // acquire and Drop cannot wedge every later command forever.
             if lock_is_stale(&path) && reclaim_stale_lock(&path) {
                 return try_acquire_lock(&path, root);
             }
@@ -89,9 +90,6 @@ fn lock_is_stale(path: &Path) -> bool {
     lock_age_seconds(path).is_some_and(|age| age >= LOCK_STALE_AFTER_SECONDS)
 }
 
-/// Age of the lock, preferring the recorded `created_at`; falls back to the file's mtime when the
-/// payload is missing or unreadable (e.g. a crash mid-write). A fresh, mid-creation lock therefore
-/// reads as young and is never reclaimed.
 fn lock_age_seconds(path: &Path) -> Option<i64> {
     if let Ok(content) = fs::read_to_string(path) {
         if let Ok(value) = serde_json::from_str::<Value>(content.trim()) {
@@ -104,9 +102,6 @@ fn lock_age_seconds(path: &Path) -> Option<i64> {
     Some(modified.elapsed().ok()?.as_secs() as i64)
 }
 
-/// Atomically claim a stale lock by renaming it to a per-process name: `rename` is atomic, so when
-/// two processes both observe the same stale lock only one wins the rename (the loser gets ENOENT
-/// and falls back to a normal busy result). The winner deletes the claimed file and recreates.
 fn reclaim_stale_lock(path: &Path) -> bool {
     let claim = path.with_file_name(format!("state.lock.reclaiming.{}", std::process::id()));
     if fs::rename(path, &claim).is_ok() {
@@ -143,14 +138,9 @@ pub(crate) fn all_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
             continue;
         };
         if validate_lease_id(expected_lease_id).is_err() {
-            // A filename orchid never produces (e.g. a Finder "l_x copy.json" duplicate or a
-            // stray .json) is not a lease reservation; skip it instead of aborting every lease
-            // command. Files with a valid stem but corrupt content still fail closed below.
             continue;
         }
         let lease_path = repo_path(root, &lease_path, "lease_path")?;
-        // Fail closed: an unreadable or unparseable lease file must not silently drop
-        // out of scope/task exclusivity checks while its filename still reserves the id.
         let raw = fs::read_to_string(&lease_path).map_err(|err| {
             OrchError::coded("cannot read lease file", ErrorCode::CorruptLeaseFile)
                 .detail("lease_id", expected_lease_id)
@@ -162,10 +152,11 @@ pub(crate) fn all_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
                 .detail("error", err.to_string())
         })?
         else {
-            return Err(
-                OrchError::coded("lease file is not a json object", ErrorCode::CorruptLeaseFile)
-                    .detail("lease_id", expected_lease_id),
-            );
+            return Err(OrchError::coded(
+                "lease file is not a json object",
+                ErrorCode::CorruptLeaseFile,
+            )
+            .detail("lease_id", expected_lease_id));
         };
         bind_lease_record_id(&mut data, expected_lease_id)?;
         data.entry("_path".to_string())
@@ -226,8 +217,6 @@ pub(crate) fn save_lease(root: &Path, lease: &LeaseRecord) -> OrchResult<()> {
         leases_dir(root).join(format!("{lease_id}.json")),
         "lease_path",
     )?;
-    // Load-time bookkeeping keys (prefixed `_`, e.g. the `_path` injected by load_lease /
-    // all_leases) are in-memory only; durable lease JSON must contain only domain fields.
     let mut data = lease.raw().clone();
     data.retain(|key, _| !key.starts_with('_'));
     atomic_write_json(&path, &data)
@@ -268,11 +257,6 @@ pub(crate) fn compact_lease(
 }
 
 pub(crate) fn report_path_for_lease(root: &Path, lease: &LeaseRecord) -> OrchResult<PathBuf> {
-    // Always resolve the canonical `.orchid/reports/{lease_id}.md` location rather than trusting
-    // the `report_path` stored in lease JSON. Lease creation always writes that canonical value
-    // (orchestration.rs), and close_lease_files deletes that exact path, so honoring a divergent
-    // stored value would let a tampered/redirected lease drive report-check and packet rendering
-    // at an arbitrary in-repo file while the canonical report goes unchecked and undeleted.
     let lease_id = lease
         .id()
         .ok_or_else(|| OrchError::new("lease missing lease_id"))?;
@@ -335,9 +319,6 @@ pub(crate) fn close_lease_files(
     validate_lease_id(lease_id)?;
     let mut deleted = Vec::new();
 
-    // Delete dependent artifacts first and the lease JSON last: if a dependent delete fails,
-    // the authoritative lease record survives so the close can be retried instead of leaving
-    // orphaned packets/reports with no lease.
     let packet_dir = packets_dir(root);
     if packet_dir.exists() {
         repo_path(root, &packet_dir, "packet_dir")?;

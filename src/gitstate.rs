@@ -1,3 +1,8 @@
+//! Git porcelain integration for lease attribution, touched-file checks, and stage plans.
+//!
+//! Invokes the `git` CLI from the repo root; returns empty results when Git is
+//! unavailable so callers can surface `git: false` instead of aborting.
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -128,10 +133,6 @@ fn git_available(root: &Path) -> bool {
     git(root, &["rev-parse", "--show-toplevel"], true).is_ok()
 }
 
-/// Resolve the shared git directory (`--git-common-dir`) for `root`, canonicalized to an
-/// absolute path. Linked worktrees of the same repository share this directory, so it is the
-/// identity used to decide whether two checkouts belong to the same repository. Returns `None`
-/// when `root` is not inside a git repository.
 pub(crate) fn git_common_dir(root: &Path) -> Option<PathBuf> {
     let raw = git_text(root, &["rev-parse", "--git-common-dir"], true).ok()?;
     if raw.is_empty() {
@@ -528,16 +529,20 @@ pub(crate) fn visible_changed_paths(root: &Path) -> OrchResult<Vec<String>> {
     Ok(changed_paths(&git_status_data(root)?))
 }
 
-/// Paths that differ between `baseline` and HEAD. Rename detection is disabled so a
-/// protected file renamed away still surfaces under its original name. Returns empty
-/// when git is unavailable.
 pub(crate) fn changed_paths_since(root: &Path, baseline: &str) -> OrchResult<Vec<String>> {
     if !git_available(root) {
         return Ok(Vec::new());
     }
     let out = git(
         root,
-        &["diff", "--no-renames", "--name-only", "-z", baseline, "HEAD"],
+        &[
+            "diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            baseline,
+            "HEAD",
+        ],
         true,
     )?;
     Ok(split_z(&out))
@@ -552,8 +557,6 @@ pub(crate) fn changed_protected_paths(
         .into_iter()
         .filter(|path| path_in_scope(path, protected_surfaces))
         .collect();
-    // Uncommitted status misses protected edits already committed during the cycle;
-    // diff against the cycle baseline to catch those too.
     if let Some(baseline) = baseline {
         changed.extend(
             changed_paths_since(root, baseline)?
@@ -569,10 +572,6 @@ pub(crate) fn changed_protected_paths(
 pub(crate) fn stage_goal_candidates(root: &Path, scope: &[String]) -> OrchResult<Vec<String>> {
     let mut candidates = visible_changed_paths(root)?;
     if !scope.is_empty() {
-        // A declared goal scope bounds what a kept cycle commits: stage only changed paths
-        // inside the scope so out-of-scope working-tree edits are never folded into the goal
-        // baseline. They stay visible and uncommitted (like the lease flow's scope handling)
-        // rather than being silently absorbed into the cycle.
         candidates.retain(|path| path_in_scope(path, scope));
     }
     if candidates.is_empty() {
@@ -603,6 +602,7 @@ pub(crate) fn clean_goal_candidates(root: &Path) -> OrchResult<()> {
     Ok(())
 }
 
+/// List repo-relative paths changed during an active or completed lease scope.
 pub(crate) fn touched_for_lease(
     root: &Path,
     lease: &LeaseRecord,
@@ -610,8 +610,6 @@ pub(crate) fn touched_for_lease(
     let status = git_status_data(root)?;
     let git_available = status.get("git").and_then(Value::as_bool).unwrap_or(false);
     let baseline: BTreeSet<String> = lease.baseline_changed().into_iter().collect();
-    // For completed leases, only paths inside the completion window are attributable to the
-    // lease; anything edited afterward must not be folded into its stage plan.
     let completed_window: Option<BTreeSet<String>> = lease
         .completed_changed()
         .map(|paths| paths.into_iter().collect());
@@ -643,7 +641,6 @@ pub(crate) fn touched_for_lease(
 
         if let Some(window) = &completed_window {
             if !paths.iter().any(|path| window.contains(path)) {
-                // Edited after this lease completed; not part of its stage set.
                 continue;
             }
         }
@@ -714,6 +711,7 @@ pub(crate) fn touched_for_lease(
     Ok(map)
 }
 
+/// Build a [`StagePlan`] attributing in-scope edits inside the lease window.
 pub(crate) fn stage_plan_for_lease(root: &Path, lease: &LeaseRecord) -> OrchResult<StagePlan> {
     let data = touched_for_lease(root, lease)?;
     let pathspecs: BTreeSet<String> = string_list(data.get("stage"))

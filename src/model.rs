@@ -1,3 +1,8 @@
+//! Domain identifiers, lease records, scope rules, and JSON payload shapes.
+//!
+//! Types here encode the contracts between specs, runtime leases, Git staging,
+//! and coordinator-facing ACK fields.
+
 use serde_json::{Map, Value};
 
 use crate::core::{insert, string_list, value_to_string, ErrorCode, OrchError, OrchResult};
@@ -78,6 +83,7 @@ impl LeaseId {
     }
 }
 
+/// Validate a lease id before any runtime file access under `.orchid/leases/`.
 pub(crate) fn validate_lease_id(value: &str) -> OrchResult<()> {
     LeaseId::parse(value).map(|_| ())
 }
@@ -90,6 +96,7 @@ fn is_safe_lease_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+/// Write-scope entries used for lease exclusivity and Git path attribution.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct Scope {
     entries: Vec<String>,
@@ -101,9 +108,6 @@ impl Scope {
     }
 
     pub(crate) fn contains_path(&self, path: &str) -> bool {
-        // Normalize the git-reported path WITHOUT rewriting backslashes: a scope entry may be
-        // authored Windows-style, but a path is a real filename where `\` is a literal byte on
-        // Unix/macOS. Rewriting it would misclassify a top-level `src\evil.rs` as inside `src/`.
         let norm_path = normalize_path_for_scope(path);
         self.entries.iter().any(|scope| {
             let norm_scope = normalize_scope_entry(scope);
@@ -129,15 +133,9 @@ impl Scope {
 }
 
 pub(crate) fn normalize_scope_entry(value: &str) -> String {
-    // Scope ENTRIES are user-authored and may use Windows-style separators, so accept them by
-    // rewriting `\` -> `/`. This must NOT be applied to git-reported paths (see contains_path).
     normalize_path_for_scope(&value.replace('\\', "/"))
 }
 
-/// Normalize a repo-relative path for scope comparison: collapse leading `./`, trim surrounding
-/// slashes, and treat a bare "." as the whole-repo (empty) spelling. Unlike
-/// `normalize_scope_entry`, this does NOT rewrite backslashes — git's `-z` porcelain already
-/// reports paths with canonical separators, and a literal `\` is a valid filename byte.
 fn normalize_path_for_scope(value: &str) -> String {
     let mut cleaned = value.trim();
     while let Some(rest) = cleaned.strip_prefix("./") {
@@ -151,17 +149,14 @@ fn normalize_path_for_scope(value: &str) -> String {
     }
 }
 
-/// True when a scope entry contains a `..` path segment. Such an entry survives
-/// `normalize_scope_entry` as a non-empty token but matches no normal repo path and never
-/// overlaps real scopes, so it would pass the non-empty scope check while providing neither
-/// staging attribution nor exclusivity (a phantom scope). It also names a location outside the
-/// repository. Callers reject these at task lint and bud creation.
+/// True when a scope entry contains a `..` segment and must be rejected at lint.
 pub(crate) fn scope_entry_escapes_root(value: &str) -> bool {
     normalize_scope_entry(value)
         .split('/')
         .any(|segment| segment == "..")
 }
 
+/// Task lifecycle state stored in TOML frontmatter and enforced by lease/complete gates.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum TaskStatus {
     Blocked,
@@ -206,8 +201,6 @@ impl TaskStatus {
         matches!(self, TaskStatus::Done)
     }
 
-    /// Statuses from which `complete` may legitimately transition a task to `done`: the
-    /// in-progress `todo` plus the review states. Blocked/done/unknown are rejected.
     pub(crate) fn is_completable(&self) -> bool {
         matches!(
             self,
@@ -361,6 +354,7 @@ impl LeaseMode {
     }
 }
 
+/// Durable lease JSON used to attribute touched files and reserve write scope.
 #[derive(Debug, Clone)]
 pub(crate) struct LeaseRecord {
     data: Map<String, Value>,
@@ -498,9 +492,6 @@ impl LeaseRecord {
         string_list(self.get("baseline_changed"))
     }
 
-    /// Paths that were changed when this lease was completed, captured at `complete` time.
-    /// `None` for leases that have not been completed (or predate this snapshot), in which
-    /// case staging falls back to the live working tree.
     pub(crate) fn completed_changed(&self) -> Option<Vec<String>> {
         self.get("completed_changed")
             .map(|value| string_list(Some(value)))
@@ -540,6 +531,7 @@ impl LeaseStatus {
     }
 }
 
+/// Trimmed lease summary embedded in `status` and `next` coordinator payloads.
 #[derive(Debug, Clone)]
 pub(crate) struct CompactLease {
     pub(crate) id: Value,
@@ -585,6 +577,7 @@ impl CompactLease {
     }
 }
 
+/// Git staging plan attributing in-scope lease-window edits and flagging unsafe cases.
 #[derive(Debug, Clone)]
 pub(crate) struct StagePlan {
     pub(crate) lease_id: String,
@@ -753,21 +746,15 @@ mod tests {
 
     #[test]
     fn contains_path_does_not_rewrite_backslash_in_git_path() {
-        // Scope entries still accept Windows-style separators...
         let scope = Scope::from_entries(vec!["src".to_string()]);
         assert!(scope.contains_path("src/evil.rs"));
-        // ...but a literal top-level file named `src\evil.rs` (one path component, backslash is a
-        // valid byte on Unix/macOS) must NOT be treated as living inside the `src/` directory.
         assert!(!scope.contains_path("src\\evil.rs"));
-        // A scope authored Windows-style still matches the corresponding real path.
         let win_scope = Scope::from_entries(vec!["src\\feature".to_string()]);
         assert!(win_scope.contains_path("src/feature/file.rs"));
     }
 
     #[test]
     fn root_scope_spellings_collapse_consistently() {
-        // "." must collapse like its sibling whole-repo spellings instead of surviving as a
-        // non-empty token that matches nothing.
         for value in [".", "/", "./", "", "././", "./."] {
             assert_eq!(normalize_scope_entry(value), "", "value: {value:?}");
         }
