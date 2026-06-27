@@ -306,10 +306,15 @@ fn dump_toml_value(value: &Value, array_style: Option<ArrayStyle>) -> OrchResult
                 return Ok("[]".to_string());
             }
 
+            // Dump each element recursively so numbers, bools, inline tables, and nested arrays
+            // preserve their type/structure (or hit the existing unsupported-type error) instead
+            // of being silently coerced to quoted strings via value_to_string.
+            // Dump each element recursively so numbers, bools, inline tables, and nested arrays
+            // preserve their type/structure (or hit the existing unsupported-type error) instead
+            // of being silently coerced to quoted strings via value_to_string.
             let mut dumped = Vec::with_capacity(items.len());
             for item in items {
-                let stringified = value_to_string(item).unwrap_or_default();
-                dumped.push(quote_toml_string(&stringified));
+                dumped.push(dump_toml_value(item, Some(ArrayStyle::Inline))?);
             }
 
             if array_style == Some(ArrayStyle::Inline) {
@@ -438,6 +443,24 @@ mod tests {
 
         assert_eq!(parsed["priority"], json!(0.5));
         assert_eq!(parsed["meta"]["owner"], "x");
+    }
+
+    #[test]
+    fn task_frontmatter_round_trips_typed_and_structured_array_items() {
+        let mut meta = Map::new();
+        meta.insert("id".to_string(), json!("T900"));
+        meta.insert("status".to_string(), json!("todo"));
+        // Arrays of inline tables and typed numbers must keep their type/structure on write-back
+        // rather than being silently coerced to quoted strings.
+        meta.insert("covers".to_string(), json!([{ "id": "T1" }]));
+        meta.insert("extra".to_string(), json!([1, 2]));
+
+        let dumped = dump_frontmatter(&meta).unwrap();
+        let text = dumped + "\n## Context\n";
+        let (parsed, _) = split_frontmatter(&text, Path::new("task.md")).unwrap();
+
+        assert_eq!(parsed["covers"], json!([{ "id": "T1" }]));
+        assert_eq!(parsed["extra"], json!([1, 2]));
     }
 
     #[test]
