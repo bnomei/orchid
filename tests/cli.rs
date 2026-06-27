@@ -2001,6 +2001,33 @@ fn corrupt_lease_file_fails_scope_enumeration_closed() {
 }
 
 #[test]
+fn lease_rejects_invalid_verification_mode() {
+    let repo = Repo::new();
+    let path = repo.write_task_file("vmspec", "T001", "todo", "src/vm/");
+    let task = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        task.replace("verification_mode = \"mayor\"", "verification_mode = \"strange\""),
+    )
+    .unwrap();
+
+    // ready blocks it...
+    let ready = repo.run(&["ready", "--spec", "vmspec", "--explain"]);
+    assert_eq!(ready["blocked"][0]["reason"], "invalid verification_mode");
+    // ...and direct leasing must reject it too, not bypass the contract.
+    let leased = repo.run_fail(&[
+        "lease",
+        "vmspec",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_vm",
+    ]);
+    assert_eq!(leased["code"], "invalid_verification_mode");
+}
+
+#[test]
 fn depends_dash_sentinel_is_ready_and_lint_clean() {
     let repo = Repo::new();
     let path = repo.write_task_file("dashspec", "T001", "todo", "src/dash/");

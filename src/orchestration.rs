@@ -259,6 +259,16 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
             .detail("task", task_key(&task))
             .detail("status", task.status()));
     }
+    // Enforce the same verification_mode contract lint/ready gate on, so direct leasing can't
+    // dispatch a task those paths treat as non-dispatchable.
+    if !crate::model::VerificationMode::parse(task.verification_mode()).is_dispatchable() {
+        return Err(OrchError::coded(
+            "invalid verification_mode",
+            ErrorCode::InvalidVerificationMode,
+        )
+        .detail("task", task_key(&task))
+        .detail("verification_mode", task.verification_mode().to_string()));
+    }
     require_valid_task_worker_execution_metadata(&task)?;
     let worker_reasoning_effort = resolve_worker_reasoning_effort_for_task(
         &task,
