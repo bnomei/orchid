@@ -2614,6 +2614,25 @@ fn lint_rejects_parent_traversal_scope() {
 }
 
 #[test]
+fn lease_rejects_parent_traversal_scope() {
+    let repo = Repo::new();
+    repo.write_task_file("escapespec", "T001", "todo", "..");
+
+    let payload = repo.run_fail(&[
+        "lease",
+        "escapespec",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_escape",
+    ]);
+    assert_eq!(payload["code"], "invalid_scope");
+    assert_eq!(payload["scope"], "..");
+    assert!(!repo.root.join(".orchid/leases/l_escape.json").exists());
+}
+
+#[test]
 fn next_prefers_validate_over_recover_for_stale_lease_with_report() {
     let repo = Repo::new();
     repo.run(&[

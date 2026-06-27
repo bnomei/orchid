@@ -280,6 +280,17 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
         .detail("task", task_key(&task))
         .detail("verification_mode", task.verification_mode().to_string()));
     }
+    if let Some(bad_scope) = task
+        .scope()
+        .iter()
+        .find(|entry| crate::model::scope_entry_escapes_root(entry))
+    {
+        return Err(
+            OrchError::coded("scope escapes repo root", ErrorCode::InvalidScope)
+                .detail("task", task_key(&task))
+                .detail("scope", bad_scope.to_string()),
+        );
+    }
     require_valid_task_worker_execution_metadata(&task)?;
     let worker_reasoning_effort = resolve_worker_reasoning_effort_for_task(
         &task,

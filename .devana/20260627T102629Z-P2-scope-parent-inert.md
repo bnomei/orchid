@@ -48,6 +48,8 @@ After working this report, preserve the original finding body. Update line 2 `DE
 
 - 2026-06-27: open by Devana. Initial report written from static source inspection.
 - 2026-06-27: fixed. New `model::scope_entry_escapes_root` flags any scope entry containing a `..` path segment (after normalization). Task lint now emits a `scope escapes repo root` error for such entries, and `bud` rejects them with the new `invalid_scope` ErrorCode, so a `..` (or `src/../x`) scope can no longer pass the non-empty check while providing neither staging attribution nor exclusivity. Regression tests `lint_rejects_parent_traversal_scope` and a `..` case in `bud_enforces_scope_and_parallel_guards` added (fail without the fix); full suite green.
+- 2026-06-27: reopened. Lint and `bud` now reject `..` scope entries, but direct `lease` does not check `scope_entry_escapes_root` before saving `task.scope()` into the lease record. A task file with `scope = [".."]` can still be leased directly and remains non-overlapping with normal scopes, so the fixed tag does not block the lease-path counterexample.
+- 2026-06-27: fixed. Direct `lease` now rejects any task scope entry caught by `scope_entry_escapes_root` before lease creation, returning `invalid_scope` with the task and bad scope detail. Regression test `lease_rejects_parent_traversal_scope` verifies no lease JSON is written for `scope = [".."]`.
 
 DEVANA-KEY: src/model.rs:128 | scope-parent-inert
 DEVANA-SUMMARY: fixed | P2 | high | scope entry ".." normalizes to a non-empty inert token that matches no paths and bypasses overlap checks, sibling to the "." case.
