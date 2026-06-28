@@ -3180,6 +3180,7 @@ fn complete_rolls_back_task_when_git_status_fails() {
 }
 
 #[test]
+#[cfg(unix)]
 fn complete_clean_spec_research_failure_keeps_completion() {
     use std::os::unix::fs::PermissionsExt;
 
