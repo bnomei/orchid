@@ -1,3 +1,8 @@
+//! End-to-end CLI contract tests against fixture repos and golden JSON snapshots.
+//!
+//! Spawns the `orchid` binary with `--root` isolation; each test exercises one
+//! coordinator workflow boundary (lease, next, goal, Git staging, or security gate).
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -469,6 +474,27 @@ fn goal_init_with_valid_evaluator_records_baseline_and_renders_ready_markdown() 
 }
 
 #[test]
+fn bare_goal_advances_ready_cycle_to_running() {
+    let repo = Repo::new();
+    repo.init_git();
+    init_ready_goal(
+        &repo,
+        "run-goal",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":118.5,\"delta\":1.5,\"reason\":\"baseline\"}'",
+        "10",
+    );
+    assert_eq!(goal_state(&repo, "run-goal")["status"], "ready");
+
+    let stdout = repo.run_stdout(&["goal"]);
+    assert!(stdout.starts_with("# Goal Ready"));
+    assert_eq!(goal_state(&repo, "run-goal")["status"], "running");
+
+    let stdout = repo.run_stdout(&["goal"]);
+    assert!(stdout.starts_with("# Goal Running"));
+    assert_eq!(goal_state(&repo, "run-goal")["status"], "running");
+}
+
+#[test]
 fn bare_goal_renders_running_prompt_for_missing_cycle_report() {
     let repo = Repo::new();
     repo.init_git();
@@ -576,6 +602,109 @@ fn bare_goal_evaluates_ready_report_and_records_keep_decision() {
 }
 
 #[test]
+fn goal_keep_commits_only_in_scope_changes() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run_stdout(&[
+        "goal",
+        "init",
+        "--id",
+        "scoped-goal",
+        "--goal",
+        "G",
+        "--evaluator",
+        "printf '%s\\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"r\"}'",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "5",
+        "--hypothesis",
+        "h",
+        "--max-iterations",
+        "10",
+        "--max-duration",
+        "10h",
+        "--scope",
+        "src/ranker.rs",
+    ]);
+
+    fs::create_dir_all(repo.root.join("src")).unwrap();
+    fs::write(repo.root.join("src/ranker.rs"), "fn rank() {}\n").unwrap();
+    fs::write(repo.root.join("incidental.md"), "incidental\n").unwrap();
+    write_goal_report(&repo, "scoped-goal", "C001", "ready_for_evaluation", "next");
+
+    let stdout = repo.run_stdout(&["goal"]);
+    assert!(stdout.starts_with("# Goal Ready"));
+
+    let committed = git_stdout(&repo.root, &["show", "--pretty=", "--name-only", "HEAD"]);
+    assert!(
+        committed.contains("src/ranker.rs"),
+        "committed: {committed}"
+    );
+    assert!(
+        !committed.contains("incidental.md"),
+        "committed: {committed}"
+    );
+    let porcelain = git_stdout(&repo.root, &["status", "--porcelain", "incidental.md"]);
+    assert!(porcelain.contains("incidental.md"), "status: {porcelain}");
+}
+
+#[test]
+fn goal_keep_rejects_prestaged_out_of_scope_changes() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run_stdout(&[
+        "goal",
+        "init",
+        "--id",
+        "scoped-goal",
+        "--goal",
+        "G",
+        "--evaluator",
+        "printf '%s\\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"r\"}'",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "5",
+        "--hypothesis",
+        "h",
+        "--max-iterations",
+        "10",
+        "--max-duration",
+        "10h",
+        "--scope",
+        "src/ranker.rs",
+    ]);
+    fs::create_dir_all(repo.root.join("src")).unwrap();
+    fs::write(repo.root.join("src/ranker.rs"), "fn rank() {}\n").unwrap();
+    fs::write(repo.root.join("incidental.md"), "incidental\n").unwrap();
+    git(&repo.root, &["add", "incidental.md"]);
+    write_goal_report(&repo, "scoped-goal", "C001", "ready_for_evaluation", "next");
+
+    let failed = repo.run_fail(&["goal"]);
+
+    assert_eq!(failed["code"], "goal_has_staged_paths_outside_scope");
+    assert_eq!(failed["paths"], serde_json::json!(["incidental.md"]));
+    assert_eq!(
+        git_stdout(&repo.root, &["log", "-1", "--pretty=%s"]).trim(),
+        "initial"
+    );
+    let porcelain = git_stdout(&repo.root, &["status", "--porcelain"]);
+    assert!(
+        porcelain.contains("A  incidental.md"),
+        "status: {porcelain}"
+    );
+    assert!(
+        porcelain.contains("?? src/ranker.rs"),
+        "status: {porcelain}"
+    );
+}
+
+#[test]
 fn goal_evaluates_discard_recommendation_with_git_reset_and_clean() {
     let repo = Repo::new();
     repo.init_git();
@@ -619,6 +748,192 @@ fn goal_evaluates_discard_recommendation_with_git_reset_and_clean() {
     let status = repo.run_stdout(&["goal", "status"]);
     assert!(status.contains("- Kept cycles: `0`"));
     assert!(status.contains("- Discarded cycles: `1`"));
+}
+
+#[test]
+fn goal_keep_retry_after_crash_does_not_wedge() {
+    let repo = Repo::new();
+    repo.init_git();
+    init_ready_goal(
+        &repo,
+        "crash-goal",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"baseline\"}'",
+        "10",
+    );
+    fs::write(repo.root.join("candidate.txt"), "candidate\n").unwrap();
+    write_goal_report(
+        &repo,
+        "crash-goal",
+        "C001",
+        "ready_for_evaluation",
+        "precompute static rank weights",
+    );
+    let state_path = repo.root.join(".orchid/goals/crash-goal/state.json");
+    let pre_state = fs::read_to_string(&state_path).unwrap();
+    repo.run_stdout(&["goal"]);
+
+    fs::write(&state_path, &pre_state).unwrap();
+    let stdout = repo.run_stdout(&["goal"]);
+    assert!(stdout.starts_with("# Goal Ready"));
+    let state = goal_state(&repo, "crash-goal");
+    assert_eq!(state["cycle"], "C002");
+    assert_eq!(state["last_decision"], "keep");
+}
+
+#[test]
+fn goal_init_rejects_zero_budgets() {
+    let repo = Repo::new();
+    let base = [
+        "goal",
+        "init",
+        "--id",
+        "zero-goal",
+        "--goal",
+        "G",
+        "--evaluator",
+        "true",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "1",
+        "--hypothesis",
+        "h",
+        "--max-duration",
+        "10h",
+    ];
+    let mut zero_iters = base.to_vec();
+    zero_iters.extend(["--max-iterations", "0"]);
+    let failed = repo.run_fail(&zero_iters);
+    assert!(failed["error"].as_str().unwrap().contains("max-iterations"));
+
+    let zero_dur = [
+        "goal",
+        "init",
+        "--id",
+        "zero-goal",
+        "--goal",
+        "G",
+        "--evaluator",
+        "true",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "1",
+        "--hypothesis",
+        "h",
+        "--max-iterations",
+        "10",
+        "--max-duration",
+        "0m",
+    ];
+    let failed = repo.run_fail(&zero_dur);
+    assert_eq!(failed["code"], "invalid_duration");
+}
+
+#[test]
+fn goal_init_rejects_non_finite_min_delta() {
+    let repo = Repo::new();
+    for bad in ["nan", "inf"] {
+        let failed = repo.run_fail(&[
+            "goal",
+            "init",
+            "--id",
+            "nan-goal",
+            "--goal",
+            "G",
+            "--evaluator",
+            "true",
+            "--metric",
+            "p95_ms",
+            "--direction",
+            "lower-is-better",
+            "--min-delta",
+            bad,
+            "--hypothesis",
+            "h",
+            "--max-iterations",
+            "5",
+            "--max-duration",
+            "30m",
+        ]);
+        assert!(
+            failed["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("min-delta"),
+            "unexpected error for {bad}: {failed}"
+        );
+        assert!(!repo.root.join(".orchid/goals/nan-goal/goal.toml").exists());
+    }
+}
+
+#[test]
+fn stale_rejects_out_of_range_duration_with_structured_error() {
+    let repo = Repo::new();
+    let failed = repo.run_fail(&["stale", "--older-than", "99999999999999d"]);
+    assert_eq!(failed["code"], "invalid_duration");
+}
+
+#[test]
+fn goal_non_pass_status_blocks_keep() {
+    let repo = Repo::new();
+    repo.init_git();
+    init_ready_goal(
+        &repo,
+        "status-goal",
+        "printf '%s\n' '{\"status\":\"fail\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"tests failed\"}'",
+        "10",
+    );
+    fs::write(repo.root.join("candidate.txt"), "candidate\n").unwrap();
+    write_goal_report(
+        &repo,
+        "status-goal",
+        "C001",
+        "ready_for_evaluation",
+        "next attempt",
+    );
+
+    let stdout = repo.run_stdout(&["goal"]);
+    assert!(stdout.starts_with("# Goal Blocked"));
+    let state = goal_state(&repo, "status-goal");
+    assert_eq!(state["status"], "blocked");
+    let status = repo.run_stdout(&["goal", "status"]);
+    assert!(status.contains("- Kept cycles: `0`"));
+}
+
+#[test]
+fn goal_keep_below_min_delta_is_downgraded_to_discard() {
+    let repo = Repo::new();
+    repo.init_git();
+    init_ready_goal(
+        &repo,
+        "delta-goal",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":118.0,\"delta\":2.0,\"reason\":\"tiny\"}'",
+        "10",
+    );
+    fs::write(repo.root.join("candidate.txt"), "candidate\n").unwrap();
+    write_goal_report(
+        &repo,
+        "delta-goal",
+        "C001",
+        "ready_for_evaluation",
+        "next attempt",
+    );
+
+    let stdout = repo.run_stdout(&["goal"]);
+    assert!(stdout.starts_with("# Goal Ready"));
+    let state = goal_state(&repo, "delta-goal");
+    assert_eq!(state["last_decision"], "discard");
+    let status = repo.run_stdout(&["goal", "status"]);
+    assert!(status.contains("- Kept cycles: `0`"));
+    assert!(status.contains("- Discarded cycles: `1`"));
+    let results =
+        fs::read_to_string(repo.root.join(".orchid/goals/delta-goal/results.jsonl")).unwrap();
+    assert!(results.contains("min_delta"));
 }
 
 #[test]
@@ -786,6 +1101,97 @@ fn protected_surface_change_blocks_automatic_decision() {
 }
 
 #[test]
+fn protected_surface_edited_during_evaluation_blocks_keep() {
+    let repo = Repo::new();
+    fs::write(repo.root.join("justfile"), "orig\n").unwrap();
+    repo.init_git();
+    repo.run_stdout(&[
+        "goal",
+        "init",
+        "--id",
+        "toctou-goal",
+        "--goal",
+        "Reduce p95",
+        "--evaluator",
+        "[ -n \"$ORCHID_GOAL_BASELINE_VALUE\" ] && echo changed > justfile; printf '%s\\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"baseline\"}'",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "5",
+        "--hypothesis",
+        "h",
+        "--max-iterations",
+        "10",
+        "--max-duration",
+        "10h",
+        "--protected-surface",
+        "justfile",
+    ]);
+    write_goal_report(
+        &repo,
+        "toctou-goal",
+        "C001",
+        "ready_for_evaluation",
+        "next attempt",
+    );
+
+    let stdout = repo.run_stdout(&["goal"]);
+    assert!(stdout.starts_with("# Goal Blocked"));
+    assert!(stdout.contains("protected surface changed: justfile"));
+    let status = repo.run_stdout(&["goal", "status"]);
+    assert!(status.contains("- Kept cycles: `0`"));
+}
+
+#[test]
+fn protected_surface_committed_in_cycle_blocks_automatic_decision() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run_stdout(&[
+        "goal",
+        "init",
+        "--id",
+        "protected-goal",
+        "--goal",
+        "Reduce search ranking p95",
+        "--evaluator",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"baseline\"}'",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "5",
+        "--hypothesis",
+        "cache normalized query features",
+        "--max-iterations",
+        "10",
+        "--max-duration",
+        "10h",
+        "--protected-surface",
+        "justfile",
+    ]);
+    fs::write(repo.root.join("justfile"), "goal-eval:\n\t@echo changed\n").unwrap();
+    git(&repo.root, &["add", "justfile"]);
+    git(&repo.root, &["commit", "-m", "tweak evaluator"]);
+    write_goal_report(
+        &repo,
+        "protected-goal",
+        "C001",
+        "ready_for_evaluation",
+        "next attempt",
+    );
+
+    let stdout = repo.run_stdout(&["goal"]);
+
+    assert!(stdout.starts_with("# Goal Blocked"));
+    assert!(stdout.contains("protected surface changed: justfile"));
+    let state = goal_state(&repo, "protected-goal");
+    assert_eq!(state["status"], "blocked");
+}
+
+#[test]
 fn ready_requires_scope_and_reports_blocked_tasks() {
     let repo = Repo::new();
     let payload = repo.run_from_cwd(&["ready", "--spec", "example"]);
@@ -833,50 +1239,70 @@ fn all_open_selects_first_open_numerical_spec_and_skips_inactive() {
 }
 
 #[test]
+fn status_all_open_echoes_selected_and_skipped_specs() {
+    let repo = Repo::new();
+    repo.write_task_file("00-done", "T001", "done", "src/done/");
+    repo.write_task_file("01-first", "T001", "todo", "src/first/");
+    repo.write_task_file("01-first", "T002", "todo", "src/first2/");
+    repo.write_task_file("02-second", "T001", "todo", "src/second/");
+    repo.write_task_file("DONE-99-closed", "T001", "todo", "src/closed/");
+
+    let bare = repo.run(&["status"]);
+    assert!(bare.get("specs").is_none());
+
+    let all_open = repo.run(&["status", "--all-open"]);
+    assert!(all_open["tasks"].as_i64().unwrap() < bare["tasks"].as_i64().unwrap());
+    assert_eq!(all_open["tasks"], 2);
+    assert_eq!(all_open["specs"], serde_json::json!(["01-first"]));
+    assert_eq!(
+        all_open["skipped_inactive_specs"],
+        serde_json::json!(["DONE-99-closed"])
+    );
+}
+
+#[test]
 fn numeric_spec_selector_resolves_unique_active_prefix() {
     let repo = Repo::new();
-    repo.write_task_file("003", "T001", "todo", "src/exact/");
-    repo.write_task_file("003-prefix", "T001", "todo", "src/prefix/");
-    repo.write_task_file("003alpha", "T001", "todo", "src/alpha/");
-    repo.write_task_file("003.foo", "T001", "todo", "src/dot/");
+    repo.write_task_file("004-prefix", "T001", "todo", "src/prefix/");
+    repo.write_task_file("004alpha", "T001", "todo", "src/alpha/");
+    repo.write_task_file("004.foo", "T001", "todo", "src/dot/");
 
-    let payload = repo.run(&["ready", "--spec", "003", "--explain"]);
-    assert_eq!(payload["ready"][0]["task"], "003-prefix/T001");
+    let payload = repo.run(&["ready", "--spec", "004", "--explain"]);
+    assert_eq!(payload["ready"][0]["task"], "004-prefix/T001");
 
     let lease = repo.run(&[
         "lease",
-        "003",
+        "004",
         "T001",
         "--owner",
-        "worker:agent_003",
+        "worker:agent_004",
         "--lease-id",
-        "l_003",
+        "l_004",
     ]);
-    assert_eq!(lease["task"], "003-prefix/T001");
+    assert_eq!(lease["task"], "004-prefix/T001");
 }
 
 #[test]
 fn numeric_spec_selector_rejects_ambiguous_prefix() {
     let repo = Repo::new();
-    repo.write_task_file("003", "T001", "todo", "src/exact/");
-    repo.write_task_file("003-first", "T001", "todo", "src/first/");
-    repo.write_task_file("003-second", "T001", "todo", "src/second/");
+    repo.write_task_file("005-first", "T001", "todo", "src/first/");
+    repo.write_task_file("005-second", "T001", "todo", "src/second/");
 
-    let payload = repo.run_fail(&["ready", "--spec", "003", "--explain"]);
+    let payload = repo.run_fail(&["ready", "--spec", "005", "--explain"]);
     assert_eq!(payload["code"], "spec_selector_ambiguous");
     assert_eq!(
         payload["matches"],
-        serde_json::json!(["003-first", "003-second"])
+        serde_json::json!(["005-first", "005-second"])
     );
 
     let payload = repo.run_fail(&[
         "lease",
-        "003",
+        "005",
         "T001",
         "--owner",
-        "worker:agent_003",
+        "worker:agent_005",
         "--lease-id",
-        "l_003",
+        "l_005",
     ]);
     assert_eq!(payload["code"], "spec_selector_ambiguous");
 }
@@ -1304,6 +1730,100 @@ fn lease_agent_metadata_attach_and_status_lookup_work() {
 }
 
 #[test]
+fn attach_agent_refreshes_existing_worker_packet() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:unassigned",
+        "--lease-id",
+        "l_x",
+    ]);
+    let packet = repo.run(&["packet", "--lease", "l_x", "--role", "worker"]);
+    let packet_path = repo.root.join(packet["packet"].as_str().unwrap());
+    let before = fs::read_to_string(&packet_path).unwrap();
+    assert!(before.contains("worker:unassigned"));
+
+    repo.run(&[
+        "lease-attach-agent",
+        "--lease",
+        "l_x",
+        "--agent-id",
+        "agent_456",
+    ]);
+
+    let after = fs::read_to_string(&packet_path).unwrap();
+    assert!(after.contains("agent_456"));
+    assert!(!after.contains("worker:unassigned"));
+}
+
+#[test]
+fn agent_id_is_reusable_after_lease_completes() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--agent-id",
+        "agent_123",
+        "--lease-id",
+        "l_old",
+    ]);
+    repo.run(&["complete", "--lease", "l_old", "--verified-by", "mayor"]);
+    let lease = repo.run(&[
+        "lease",
+        "example",
+        "T002",
+        "--owner",
+        "worker:agent_123",
+        "--agent-id",
+        "agent_123",
+        "--lease-id",
+        "l_new",
+    ]);
+    assert_eq!(lease["lease_id"], "l_new");
+}
+
+#[test]
+fn status_agent_id_ignores_terminal_lease() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--agent-id",
+        "agent_123",
+        "--lease-id",
+        "l_old",
+    ]);
+    repo.run(&["complete", "--lease", "l_old", "--verified-by", "mayor"]);
+    let terminal = repo.run_fail(&["status", "--agent-id", "agent_123"]);
+    assert_eq!(terminal["code"], "agent_lease_not_found");
+    assert_eq!(terminal["terminal_leases"][0], "l_old");
+
+    repo.run(&[
+        "lease",
+        "example",
+        "T002",
+        "--owner",
+        "worker:agent_123",
+        "--agent-id",
+        "agent_123",
+        "--lease-id",
+        "l_new",
+    ]);
+    let status = repo.run(&["status", "--agent-id", "agent_123"]);
+    assert_eq!(status["lease_id"], "l_new");
+    assert_eq!(status["status"], "active");
+}
+
+#[test]
 fn worker_execution_metadata_flows_through_task_leases() {
     let repo = Repo::new();
     let ready = repo.run(&["ready", "--spec", "example", "--explain"]);
@@ -1526,6 +2046,17 @@ fn bud_enforces_scope_and_parallel_guards() {
     ]);
     assert_eq!(missing_scope["code"], "scope_required");
 
+    let escapes = repo.run_fail(&[
+        "bud",
+        "--title",
+        "Escapes",
+        "--scope",
+        "..",
+        "--instructions",
+        instructions.to_str().unwrap(),
+    ]);
+    assert_eq!(escapes["code"], "invalid_scope");
+
     repo.run(&[
         "bud",
         "--title",
@@ -1693,6 +2224,16 @@ fn bud_packet_complete_git_and_cleanup_lifecycle_work() {
         "+++\nlease_id = \"l_bud\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
     )
     .unwrap();
+    let next = repo.run(&["next", "--spec", "example"]);
+    assert_eq!(next["phase"], "validate");
+    assert_eq!(
+        next["cmds"][0],
+        serde_json::json!(["report-check", ".orchid/reports/l_bud.md"])
+    );
+    assert_eq!(next["reports_ready"][0]["task"], "bud:l_bud");
+    let next_all = repo.run(&["next", "--all-open"]);
+    assert_eq!(next_all["phase"], "validate");
+    assert_eq!(next_all["reports_ready"][0]["task"], "bud:l_bud");
     let report = repo.run(&["report-check", ".orchid/reports/l_bud.md"]);
     assert_eq!(report["lease_id"], "l_bud");
     assert_eq!(report["task"], "bud:l_bud");
@@ -1704,6 +2245,8 @@ fn bud_packet_complete_git_and_cleanup_lifecycle_work() {
     .unwrap();
     assert_eq!(lease_json["status"], "completed");
     assert_eq!(lease_json["verified_by"], "mayor");
+    let failed = repo.run_fail(&["complete", "--lease", "l_bud", "--verified-by", "mayor"]);
+    assert_eq!(failed["code"], "complete_requires_active_lease");
 
     let close = repo.run(&["close", "--lease", "l_bud"]);
     assert!(close["deleted"]
@@ -1731,6 +2274,35 @@ fn bud_packet_complete_git_and_cleanup_lifecycle_work() {
         .as_array()
         .unwrap()
         .contains(&Value::String(".orchid/buds/l_cleanup.md".to_string())));
+}
+
+#[test]
+fn complete_rejects_released_bud_lease() {
+    let repo = Repo::new();
+    let instructions = repo.root.join("bud-instructions.md");
+    fs::write(&instructions, "Pause bud.\n").unwrap();
+    repo.run(&[
+        "bud",
+        "--title",
+        "Pause bud",
+        "--scope",
+        "src/feature/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_bud",
+    ]);
+    repo.run(&["release", "l_bud", "--reason", "paused"]);
+
+    let failed = repo.run_fail(&["complete", "--lease", "l_bud", "--verified-by", "mayor"]);
+
+    assert_eq!(failed["code"], "complete_requires_active_lease");
+    assert_eq!(failed["status"], "released");
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_bud.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lease["status"], "released");
 }
 
 #[test]
@@ -1764,7 +2336,9 @@ fn complete_updates_only_task_and_next_finds_stage_or_cleanup() {
     );
 
     let payload = repo.run(&["next", "--spec", "example"]);
-    assert_eq!(payload["phase"], "cleanup");
+    assert_eq!(payload["phase"], "stage");
+    assert_eq!(payload["stage"][0]["lease_id"], "l_test");
+    assert_eq!(payload["stage"][0]["git"], false);
 
     let repo = Repo::new();
     repo.init_git();
@@ -1796,6 +2370,923 @@ fn complete_updates_only_task_and_next_finds_stage_or_cleanup() {
         .as_array()
         .unwrap()
         .contains(&Value::String(":(literal)src/feature/work.txt".to_string())));
+}
+
+#[test]
+fn bud_rejects_instructions_outside_repo() {
+    let repo = Repo::new();
+    let outside = repo.root.parent().unwrap().join("secret.txt");
+    fs::write(&outside, "host secret\n").unwrap();
+
+    let failed = repo.run_fail(&[
+        "bud",
+        "--title",
+        "x",
+        "--scope",
+        "src/feature/",
+        "--instructions",
+        outside.to_str().unwrap(),
+        "--worker-reasoning-effort",
+        "medium",
+    ]);
+    assert_eq!(failed["code"], "path_outside_repo");
+}
+
+#[test]
+fn stray_misnamed_json_does_not_abort_lease_scan() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_real",
+    ]);
+    let leases_dir = repo.root.join(".orchid/leases");
+    fs::copy(
+        leases_dir.join("l_real.json"),
+        leases_dir.join("l_real copy.json"),
+    )
+    .unwrap();
+    fs::write(leases_dir.join("notes-1.json"), "{}").unwrap();
+
+    let running = repo.run(&["running"]);
+    let leases = running["leases"].as_array().unwrap();
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0]["id"], "l_real");
+}
+
+#[test]
+fn corrupt_lease_file_fails_scope_enumeration_closed() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_real",
+    ]);
+    let leases_dir = repo.root.join(".orchid/leases");
+    fs::write(leases_dir.join("l_ghost.json"), "{").unwrap();
+    let payload = repo.run_fail(&[
+        "lease",
+        "example",
+        "T002",
+        "--owner",
+        "worker:b",
+        "--lease-id",
+        "l_b",
+    ]);
+    assert_eq!(payload["code"], "corrupt_lease_file");
+}
+
+#[test]
+fn active_serial_lease_blocks_later_parallel_lease() {
+    let repo = Repo::new();
+    repo.write_task_file("sa", "T001", "todo", "src/a/");
+    repo.write_task_file("sb", "T001", "todo", "src/b/");
+    repo.run(&[
+        "lease",
+        "sa",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_serial",
+        "--serial",
+    ]);
+    let failed = repo.run_fail(&[
+        "lease",
+        "sb",
+        "T001",
+        "--owner",
+        "worker:b",
+        "--lease-id",
+        "l_par",
+        "--allow-parallel",
+    ]);
+    assert_eq!(failed["code"], "serial_blocked");
+    assert_eq!(failed["lease_id"], "l_serial");
+}
+
+#[test]
+fn lease_rejects_allow_parallel_for_serial_fanout_spec() {
+    let repo = Repo::new();
+    repo.write_task_file("serialspec", "T001", "todo", "src/a/");
+    repo.write_task_file("serialspec", "T002", "todo", "src/b/");
+    fs::write(
+        repo.root.join("specs/serialspec/spec.toml"),
+        "fanout_policy = \"serial\"\n",
+    )
+    .unwrap();
+    repo.run(&[
+        "lease",
+        "serialspec",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    let failed = repo.run_fail(&[
+        "lease",
+        "serialspec",
+        "T002",
+        "--owner",
+        "worker:b",
+        "--lease-id",
+        "l_2",
+        "--allow-parallel",
+    ]);
+    assert_eq!(failed["code"], "serial_fanout_policy");
+}
+
+#[test]
+fn next_dispatches_first_serial_fanout_task_with_serial_flag() {
+    let repo = Repo::new();
+    repo.write_task_file("serialspec", "T001", "todo", "src/serial/");
+    fs::write(
+        repo.root.join("specs/serialspec/spec.toml"),
+        "fanout_policy = \"serial\"\n",
+    )
+    .unwrap();
+
+    let next = repo.run(&["next", "--spec", "serialspec", "--explain"]);
+
+    assert_eq!(next["phase"], "dispatch");
+    assert_eq!(
+        next["cmd"],
+        serde_json::json!([
+            "lease",
+            "serialspec",
+            "T001",
+            "--owner",
+            "worker:<agent-id>",
+            "--serial"
+        ])
+    );
+}
+
+#[test]
+fn next_waits_for_serial_fanout_ready_task_under_active_lease() {
+    let repo = Repo::new();
+    repo.write_task_file("other", "T001", "todo", "src/other/");
+    repo.write_task_file("serialspec", "T001", "todo", "src/serial/");
+    fs::write(
+        repo.root.join("specs/serialspec/spec.toml"),
+        "fanout_policy = \"serial\"\n",
+    )
+    .unwrap();
+    repo.run(&[
+        "lease",
+        "other",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_other",
+    ]);
+
+    let next = repo.run(&["next", "--spec", "serialspec", "--explain"]);
+    assert_eq!(next["phase"], "wait");
+    assert!(next.get("cmd").is_none());
+    assert_eq!(next["ready"][0]["task"], "serialspec/T001");
+    assert_eq!(next["ready"][0]["fanout_policy"], "serial");
+}
+
+#[test]
+fn lease_overlap_uses_live_task_scope_after_expansion() {
+    let repo = Repo::new();
+    let t1 = repo.write_task_file("sx", "T001", "todo", "src/a/");
+    repo.write_task_file("sx", "T002", "todo", "src/b/");
+    repo.run(&[
+        "lease",
+        "sx",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    let task = fs::read_to_string(&t1).unwrap();
+    fs::write(
+        &t1,
+        task.replace("scope = [\"src/a/\"]", "scope = [\"src/a/\", \"src/b/\"]"),
+    )
+    .unwrap();
+
+    let failed = repo.run_fail(&[
+        "lease",
+        "sx",
+        "T002",
+        "--owner",
+        "worker:b",
+        "--lease-id",
+        "l_2",
+        "--allow-parallel",
+    ]);
+    assert_eq!(failed["code"], "scope_conflict");
+    assert_eq!(failed["lease_id"], "l_1");
+}
+
+#[test]
+fn lease_rejects_task_id_path_traversal() {
+    let repo = Repo::new();
+    repo.write_task_file("001-foo", "T001", "todo", "src/foo/");
+    repo.write_task_file("002-bar", "T001", "todo", "src/bar/");
+
+    let failed = repo.run_fail(&[
+        "lease",
+        "001-foo",
+        "../../002-bar/tasks/T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    assert_eq!(failed["code"], "invalid_task_id");
+
+    let failed = repo.run_fail(&[
+        "lease",
+        "001-foo/../../002-bar/tasks/T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_2",
+    ]);
+    assert_eq!(failed["code"], "invalid_task_id");
+}
+
+#[test]
+fn lease_rejects_invalid_verification_mode() {
+    let repo = Repo::new();
+    let path = repo.write_task_file("vmspec", "T001", "todo", "src/vm/");
+    let task = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        task.replace(
+            "verification_mode = \"mayor\"",
+            "verification_mode = \"strange\"",
+        ),
+    )
+    .unwrap();
+
+    let ready = repo.run(&["ready", "--spec", "vmspec", "--explain"]);
+    assert_eq!(ready["blocked"][0]["reason"], "invalid verification_mode");
+    let leased = repo.run_fail(&[
+        "lease",
+        "vmspec",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_vm",
+    ]);
+    assert_eq!(leased["code"], "invalid_verification_mode");
+}
+
+#[test]
+fn research_commands_resolve_numeric_spec_prefix() {
+    let repo = Repo::new();
+    repo.write_task_file("001-feature", "T001", "todo", "src/feat/");
+
+    let created = repo.run(&["research-path", "001", "--create"]);
+    assert_eq!(created["spec"], "001-feature");
+    assert_eq!(created["path"], ".orchid/spec-research/001-feature");
+
+    let cleaned = repo.run(&["research-clean", "001"]);
+    assert_eq!(cleaned["spec"], "001-feature");
+    assert_eq!(
+        cleaned["deleted"],
+        serde_json::json!([".orchid/spec-research/001-feature"])
+    );
+}
+
+#[test]
+fn all_open_resolves_satisfied_cross_spec_dependency() {
+    let repo = Repo::new();
+    repo.write_task_file("002-done", "T010", "done", "src/done/");
+    let active = repo.write_task_file("001-active", "T005", "todo", "src/active/");
+    let task = fs::read_to_string(&active).unwrap();
+    fs::write(
+        &active,
+        task.replace("depends = []", "depends = [\"002-done/T010\"]"),
+    )
+    .unwrap();
+
+    let payload = repo.run(&["ready", "--all-open", "--explain"]);
+    assert_eq!(payload["ready"][0]["task"], "001-active/T005");
+}
+
+#[test]
+fn numeric_spec_selector_resolves_exact_directory() {
+    let repo = Repo::new();
+    repo.write_task_file("001", "T001", "todo", "src/numeric/");
+    repo.write_task_file("001-feature", "T002", "todo", "src/feature/");
+    let ready = repo.run(&["ready", "--spec", "001", "--explain"]);
+    assert_eq!(ready["ready"][0]["task"], "001/T001");
+}
+
+#[test]
+fn depends_dash_sentinel_is_ready_and_lint_clean() {
+    let repo = Repo::new();
+    let path = repo.write_task_file("dashspec", "T001", "todo", "src/dash/");
+    let task = fs::read_to_string(&path).unwrap();
+    fs::write(&path, task.replace("depends = []", "depends = [\"-\"]")).unwrap();
+
+    let lint = repo.run(&["lint"]);
+    assert!(lint.get("errors").is_none() || lint["errors"].as_array().unwrap().is_empty());
+    let ready = repo.run(&["ready", "--spec", "dashspec", "--explain"]);
+    assert_eq!(ready["ready"][0]["task"], "dashspec/T001");
+}
+
+#[test]
+fn lint_rejects_parent_traversal_scope() {
+    let repo = Repo::new();
+    repo.write_task_file("escapespec", "T001", "todo", "..");
+
+    let lint = repo.run_fail(&["lint"]);
+    assert_eq!(lint["ok"], false);
+    let errors = lint["errors"].as_array().unwrap();
+    assert!(errors
+        .iter()
+        .any(|err| err["task"] == "escapespec/T001" && err["error"] == "scope escapes repo root"));
+}
+
+#[test]
+fn lease_rejects_parent_traversal_scope() {
+    let repo = Repo::new();
+    repo.write_task_file("escapespec", "T001", "todo", "..");
+
+    let payload = repo.run_fail(&[
+        "lease",
+        "escapespec",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_escape",
+    ]);
+    assert_eq!(payload["code"], "invalid_scope");
+    assert_eq!(payload["scope"], "..");
+    assert!(!repo.root.join(".orchid/leases/l_escape.json").exists());
+}
+
+#[test]
+fn next_prefers_validate_over_recover_for_stale_lease_with_report() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_123",
+    ]);
+    fs::write(
+        repo.root.join(".orchid/reports/l_123.md"),
+        "+++\nlease_id = \"l_123\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
+    )
+    .unwrap();
+    let lease_path = repo.root.join(".orchid/leases/l_123.json");
+    let mut lease: Value = serde_json::from_str(&fs::read_to_string(&lease_path).unwrap()).unwrap();
+    lease["heartbeat_at"] = Value::String("2020-01-01T00:00:00Z".to_string());
+    lease["started_at"] = Value::String("2020-01-01T00:00:00Z".to_string());
+    fs::write(&lease_path, serde_json::to_string_pretty(&lease).unwrap()).unwrap();
+
+    let payload = repo.run(&["next", "--spec", "example", "--older-than", "1m"]);
+    assert_eq!(payload["phase"], "validate");
+}
+
+#[test]
+fn next_dispatches_scope_disjoint_ready_tasks_with_parallel_flag() {
+    let repo = Repo::new();
+    repo.write_task_file("example", "T005", "todo", "src/feature/");
+    repo.write_task_file("other", "T001", "todo", "src/other/");
+    repo.run(&[
+        "lease",
+        "other",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_other",
+    ]);
+
+    let ready = repo.run(&["ready", "--spec", "example", "--explain"]);
+    let ready_tasks: Vec<&str> = ready["ready"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["task"].as_str().unwrap())
+        .collect();
+    assert!(ready_tasks.contains(&"example/T001"));
+
+    let next = repo.run(&["next", "--spec", "example", "--explain"]);
+    assert_eq!(next["phase"], "dispatch");
+    assert_eq!(
+        next["cmd"],
+        serde_json::json!([
+            "lease",
+            "example",
+            "T001",
+            "--owner",
+            "worker:<agent-id>",
+            "--allow-parallel"
+        ])
+    );
+    let next_ready: Vec<&str> = next["ready"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["task"].as_str().unwrap())
+        .collect();
+    assert!(next_ready.contains(&"example/T001"));
+}
+
+#[test]
+fn next_spec_does_not_surface_foreign_spec_cleanup() {
+    let repo = Repo::new();
+    repo.write_task_file("other", "T001", "todo", "src/other/");
+    repo.run(&[
+        "lease",
+        "other",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_other",
+    ]);
+    repo.run(&["complete", "--lease", "l_other", "--verified-by", "mayor"]);
+
+    let payload = repo.run(&["next", "--spec", "example", "--explain"]);
+    assert_eq!(payload["phase"], "dispatch");
+    assert!(payload.get("cleanup").is_none());
+
+    let other = repo.run(&["next", "--spec", "other", "--explain"]);
+    assert_eq!(other["phase"], "stage");
+    assert_eq!(other["stage"][0]["lease_id"], "l_other");
+    assert_eq!(other["stage"][0]["git"], false);
+}
+
+#[test]
+#[cfg(unix)]
+fn close_keeps_lease_json_when_dependent_delete_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    repo.run(&["complete", "--lease", "l_1", "--verified-by", "mayor"]);
+    let reports_dir = repo.root.join(".orchid/reports");
+    fs::create_dir_all(&reports_dir).unwrap();
+    fs::write(reports_dir.join("l_1.md"), "report\n").unwrap();
+    let original = fs::metadata(&reports_dir).unwrap().permissions();
+    fs::set_permissions(&reports_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let failed = repo.run_fail(&["close", "--lease", "l_1"]);
+    assert!(failed.get("error").is_some());
+
+    fs::set_permissions(&reports_dir, original).unwrap();
+
+    assert!(repo.root.join(".orchid/leases/l_1.json").exists());
+}
+
+#[test]
+fn close_blocks_completed_lease_with_unstaged_changes() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    fs::write(repo.root.join("src/feature/work.txt"), "work\n").unwrap();
+    repo.run(&["complete", "--lease", "l_1", "--verified-by", "mayor"]);
+
+    let failed = repo.run_fail(&["close", "--lease", "l_1"]);
+    assert_eq!(failed["code"], "close_has_unstaged_changes");
+
+    let closed = repo.run(&["close", "--lease", "l_1", "--force"]);
+    assert!(closed["deleted"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(".orchid/leases/l_1.json".to_string())));
+}
+
+#[test]
+fn close_succeeds_after_changes_are_committed() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    fs::write(repo.root.join("src/feature/work.txt"), "work\n").unwrap();
+    repo.run(&["complete", "--lease", "l_1", "--verified-by", "mayor"]);
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-m", "stage work"]);
+
+    let closed = repo.run(&["close", "--lease", "l_1"]);
+    assert_eq!(closed["lease_id"], "l_1");
+}
+
+#[test]
+fn close_force_records_audit_trail_on_active_task() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    let close = repo.run(&["close", "--lease", "l_1", "--force"]);
+    assert!(close["deleted"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(".orchid/leases/l_1.json".to_string())));
+
+    let task = fs::read_to_string(repo.root.join("specs/example/tasks/T001.md")).unwrap();
+    assert!(task.contains("last_lease_id = \"l_1\""));
+    assert!(task.contains("force_closed_at"));
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+    let released = repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:b",
+        "--lease-id",
+        "l_2",
+    ]);
+    assert_eq!(released["lease_id"], "l_2");
+}
+
+#[test]
+fn release_and_heartbeat_reject_completed_leases() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_abc",
+    ]);
+    repo.run(&["complete", "--lease", "l_abc", "--verified-by", "mayor"]);
+
+    let released = repo.run_fail(&["release", "l_abc", "--reason", "superseded"]);
+    assert_eq!(released["code"], "lease_not_active");
+    let next = repo.run(&["next", "--spec", "example", "--explain"]);
+    assert_eq!(next["phase"], "stage");
+    assert_eq!(next["stage"][0]["lease_id"], "l_abc");
+    assert_eq!(next["stage"][0]["git"], false);
+
+    let heartbeat = repo.run_fail(&["heartbeat", "l_abc"]);
+    assert_eq!(heartbeat["code"], "lease_not_active");
+}
+
+#[test]
+fn runtime_lock_reclaims_stale_lock_but_respects_fresh_one() {
+    let repo = Repo::new();
+    let lock_dir = repo.root.join(".orchid/locks");
+    fs::create_dir_all(&lock_dir).unwrap();
+    let lock_path = lock_dir.join("state.lock");
+
+    let stale = (Utc::now() - Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, false);
+    fs::write(
+        &lock_path,
+        format!("{{\"pid\":424242,\"created_at\":\"{stale}\"}}\n"),
+    )
+    .unwrap();
+    let lease = repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_reclaim",
+    ]);
+    assert_eq!(lease["lease_id"], "l_reclaim");
+
+    fs::create_dir_all(&lock_dir).unwrap();
+    let fresh = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, false);
+    fs::write(
+        &lock_path,
+        format!("{{\"pid\":424242,\"created_at\":\"{fresh}\"}}\n"),
+    )
+    .unwrap();
+    let busy = repo.run_fail(&["lease", "example", "T002", "--owner", "worker:b"]);
+    assert_eq!(busy["code"], "runtime_lock_busy");
+}
+
+#[test]
+fn save_lease_does_not_persist_internal_path_metadata() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_meta",
+    ]);
+    repo.run(&["heartbeat", "l_meta"]);
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_meta.json")).expect("lease json"),
+    )
+    .unwrap();
+    assert!(lease.get("_path").is_none());
+    assert!(lease
+        .as_object()
+        .unwrap()
+        .keys()
+        .all(|key| !key.starts_with('_')));
+}
+
+#[test]
+fn block_rewrites_task_with_nested_table_frontmatter() {
+    let repo = Repo::new();
+    let path = repo.write_task_file("metaspec", "T001", "todo", "src/meta/");
+    let task = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        task.replace(
+            "+++\n\n## Context\n",
+            "[metadata]\nowner = \"team-a\"\n+++\n\n## Context\n",
+        ),
+    )
+    .unwrap();
+
+    let block = repo.run(&["block", "metaspec", "T001", "--reason", "waiting"]);
+    assert_eq!(block["task"], "metaspec/T001");
+    assert_eq!(
+        task_status(&repo.root, "specs/metaspec/tasks/T001.md"),
+        "blocked"
+    );
+    let rewritten = fs::read_to_string(&path).unwrap();
+    assert!(rewritten.contains("owner"));
+    assert!(rewritten.contains("team-a"));
+}
+
+#[test]
+fn block_rejects_completed_task() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    repo.run(&["complete", "--lease", "l_1", "--verified-by", "mayor"]);
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "done"
+    );
+
+    let failed = repo.run_fail(&["block", "example", "T001", "--reason", "decision"]);
+    assert_eq!(failed["code"], "cannot_block_done_task");
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "done"
+    );
+}
+
+#[test]
+fn block_on_fresh_repo_preserves_orchid_marker() {
+    let repo = Repo::new();
+    assert!(!repo.root.join(".orchid").exists());
+    let block = repo.run(&["block", "example", "T001", "--reason", "waiting"]);
+    assert_eq!(block["task"], "example/T001");
+    assert!(repo.root.join(".orchid").exists());
+}
+
+#[test]
+fn block_rejects_task_with_active_lease() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_test",
+    ]);
+    let payload = repo.run_fail(&["block", "example", "T001", "--reason", "needs decision"]);
+    assert_eq!(payload["code"], "task_already_leased");
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+    repo.run(&["release", "l_test", "--reason", "paused"]);
+    let block = repo.run(&["block", "example", "T001", "--reason", "needs decision"]);
+    assert_eq!(block["task"], "example/T001");
+}
+
+#[test]
+#[cfg(unix)]
+fn complete_rolls_back_task_when_lease_save_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_abc",
+    ]);
+    let leases_dir = repo.root.join(".orchid/leases");
+    let original = fs::metadata(&leases_dir).unwrap().permissions();
+    fs::set_permissions(&leases_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let failed = repo.run_fail(&["complete", "--lease", "l_abc", "--verified-by", "mayor"]);
+    assert!(failed.get("error").is_some());
+
+    fs::set_permissions(&leases_dir, original).unwrap();
+
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+    let lease: Value =
+        serde_json::from_str(&fs::read_to_string(leases_dir.join("l_abc.json")).unwrap()).unwrap();
+    assert_eq!(lease["status"], "active");
+}
+
+#[test]
+fn complete_rolls_back_task_when_git_status_fails() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_abc",
+    ]);
+    fs::write(repo.root.join(".git/index"), "invalid index").unwrap();
+
+    let failed = repo.run_fail(&["complete", "--lease", "l_abc", "--verified-by", "mayor"]);
+
+    assert_eq!(failed["code"], "git_command_failed");
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_abc.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lease["status"], "active");
+}
+
+#[test]
+#[cfg(unix)]
+fn complete_clean_spec_research_failure_keeps_completion() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_123",
+    ]);
+    let research_dir = repo.root.join(".orchid/spec-research/example");
+    fs::create_dir_all(&research_dir).unwrap();
+    fs::write(research_dir.join("notes.md"), "notes\n").unwrap();
+    let original = fs::metadata(&research_dir).unwrap().permissions();
+    fs::set_permissions(&research_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let payload = repo.run(&[
+        "complete",
+        "--lease",
+        "l_123",
+        "--verified-by",
+        "mayor",
+        "--clean-spec-research",
+    ]);
+
+    fs::set_permissions(&research_dir, original).unwrap();
+
+    assert_eq!(payload["task"], "example/T001");
+    assert_eq!(payload["lease_id"], "l_123");
+    assert!(payload.get("spec_research_clean_error").is_some());
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "done"
+    );
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_123.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lease["status"], "completed");
+}
+
+#[test]
+fn complete_rejects_task_not_in_completable_status() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_x",
+    ]);
+    let task_path = repo.root.join("specs/example/tasks/T001.md");
+    let task = fs::read_to_string(&task_path).unwrap();
+    fs::write(
+        &task_path,
+        task.replace("status = \"todo\"", "status = \"blocked\""),
+    )
+    .unwrap();
+
+    let failed = repo.run_fail(&["complete", "--lease", "l_x", "--verified-by", "mayor"]);
+    assert_eq!(failed["code"], "task_not_completable");
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "blocked"
+    );
+}
+
+#[test]
+fn complete_rejects_released_lease_after_release() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_old",
+    ]);
+    repo.run(&["release", "l_old", "--reason", "paused"]);
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:b",
+        "--lease-id",
+        "l_new",
+    ]);
+    let payload = repo.run_fail(&[
+        "complete",
+        "--lease",
+        "l_old",
+        "--verified-by",
+        "validator:x",
+    ]);
+    assert_eq!(payload["code"], "complete_requires_active_lease");
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
 }
 
 #[test]
@@ -1838,6 +3329,36 @@ fn report_check_rejects_report_path_that_claims_another_lease() {
     assert_eq!(report["lease_id"], "l_b");
     assert_eq!(report["report"], ".orchid/reports/l_a.md");
     assert_eq!(report["expected_report"], ".orchid/reports/l_b.md");
+}
+
+#[test]
+fn report_check_ignores_tampered_lease_report_path() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_123",
+    ]);
+
+    let lease_path = repo.root.join(".orchid/leases/l_123.json");
+    let mut lease: Value = serde_json::from_str(&fs::read_to_string(&lease_path).unwrap()).unwrap();
+    lease["report_path"] = Value::String("specs/example/redirected.md".to_string());
+    fs::write(&lease_path, serde_json::to_string(&lease).unwrap()).unwrap();
+
+    fs::write(
+        repo.root.join("specs/example/redirected.md"),
+        "+++\nlease_id = \"l_123\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
+    )
+    .unwrap();
+
+    let report = repo.run_fail(&["report-check", "specs/example/redirected.md"]);
+    assert_eq!(report["code"], "report_lease_mismatch");
+    assert_eq!(report["report"], "specs/example/redirected.md");
+    assert_eq!(report["expected_report"], ".orchid/reports/l_123.md");
 }
 
 #[test]
@@ -1896,6 +3417,7 @@ fn explicit_root_does_not_walk_up_to_parent_orchid_runtime() {
 #[test]
 fn report_check_accepts_report_from_external_orchid_reports_dir() {
     let repo = Repo::new();
+    repo.init_git();
     repo.run(&[
         "lease",
         "example",
@@ -1907,6 +3429,10 @@ fn report_check_accepts_report_from_external_orchid_reports_dir() {
     ]);
 
     let worktree = repo.root.parent().unwrap().join("other-worktree");
+    git(
+        &repo.root,
+        &["worktree", "add", "-b", "wt", worktree.to_str().unwrap()],
+    );
     fs::create_dir_all(worktree.join(".orchid/reports")).unwrap();
     let report_path = worktree.join(".orchid/reports/l_test.md");
     fs::write(
@@ -1943,6 +3469,33 @@ fn report_check_rejects_external_report_outside_orchid_reports_dir() {
     let outside = repo.root.parent().unwrap().join("outside");
     fs::create_dir_all(&outside).unwrap();
     let report_path = outside.join("l_test.md");
+    fs::write(
+        &report_path,
+        "+++\nlease_id = \"l_test\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
+    )
+    .unwrap();
+
+    let payload = repo.run_fail(&["report-check", report_path.to_str().unwrap()]);
+    assert_eq!(payload["code"], "path_outside_repo");
+}
+
+#[test]
+fn report_check_rejects_external_orchid_reports_dir_in_unrelated_repo() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_test",
+    ]);
+
+    let outside = repo.root.parent().unwrap().join("evil");
+    fs::create_dir_all(outside.join(".orchid/reports")).unwrap();
+    let report_path = outside.join(".orchid/reports/l_test.md");
     fs::write(
         &report_path,
         "+++\nlease_id = \"l_test\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
@@ -2113,6 +3666,62 @@ fn git_touched_and_stage_plan_split_scope_and_baseline() {
         payload["pathspecs"],
         serde_json::json!([":(literal)src/feature/work.txt"])
     );
+}
+
+#[test]
+fn stage_plan_marks_unsafe_when_git_unavailable() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    fs::write(repo.root.join("src/feature/work.txt"), "work\n").unwrap();
+
+    let touched = repo.run(&["git-touched", "--lease", "l_1"]);
+    assert_eq!(touched["git"], false);
+    assert_eq!(touched["safe_to_stage"], false);
+
+    let plan = repo.run(&["git-stage-plan", "--lease", "l_1"]);
+    assert_eq!(plan["git"], false);
+    assert_eq!(plan["safe_to_stage"], false);
+}
+
+#[test]
+fn stage_plan_excludes_in_scope_edits_made_after_complete() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_test",
+    ]);
+    fs::write(repo.root.join("src/feature/work.txt"), "worker edit\n").unwrap();
+    repo.run(&["complete", "--lease", "l_test", "--verified-by", "mayor"]);
+    fs::write(
+        repo.root.join("src/feature/extra.txt"),
+        "post-complete edit\n",
+    )
+    .unwrap();
+
+    let plan = repo.run(&["git-stage-plan", "--lease", "l_test"]);
+    assert_eq!(
+        plan["pathspecs"],
+        serde_json::json!([
+            ":(literal)specs/example/tasks/T001.md",
+            ":(literal)src/feature/work.txt"
+        ])
+    );
+    let plan_str = plan["pathspecs"].to_string();
+    assert!(!plan_str.contains("extra.txt"));
 }
 
 #[test]
@@ -2411,7 +4020,7 @@ fn packet_close_cleanup_and_research_lifecycle() {
     )
     .unwrap();
     repo.run(&["complete", "--lease", "l_test", "--verified-by", "mayor"]);
-    let payload = repo.run(&["close", "--lease", "l_test"]);
+    let payload = repo.run(&["close", "--lease", "l_test", "--force"]);
     assert!(payload["deleted"]
         .as_array()
         .unwrap()
@@ -2426,7 +4035,7 @@ fn packet_close_cleanup_and_research_lifecycle() {
         .as_array()
         .unwrap()
         .contains(&Value::String(".orchid/reports/l_test.md".to_string())));
-    assert!(!repo.root.join(".orchid").exists());
+    assert!(repo.root.join(".orchid").exists());
 
     let repo = Repo::new();
     let payload = repo.run(&["research-path", "specs/example", "--create"]);
@@ -2443,7 +4052,7 @@ fn packet_close_cleanup_and_research_lifecycle() {
         payload["deleted"],
         serde_json::json!([".orchid/spec-research/example"])
     );
-    assert!(!repo.root.join(".orchid").exists());
+    assert!(repo.root.join(".orchid").exists());
 }
 
 #[test]

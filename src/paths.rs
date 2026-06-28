@@ -1,3 +1,8 @@
+//! Repository root discovery, `.orchid/` layout helpers, and confined filesystem I/O.
+//!
+//! All repo-bound paths are normalized and checked to stay under the discovered root;
+//! symlinked runtime directories are rejected before mutating commands touch them.
+
 use std::env;
 use std::fs;
 use std::io::{ErrorKind, Write};
@@ -52,6 +57,7 @@ fn clean_path(path: &Path) -> PathBuf {
     out
 }
 
+/// Walk ancestors from `path` until a `.orchid` marker directory is found.
 pub(crate) fn discover_orchid_root(path: &Path) -> Option<PathBuf> {
     let start = if path.is_file() {
         path.parent().unwrap_or(path)
@@ -60,7 +66,11 @@ pub(crate) fn discover_orchid_root(path: &Path) -> Option<PathBuf> {
     };
     start
         .ancestors()
-        .find(|ancestor| fs::symlink_metadata(ancestor.join(".orchid")).is_ok())
+        .find(|ancestor| {
+            fs::symlink_metadata(ancestor.join(".orchid"))
+                .map(|meta| meta.is_dir())
+                .unwrap_or(false)
+        })
         .map(Path::to_path_buf)
 }
 
@@ -142,6 +152,7 @@ pub(crate) fn relpath(path: &Path, root: &Path) -> String {
         .unwrap_or_else(|_| path_to_string(&clean))
 }
 
+/// Resolve `path` under `root`, rejecting escapes through `..` or symlinks.
 pub(crate) fn ensure_under_root(path: PathBuf, root: &Path, label: &str) -> OrchResult<PathBuf> {
     let path = abs_clean(path)?;
     let root = abs_clean(root.to_path_buf())?;
@@ -194,6 +205,7 @@ pub(crate) fn read_text(path: &Path) -> OrchResult<String> {
     Ok(fs::read_to_string(path)?)
 }
 
+/// Write `data` atomically via a pid-scoped temp file and rename.
 pub(crate) fn atomic_write(path: &Path, data: &str) -> OrchResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -264,4 +276,25 @@ pub(crate) fn atomic_write_json<T: Serialize>(path: &Path, data: &T) -> OrchResu
 
 pub(crate) fn path_to_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discover_orchid_root_requires_marker_directory() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = tmp.path().join("repo");
+        let child = root.join("nested");
+        fs::create_dir_all(&child).expect("child dir");
+        fs::write(root.join(".orchid"), "not a directory").expect("marker file");
+
+        assert_eq!(discover_orchid_root(&child), None);
+
+        fs::remove_file(root.join(".orchid")).expect("remove marker file");
+        fs::create_dir(root.join(".orchid")).expect("marker dir");
+
+        assert_eq!(discover_orchid_root(&child), Some(root));
+    }
 }

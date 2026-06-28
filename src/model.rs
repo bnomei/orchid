@@ -1,3 +1,8 @@
+//! Domain identifiers, lease records, scope rules, and JSON payload shapes.
+//!
+//! Types here encode the contracts between specs, runtime leases, Git staging,
+//! and coordinator-facing ACK fields.
+
 use serde_json::{Map, Value};
 
 use crate::core::{insert, string_list, value_to_string, ErrorCode, OrchError, OrchResult};
@@ -78,6 +83,7 @@ impl LeaseId {
     }
 }
 
+/// Validate a lease id before any runtime file access under `.orchid/leases/`.
 pub(crate) fn validate_lease_id(value: &str) -> OrchResult<()> {
     LeaseId::parse(value).map(|_| ())
 }
@@ -90,6 +96,7 @@ fn is_safe_lease_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+/// Write-scope entries used for lease exclusivity and Git path attribution.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct Scope {
     entries: Vec<String>,
@@ -101,12 +108,12 @@ impl Scope {
     }
 
     pub(crate) fn contains_path(&self, path: &str) -> bool {
-        let norm_path = normalize_scope_entry(path);
+        let norm_path = normalize_path_for_scope(path);
         self.entries.iter().any(|scope| {
             let norm_scope = normalize_scope_entry(scope);
-            !norm_scope.is_empty()
-                && (norm_path == norm_scope
-                    || norm_path.starts_with(&(norm_scope.trim_end_matches('/').to_string() + "/")))
+            norm_scope.is_empty()
+                || norm_path == norm_scope
+                || norm_path.starts_with(&(norm_scope.trim_end_matches('/').to_string() + "/"))
         })
     }
 
@@ -115,24 +122,41 @@ impl Scope {
             let ln = normalize_scope_entry(left);
             other.entries.iter().any(|right| {
                 let rn = normalize_scope_entry(right);
-                !ln.is_empty()
-                    && !rn.is_empty()
-                    && (ln == rn
-                        || ln.starts_with(&(rn.trim_end_matches('/').to_string() + "/"))
-                        || rn.starts_with(&(ln.trim_end_matches('/').to_string() + "/")))
+                ln.is_empty()
+                    || rn.is_empty()
+                    || ln == rn
+                    || ln.starts_with(&(rn.trim_end_matches('/').to_string() + "/"))
+                    || rn.starts_with(&(ln.trim_end_matches('/').to_string() + "/"))
             })
         })
     }
 }
 
 pub(crate) fn normalize_scope_entry(value: &str) -> String {
-    let mut cleaned = value.trim().replace('\\', "/");
-    while let Some(rest) = cleaned.strip_prefix("./") {
-        cleaned = rest.to_string();
-    }
-    cleaned.trim_matches('/').to_string()
+    normalize_path_for_scope(&value.replace('\\', "/"))
 }
 
+fn normalize_path_for_scope(value: &str) -> String {
+    let mut cleaned = value.trim();
+    while let Some(rest) = cleaned.strip_prefix("./") {
+        cleaned = rest;
+    }
+    let cleaned = cleaned.trim_matches('/');
+    if cleaned == "." {
+        String::new()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+/// True when a scope entry contains a `..` segment and must be rejected at lint.
+pub(crate) fn scope_entry_escapes_root(value: &str) -> bool {
+    normalize_scope_entry(value)
+        .split('/')
+        .any(|segment| segment == "..")
+}
+
+/// Task lifecycle state stored in TOML frontmatter and enforced by lease/complete gates.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum TaskStatus {
     Blocked,
@@ -175,6 +199,13 @@ impl TaskStatus {
 
     pub(crate) fn is_done(&self) -> bool {
         matches!(self, TaskStatus::Done)
+    }
+
+    pub(crate) fn is_completable(&self) -> bool {
+        matches!(
+            self,
+            TaskStatus::Todo | TaskStatus::PendingValidation | TaskStatus::PendingReview
+        )
     }
 }
 
@@ -323,6 +354,7 @@ impl LeaseMode {
     }
 }
 
+/// Durable lease JSON used to attribute touched files and reserve write scope.
 #[derive(Debug, Clone)]
 pub(crate) struct LeaseRecord {
     data: Map<String, Value>,
@@ -460,6 +492,11 @@ impl LeaseRecord {
         string_list(self.get("baseline_changed"))
     }
 
+    pub(crate) fn completed_changed(&self) -> Option<Vec<String>> {
+        self.get("completed_changed")
+            .map(|value| string_list(Some(value)))
+    }
+
     pub(crate) fn report_path(&self) -> Option<&str> {
         self.get_str("report_path").filter(|path| !path.is_empty())
     }
@@ -494,6 +531,7 @@ impl LeaseStatus {
     }
 }
 
+/// Trimmed lease summary embedded in `status` and `next` coordinator payloads.
 #[derive(Debug, Clone)]
 pub(crate) struct CompactLease {
     pub(crate) id: Value,
@@ -539,10 +577,12 @@ impl CompactLease {
     }
 }
 
+/// Git staging plan attributing in-scope lease-window edits and flagging unsafe cases.
 #[derive(Debug, Clone)]
 pub(crate) struct StagePlan {
     pub(crate) lease_id: String,
     pub(crate) task: String,
+    pub(crate) git_available: bool,
     pub(crate) safe_to_stage: bool,
     pub(crate) pathspecs: Vec<String>,
     pub(crate) records: Vec<Value>,
@@ -555,6 +595,9 @@ impl StagePlan {
         let mut map = Map::new();
         map.insert("lease_id".to_string(), Value::String(self.lease_id.clone()));
         map.insert("task".to_string(), Value::String(self.task.clone()));
+        if !self.git_available {
+            map.insert("git".to_string(), Value::Bool(false));
+        }
         if !self.safe_to_stage {
             map.insert("safe_to_stage".to_string(), Value::Bool(false));
         }
@@ -672,6 +715,10 @@ impl SpecPolicy {
         self.data.get("human_checkpoint").and_then(Value::as_str) == Some("before-implementation")
     }
 
+    pub(crate) fn fanout_is_serial(&self) -> bool {
+        self.data.get("fanout_policy").and_then(Value::as_str) == Some("serial")
+    }
+
     pub(crate) fn into_map(self) -> Map<String, Value> {
         self.data
     }
@@ -695,6 +742,22 @@ mod tests {
         assert!(parent.contains_path("src/feature/file.rs"));
         assert!(parent.overlaps(&child));
         assert!(!parent.overlaps(&sibling));
+    }
+
+    #[test]
+    fn contains_path_does_not_rewrite_backslash_in_git_path() {
+        let scope = Scope::from_entries(vec!["src".to_string()]);
+        assert!(scope.contains_path("src/evil.rs"));
+        assert!(!scope.contains_path("src\\evil.rs"));
+        let win_scope = Scope::from_entries(vec!["src\\feature".to_string()]);
+        assert!(win_scope.contains_path("src/feature/file.rs"));
+    }
+
+    #[test]
+    fn root_scope_spellings_collapse_consistently() {
+        for value in [".", "/", "./", "", "././", "./."] {
+            assert_eq!(normalize_scope_entry(value), "", "value: {value:?}");
+        }
     }
 
     #[test]

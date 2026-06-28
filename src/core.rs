@@ -1,40 +1,56 @@
+//! Shared CLI infrastructure: structured errors, JSON ACK emission, and time parsing.
+//!
+//! Every command surfaces failures through [`OrchError`] with stable [`ErrorCode`]
+//! values so coordinators can branch on machine-readable codes instead of prose.
+
 use chrono::{DateTime, Local, SecondsFormat, TimeDelta, Utc};
 use serde_json::{Map, Value};
 
 pub(crate) const DEFAULT_STALE_AFTER: &str = "30m";
 
+/// Stable machine-readable codes attached to orchestration failures.
 #[derive(Debug, Copy, Clone)]
 pub(crate) enum ErrorCode {
     ActiveLeaseCloseRequiresForce,
     AgentLeaseAmbiguous,
     AgentLeaseNotFound,
     AgentIdAlreadyAttached,
+    CannotBlockDoneTask,
     CleanupModeRequired,
+    CloseHasUnstagedChanges,
+    CompleteRequiresActiveLease,
+    CorruptLeaseFile,
     HumanCheckpoint,
     InactiveSpec,
     InvalidDuration,
     InvalidJson,
     InvalidLeaseId,
     InvalidReasoningEffort,
+    InvalidVerificationMode,
     InvalidWorkerModel,
+    LeaseNotActive,
     ReportLeaseMismatch,
     InvalidSpecId,
+    InvalidTaskId,
     LeaseIdAlreadyExists,
     LeaseNotFound,
     ParallelNotConfirmed,
     PathOutsideRepo,
     InvalidReportStatus,
+    InvalidScope,
     ReportMissingLeaseId,
     RuntimeLockBusy,
     ScopeConflict,
     ScopeRequired,
     ScopeSelectorConflict,
     SerialBlocked,
+    SerialFanoutPolicy,
     SpecManual,
     SpecNotFound,
     SpecSelectorAmbiguous,
     TaskAlreadyLeased,
     TaskIdRequired,
+    TaskNotCompletable,
     TaskNotTodo,
 }
 
@@ -45,37 +61,48 @@ impl ErrorCode {
             ErrorCode::AgentLeaseAmbiguous => "agent_lease_ambiguous",
             ErrorCode::AgentLeaseNotFound => "agent_lease_not_found",
             ErrorCode::AgentIdAlreadyAttached => "agent_id_already_attached",
+            ErrorCode::CannotBlockDoneTask => "cannot_block_done_task",
             ErrorCode::CleanupModeRequired => "cleanup_mode_required",
+            ErrorCode::CloseHasUnstagedChanges => "close_has_unstaged_changes",
+            ErrorCode::CompleteRequiresActiveLease => "complete_requires_active_lease",
+            ErrorCode::CorruptLeaseFile => "corrupt_lease_file",
             ErrorCode::HumanCheckpoint => "human_checkpoint",
             ErrorCode::InactiveSpec => "inactive_spec",
             ErrorCode::InvalidDuration => "invalid_duration",
             ErrorCode::InvalidJson => "invalid_json",
             ErrorCode::InvalidLeaseId => "invalid_lease_id",
             ErrorCode::InvalidReasoningEffort => "invalid_reasoning_effort",
+            ErrorCode::InvalidVerificationMode => "invalid_verification_mode",
             ErrorCode::InvalidWorkerModel => "invalid_worker_model",
+            ErrorCode::LeaseNotActive => "lease_not_active",
             ErrorCode::ReportLeaseMismatch => "report_lease_mismatch",
             ErrorCode::InvalidSpecId => "invalid_spec_id",
+            ErrorCode::InvalidTaskId => "invalid_task_id",
             ErrorCode::LeaseIdAlreadyExists => "lease_id_already_exists",
             ErrorCode::LeaseNotFound => "lease_not_found",
             ErrorCode::ParallelNotConfirmed => "parallel_not_confirmed",
             ErrorCode::PathOutsideRepo => "path_outside_repo",
             ErrorCode::InvalidReportStatus => "invalid_report_status",
+            ErrorCode::InvalidScope => "invalid_scope",
             ErrorCode::ReportMissingLeaseId => "report_missing_lease_id",
             ErrorCode::RuntimeLockBusy => "runtime_lock_busy",
             ErrorCode::ScopeConflict => "scope_conflict",
             ErrorCode::ScopeRequired => "scope_required",
             ErrorCode::ScopeSelectorConflict => "scope_selector_conflict",
             ErrorCode::SerialBlocked => "serial_blocked",
+            ErrorCode::SerialFanoutPolicy => "serial_fanout_policy",
             ErrorCode::SpecManual => "spec_manual",
             ErrorCode::SpecNotFound => "spec_not_found",
             ErrorCode::SpecSelectorAmbiguous => "spec_selector_ambiguous",
             ErrorCode::TaskAlreadyLeased => "task_already_leased",
             ErrorCode::TaskIdRequired => "task_id_required",
+            ErrorCode::TaskNotCompletable => "task_not_completable",
             ErrorCode::TaskNotTodo => "task_not_todo",
         }
     }
 }
 
+/// Structured command failure with a stable code and optional detail fields for JSON ACKs.
 #[derive(Debug, Clone)]
 pub(crate) struct OrchError {
     pub(crate) message: String,
@@ -117,6 +144,7 @@ impl From<std::io::Error> for OrchError {
     }
 }
 
+/// Result alias used by every command handler and filesystem helper.
 pub(crate) type OrchResult<T> = Result<T, OrchError>;
 
 pub(crate) fn error_code(message: &str) -> String {
@@ -242,6 +270,7 @@ pub(crate) fn elapsed_seconds(value: Option<&Value>, now: DateTime<Utc>) -> i64 
         .unwrap_or(0)
 }
 
+/// Parse a positive duration such as `30m`, `2h`, or `1d` without panicking on overflow.
 pub(crate) fn parse_duration(value: &str) -> OrchResult<TimeDelta> {
     let raw = value.trim();
     if raw.len() < 2 {
@@ -250,20 +279,29 @@ pub(crate) fn parse_duration(value: &str) -> OrchResult<TimeDelta> {
                 .detail("duration", value),
         );
     }
-    let (amount, unit) = raw.split_at(raw.len() - 1);
+    let unit = raw.chars().next_back().ok_or_else(|| {
+        OrchError::coded("invalid duration", ErrorCode::InvalidDuration).detail("duration", value)
+    })?;
+    let amount = &raw[..raw.len() - unit.len_utf8()];
     let amount: i64 = amount.parse().map_err(|_| {
         OrchError::coded("invalid duration", ErrorCode::InvalidDuration).detail("duration", value)
     })?;
-    match unit {
-        "s" => Ok(TimeDelta::seconds(amount)),
-        "m" => Ok(TimeDelta::minutes(amount)),
-        "h" => Ok(TimeDelta::hours(amount)),
-        "d" => Ok(TimeDelta::days(amount)),
-        _ => Err(
+    if amount <= 0 {
+        return Err(
             OrchError::coded("invalid duration", ErrorCode::InvalidDuration)
                 .detail("duration", value),
-        ),
+        );
     }
+    let delta = match unit {
+        's' => TimeDelta::try_seconds(amount),
+        'm' => TimeDelta::try_minutes(amount),
+        'h' => TimeDelta::try_hours(amount),
+        'd' => TimeDelta::try_days(amount),
+        _ => None,
+    };
+    delta.ok_or_else(|| {
+        OrchError::coded("invalid duration", ErrorCode::InvalidDuration).detail("duration", value)
+    })
 }
 
 pub(crate) fn insert(map: &mut Map<String, Value>, key: &str, value: impl Into<Value>) {
@@ -280,6 +318,35 @@ mod tests {
         assert_eq!(parse_duration("15m").unwrap().num_minutes(), 15);
         assert_eq!(parse_duration("2h").unwrap().num_hours(), 2);
         assert_eq!(parse_duration("3d").unwrap().num_days(), 3);
+    }
+
+    #[test]
+    fn duration_parser_rejects_non_positive_amounts() {
+        for value in ["-1m", "-30s", "0m", "0s"] {
+            let err = parse_duration(value).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidDuration.as_str());
+        }
+    }
+
+    #[test]
+    fn duration_parser_rejects_multibyte_suffix_without_panicking() {
+        for value in ["3€", "30µ", "5é"] {
+            let err = parse_duration(value).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidDuration.as_str());
+        }
+    }
+
+    #[test]
+    fn duration_parser_rejects_out_of_range_magnitude_without_panicking() {
+        for value in [
+            "99999999999999d",
+            "9999999999999999s",
+            "999999999999999h",
+            "99999999999999999m",
+        ] {
+            let err = parse_duration(value).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidDuration.as_str());
+        }
     }
 
     #[test]

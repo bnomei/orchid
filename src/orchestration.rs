@@ -1,3 +1,8 @@
+//! Command handlers backing the CLI: lease, complete, next, goal hooks, and Git checks.
+//!
+//! Each handler acquires the runtime lock, validates scope and task contracts, mutates
+//! durable state under `.orchid/` and `specs/`, and returns JSON ACK payloads.
+
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -232,7 +237,7 @@ pub(crate) fn status(root: &Path, request: &StatusRequest) -> OrchResult<Map<Str
         return status_for_agent(root, agent_id);
     }
 
-    let (tasks, _) = if specs_arg(&request.specs).is_some() || request.all_open {
+    let (tasks, selected_specs) = if specs_arg(&request.specs).is_some() || request.all_open {
         select_tasks(root, specs_arg(&request.specs), request.all_open)?
     } else {
         (load_tasks(root, None)?, Vec::new())
@@ -242,6 +247,14 @@ pub(crate) fn status(root: &Path, request: &StatusRequest) -> OrchResult<Map<Str
     let mut payload = json_ok();
     insert(&mut payload, "tasks", tasks.len() as i64);
     insert(&mut payload, "counts", Value::Object(counts));
+    insert_non_empty(&mut payload, "specs", string_values(selected_specs));
+    if request.all_open {
+        insert_non_empty(
+            &mut payload,
+            "skipped_inactive_specs",
+            string_values(inactive_spec_names(root)?),
+        );
+    }
     if active != 0 {
         insert(&mut payload, "active", active as i64);
     }
@@ -259,6 +272,25 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
             .detail("task", task_key(&task))
             .detail("status", task.status()));
     }
+    if !crate::model::VerificationMode::parse(task.verification_mode()).is_dispatchable() {
+        return Err(OrchError::coded(
+            "invalid verification_mode",
+            ErrorCode::InvalidVerificationMode,
+        )
+        .detail("task", task_key(&task))
+        .detail("verification_mode", task.verification_mode().to_string()));
+    }
+    if let Some(bad_scope) = task
+        .scope()
+        .iter()
+        .find(|entry| crate::model::scope_entry_escapes_root(entry))
+    {
+        return Err(
+            OrchError::coded("scope escapes repo root", ErrorCode::InvalidScope)
+                .detail("task", task_key(&task))
+                .detail("scope", bad_scope.to_string()),
+        );
+    }
     require_valid_task_worker_execution_metadata(&task)?;
     let worker_reasoning_effort = resolve_worker_reasoning_effort_for_task(
         &task,
@@ -273,11 +305,22 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
                     .detail("lease_id", lease.id_value()),
             );
         }
-        if scopes_overlap(&task.scope(), &lease.scope()) {
+        let effective_scope = effective_lease_scope(root, lease);
+        if scopes_overlap(&task.scope(), &effective_scope) {
             return Err(OrchError::coded("scope conflict", ErrorCode::ScopeConflict)
                 .detail("lease_id", lease.id_value())
-                .detail("scope", string_values(lease.scope())));
+                .detail("scope", string_values(effective_scope)));
         }
+    }
+    if let Some(serial_lease) = active
+        .iter()
+        .find(|lease| lease.mode() == LeaseMode::Serial.as_str())
+    {
+        return Err(OrchError::coded(
+            "an active serial lease blocks new leases",
+            ErrorCode::SerialBlocked,
+        )
+        .detail("lease_id", serial_lease.id_value()));
     }
     if request.serial && !active.is_empty() {
         return Err(OrchError::coded(
@@ -292,6 +335,15 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
             ErrorCode::ParallelNotConfirmed,
         )
         .detail("active_leases", compact_leases(active)?));
+    }
+    if request.allow_parallel
+        && crate::specs::load_spec_policy(root, &task.spec_id)?.fanout_is_serial()
+    {
+        return Err(OrchError::coded(
+            "spec fanout_policy is serial; --allow-parallel is not permitted",
+            ErrorCode::SerialFanoutPolicy,
+        )
+        .detail("spec", task.spec_id.clone()));
     }
 
     let lease_id = requested_lease_id.unwrap_or_else(|| lease_id_for(&task.path, &request.owner));
@@ -371,10 +423,20 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
             ErrorCode::ScopeRequired,
         ));
     }
+    if let Some(bad) = scope
+        .iter()
+        .find(|entry| crate::model::scope_entry_escapes_root(entry))
+    {
+        return Err(
+            OrchError::coded("scope escapes repo root", ErrorCode::InvalidScope)
+                .detail("scope", bad.to_string()),
+        );
+    }
     let worker_reasoning_effort =
         resolve_worker_reasoning_effort_value(request.worker_reasoning_effort.as_deref())?;
     let worker_model = normalize_optional_string(&request.worker_model);
-    let instructions = fs::read_to_string(&request.instructions)?;
+    let instructions_path = repo_path(root, &request.instructions, "instructions")?;
+    let instructions = fs::read_to_string(&instructions_path)?;
     ensure_runtime_dirs(root)?;
 
     let active = active_leases(root)?;
@@ -500,9 +562,16 @@ pub(crate) fn lease_attach_agent(
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, &request.lease)?;
     ensure_agent_id_available(root, Some(&request.agent_id), Some(&request.lease))?;
+    let worker_packet_exists = lease
+        .worker_packet_path()
+        .map(|rel| root.join(rel).exists())
+        .unwrap_or(false);
     lease.set("agent_id", request.agent_id.clone());
     if lease.get_str("owner") == Some("worker:unassigned") {
         lease.set("owner", format!("worker:{}", request.agent_id));
+    }
+    if worker_packet_exists {
+        render_packet_for_lease(root, &mut lease, &request.lease, PacketRoleKind::Worker)?;
     }
     save_lease(root, &lease)?;
     let mut payload = json_ok();
@@ -516,7 +585,7 @@ pub(crate) fn lease_attach_agent(
 pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String, Value>> {
     let stale_after = parse_duration(&request.older_than)?;
     let now = Utc::now();
-    let (tasks, _) = select_tasks(root, specs_arg(&request.specs), request.all_open)?;
+    let (tasks, selected_specs) = select_tasks(root, specs_arg(&request.specs), request.all_open)?;
     let active = active_leases(root)?;
     let (ready, blocked, _) = ready_tasks(
         root,
@@ -527,10 +596,18 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
     let stale = active
         .iter()
         .filter(|lease| lease_stale(lease, now, stale_after))
+        .filter(|lease| {
+            !report_path_for_lease(root, lease)
+                .map(|path| path.exists())
+                .unwrap_or(false)
+        })
         .map(|lease| compact_lease(lease, Some(now), Some(stale_after)))
         .collect::<OrchResult<Vec<_>>>()?;
     let mut reports_ready = Vec::new();
     for lease in &active {
+        if !lease.is_bud() && !lease_in_selected_specs(lease, &selected_specs) {
+            continue;
+        }
         let report = report_path_for_lease(root, lease)?;
         if report.exists() {
             reports_ready.push(ReportReady {
@@ -545,7 +622,10 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
             });
         }
     }
-    let completed = completed_runtime_leases(root)?;
+    let completed: Vec<_> = completed_runtime_leases(root)?
+        .into_iter()
+        .filter(|lease| lease.is_bud() || lease_in_selected_specs(lease, &selected_specs))
+        .collect();
     let stage = completed
         .iter()
         .map(|lease| stage_plan_for_lease(root, lease))
@@ -559,16 +639,20 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
         .collect();
     let ready_payload = ready
         .iter()
-        .map(|task| ReadyTask {
-            id: task.id(),
-            spec: task.spec_id.clone(),
-            task: task_key(task),
-            scope: task.scope(),
-            verify: task.verification_mode().to_string(),
-            worker_reasoning_effort: task.worker_reasoning_effort(),
-            worker_model: optional_task_worker_model(task).map(str::to_string),
+        .map(|task| {
+            let policy = load_spec_policy(root, &task.spec_id)?;
+            Ok(ReadyTask {
+                id: task.id(),
+                spec: task.spec_id.clone(),
+                task: task_key(task),
+                scope: task.scope(),
+                verify: task.verification_mode().to_string(),
+                fanout_is_serial: policy.fanout_is_serial(),
+                worker_reasoning_effort: task.worker_reasoning_effort(),
+                worker_model: optional_task_worker_model(task).map(str::to_string),
+            })
         })
-        .collect();
+        .collect::<OrchResult<Vec<_>>>()?;
     let blocked = blocked
         .into_iter()
         .map(|item| BlockedTask {
@@ -606,6 +690,14 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     validate_lease_id(&request.lease)?;
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, &request.lease)?;
+    if !lease.status().is_active() {
+        return Err(OrchError::coded(
+            "cannot complete a lease that is not active",
+            ErrorCode::CompleteRequiresActiveLease,
+        )
+        .detail("lease_id", request.lease.clone())
+        .detail("status", lease.get_str("status").unwrap_or("").to_string()));
+    }
     if lease.is_bud() {
         let completed_at = now_iso();
         let implemented_by = if request.implemented_by.is_empty() {
@@ -637,7 +729,16 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
 
     let task_path = lease.task_path();
     let task = load_task(repo_path(root, task_path, "task_path")?, root)?;
-    let mut frontmatter = task.frontmatter().clone();
+    if !task.status_model().is_completable() {
+        return Err(OrchError::coded(
+            "task cannot be completed from its current status",
+            ErrorCode::TaskNotCompletable,
+        )
+        .detail("task", task_key(&task))
+        .detail("status", task.status()));
+    }
+    let original_frontmatter = task.frontmatter().clone();
+    let mut frontmatter = original_frontmatter.clone();
     let meta = frontmatter.raw_mut();
     insert(meta, "status", "done");
     insert(
@@ -667,27 +768,70 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     }
     let completed_at = meta.get("completed_at").cloned().unwrap_or(Value::Null);
     write_task_frontmatter(&task, frontmatter)?;
+    let completed_status = match git_status_data(root) {
+        Ok(status) => status,
+        Err(err) => {
+            let _ = write_task_frontmatter(&task, original_frontmatter.clone());
+            return Err(err);
+        }
+    };
     lease.set("status", "completed");
     lease.set("completed_at", completed_at);
-    save_lease(root, &lease)?;
+    lease.set("completed_changed", changed_paths_value(&completed_status));
+    if let Err(err) = save_lease(root, &lease) {
+        let _ = write_task_frontmatter(&task, original_frontmatter);
+        return Err(err);
+    }
     let mut payload = json_ok();
     insert(&mut payload, "lease_id", request.lease.clone());
     insert(&mut payload, "task", task_key(&task));
     if request.clean_spec_research {
-        let (deleted, pruned) = clean_spec_research(root, &task.spec_id)?;
-        insert_non_empty(
-            &mut payload,
-            "spec_research_deleted",
-            string_values(deleted),
-        );
-        insert_non_empty(&mut payload, "pruned", string_values(pruned));
+        match clean_spec_research(root, &task.spec_id) {
+            Ok((deleted, pruned)) => {
+                insert_non_empty(
+                    &mut payload,
+                    "spec_research_deleted",
+                    string_values(deleted),
+                );
+                insert_non_empty(&mut payload, "pruned", string_values(pruned));
+            }
+            Err(err) => {
+                let mut detail = Map::new();
+                insert(&mut detail, "message", err.message.clone());
+                insert(&mut detail, "code", err.code.clone());
+                insert(
+                    &mut payload,
+                    "spec_research_clean_error",
+                    Value::Object(detail),
+                );
+            }
+        }
     }
     Ok(payload)
 }
 
 pub(crate) fn block(root: &Path, request: &BlockRequest) -> OrchResult<Map<String, Value>> {
     let _lock = runtime_lock(root)?;
+    ensure_runtime_dirs(root)?;
     let task = resolve_task(root, &request.target, request.task_id.as_deref())?;
+    if task.status_model().is_done() {
+        return Err(OrchError::coded(
+            "cannot block a completed task",
+            ErrorCode::CannotBlockDoneTask,
+        )
+        .detail("task", task_key(&task))
+        .detail("status", task.status()));
+    }
+    let task_rel = relpath(&task.path, root);
+    for lease in active_leases(root)? {
+        if lease.task_path() == task_rel {
+            return Err(
+                OrchError::coded("task already leased", ErrorCode::TaskAlreadyLeased)
+                    .detail("lease_id", lease.id_value())
+                    .detail("task", task_key(&task)),
+            );
+        }
+    }
     let mut frontmatter = task.frontmatter().clone();
     let meta = frontmatter.raw_mut();
     insert(meta, "status", "blocked");
@@ -703,6 +847,14 @@ pub(crate) fn heartbeat(root: &Path, lease_id: &str) -> OrchResult<Map<String, V
     validate_lease_id(lease_id)?;
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, lease_id)?;
+    if !lease.status().is_active() {
+        return Err(OrchError::coded(
+            "cannot heartbeat a lease that is not active",
+            ErrorCode::LeaseNotActive,
+        )
+        .detail("lease_id", lease_id)
+        .detail("status", lease.get_str("status").unwrap_or("").to_string()));
+    }
     let heartbeat_at = now_iso();
     lease.set("heartbeat_at", heartbeat_at.clone());
     save_lease(root, &lease)?;
@@ -753,6 +905,14 @@ pub(crate) fn release(root: &Path, lease_id: &str, reason: &str) -> OrchResult<M
     validate_lease_id(lease_id)?;
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, lease_id)?;
+    if !lease.status().is_active() {
+        return Err(OrchError::coded(
+            "cannot release a lease that is not active",
+            ErrorCode::LeaseNotActive,
+        )
+        .detail("lease_id", lease_id)
+        .detail("status", lease.get_str("status").unwrap_or("").to_string()));
+    }
     lease.set("status", "released");
     lease.set("released_at", now_iso());
     if !reason.is_empty() {
@@ -768,7 +928,7 @@ pub(crate) fn research_path(
     root: &Path,
     request: &ResearchPathRequest,
 ) -> OrchResult<Map<String, Value>> {
-    let spec_id = crate::specs::safe_spec_id(&request.spec)?;
+    let spec_id = crate::specs::resolve_spec(root, &request.spec)?;
     let path = repo_path(root, spec_research_dir(root, &spec_id)?, "research_path")?;
     let mut created = false;
     if request.create {
@@ -789,7 +949,7 @@ pub(crate) fn research_path(
 }
 
 pub(crate) fn research_clean(root: &Path, spec: &str) -> OrchResult<Map<String, Value>> {
-    let spec_id = crate::specs::safe_spec_id(spec)?;
+    let spec_id = crate::specs::resolve_spec(root, spec)?;
     let _lock = runtime_lock(root)?;
     let (deleted, pruned) = clean_spec_research(root, &spec_id)?;
     let mut payload = json_ok();
@@ -809,6 +969,28 @@ pub(crate) fn close(root: &Path, request: &CloseRequest) -> OrchResult<Map<Strin
             ErrorCode::ActiveLeaseCloseRequiresForce,
         )
         .detail("lease_id", request.lease.clone()));
+    }
+    if lease.status().is_completed() && !lease.is_bud() && !request.force {
+        let plan = stage_plan_for_lease(root, &lease)?;
+        if !plan.pathspecs.is_empty() || !plan.safe_to_stage {
+            return Err(OrchError::coded(
+                "completed lease has unstaged changes; stage first or use --force",
+                ErrorCode::CloseHasUnstagedChanges,
+            )
+            .detail("lease_id", request.lease.clone())
+            .detail("pathspecs", string_values(plan.pathspecs.clone())));
+        }
+    }
+    if request.force && lease.status().is_active() && !lease.is_bud() {
+        if let Ok(task_path) = repo_path(root, lease.task_path(), "task_path") {
+            if let Ok(task) = load_task(task_path, root) {
+                let mut frontmatter = task.frontmatter().clone();
+                let meta = frontmatter.raw_mut();
+                insert(meta, "last_lease_id", request.lease.clone());
+                insert(meta, "force_closed_at", now_iso());
+                let _ = write_task_frontmatter(&task, frontmatter);
+            }
+        }
     }
     let (deleted, pruned) = close_lease_files(root, &lease)?;
     let mut payload = json_ok();
@@ -1155,7 +1337,7 @@ fn report_path_from_request(root: &Path, value: &str) -> OrchResult<ResolvedRepo
         }
         Err(error) if error.code == ErrorCode::PathOutsideRepo.as_str() => {
             let path = abs_clean_arg(Path::new(value))?;
-            if let Some((path, rel)) = external_orchid_report_path(&path)? {
+            if let Some((path, rel)) = external_orchid_report_path(root, &path)? {
                 return Ok(ResolvedReportPath { path, rel });
             }
             Err(error)
@@ -1187,17 +1369,29 @@ fn clean_path(path: &Path) -> PathBuf {
     out
 }
 
-fn external_orchid_report_path(path: &Path) -> OrchResult<Option<(PathBuf, String)>> {
+fn external_orchid_report_path(root: &Path, path: &Path) -> OrchResult<Option<(PathBuf, String)>> {
     let Ok(path) = fs::canonicalize(path) else {
         return Ok(None);
     };
-    if let Some(rel) = orchid_report_relpath(&path) {
-        return Ok(Some((path.clone(), rel)));
+    if let Some((external_root, rel)) = orchid_report_relpath(&path) {
+        if same_git_repository(root, &external_root) {
+            return Ok(Some((path.clone(), rel)));
+        }
     }
     Ok(None)
 }
 
-fn orchid_report_relpath(path: &Path) -> Option<String> {
+fn same_git_repository(a: &Path, b: &Path) -> bool {
+    match (
+        crate::gitstate::git_common_dir(a),
+        crate::gitstate::git_common_dir(b),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn orchid_report_relpath(path: &Path) -> Option<(PathBuf, String)> {
     for ancestor in path.ancestors() {
         if ancestor.file_name()? != "reports" {
             continue;
@@ -1209,7 +1403,7 @@ fn orchid_report_relpath(path: &Path) -> Option<String> {
         let root = orchid_dir.parent()?;
         let rel = path.strip_prefix(root).ok()?;
         if is_orchid_report_path(rel) {
-            return Some(path_to_string(rel));
+            return Some((root.to_path_buf(), path_to_string(rel)));
         }
     }
     None
@@ -1324,6 +1518,12 @@ pub(crate) fn lint(root: &Path) -> OrchResult<Map<String, Value>> {
         }
         if task.scope().is_empty() {
             errors.push(error_item(&key, "missing scope"));
+        } else if task
+            .scope()
+            .iter()
+            .any(|entry| crate::model::scope_entry_escapes_root(entry))
+        {
+            errors.push(error_item(&key, "scope escapes repo root"));
         }
         if !crate::model::VerificationMode::parse(task.verification_mode()).is_dispatchable() {
             errors.push(error_item(&key, "invalid verification_mode"));
@@ -1372,8 +1572,23 @@ fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value
                 .detail("agent_id", agent_id),
         );
     }
-    if matches.len() > 1 {
+    let active = matches
+        .iter()
+        .filter(|lease| lease.status().is_active())
+        .collect::<Vec<_>>();
+    if active.is_empty() {
         let lease_ids = matches
+            .iter()
+            .filter_map(|lease| lease.id().map(str::to_string))
+            .collect::<Vec<_>>();
+        return Err(
+            OrchError::coded("agent has no active lease", ErrorCode::AgentLeaseNotFound)
+                .detail("agent_id", agent_id)
+                .detail("terminal_leases", string_values(lease_ids)),
+        );
+    }
+    if active.len() > 1 {
+        let lease_ids = active
             .iter()
             .filter_map(|lease| lease.id().map(str::to_string))
             .collect::<Vec<_>>();
@@ -1383,7 +1598,7 @@ fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value
                 .detail("leases", string_values(lease_ids)),
         );
     }
-    let lease = &matches[0];
+    let lease = active[0];
     let mut payload = json_ok();
     insert(&mut payload, "agent_id", agent_id);
     insert(&mut payload, "lease_id", lease.id_value());
@@ -1447,7 +1662,7 @@ fn ensure_agent_id_available(
     let Some(agent_id) = agent_id.filter(|value| !value.is_empty()) else {
         return Ok(());
     };
-    for lease in all_leases(root)? {
+    for lease in active_leases(root)? {
         if lease.id() == except_lease {
             continue;
         }
@@ -1552,6 +1767,28 @@ fn nonzero_counts(counts: Map<String, Value>) -> Map<String, Value> {
         .into_iter()
         .filter(|(_, value)| value.as_i64().unwrap_or(0) != 0)
         .collect()
+}
+
+fn lease_in_selected_specs(lease: &LeaseRecord, selected_specs: &[String]) -> bool {
+    let task = lease.get_str("task").unwrap_or("");
+    let spec = task.split_once('/').map(|(spec, _)| spec).unwrap_or("");
+    !spec.is_empty() && selected_specs.iter().any(|selected| selected == spec)
+}
+
+fn effective_lease_scope(root: &Path, lease: &LeaseRecord) -> Vec<String> {
+    let mut scope = lease.scope();
+    if !lease.is_bud() {
+        if let Ok(task_path) = repo_path(root, lease.task_path(), "task_path") {
+            if let Ok(task) = load_task(task_path, root) {
+                for entry in task.scope() {
+                    if !scope.contains(&entry) {
+                        scope.push(entry);
+                    }
+                }
+            }
+        }
+    }
+    scope
 }
 
 fn specs_arg(specs: &[String]) -> Option<&[String]> {

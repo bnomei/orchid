@@ -1,3 +1,8 @@
+//! `.orchid/` runtime persistence: leases, packets, reports, and the command lock.
+//!
+//! Mutating commands acquire a short-lived [`RuntimeLock`]; stale locks from dead
+//! owners are reclaimed so a crash cannot wedge every later command.
+
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,9 +22,9 @@ use crate::paths::{
 };
 use crate::specs::safe_spec_id;
 
+/// RAII guard for the repo-wide runtime lock; released on drop.
 pub(crate) struct RuntimeLock {
     path: PathBuf,
-    root: PathBuf,
 }
 
 impl Drop for RuntimeLock {
@@ -28,10 +33,12 @@ impl Drop for RuntimeLock {
         if let Some(parent) = self.path.parent() {
             let _ = fs::remove_dir(parent);
         }
-        let _ = fs::remove_dir(orch_dir(&self.root));
     }
 }
 
+const LOCK_STALE_AFTER_SECONDS: i64 = 300;
+
+/// Acquire the repo-wide runtime lock, reclaiming a stale lock when the owner is gone.
 pub(crate) fn runtime_lock(root: &Path) -> OrchResult<RuntimeLock> {
     let lock_dir = repo_path(root, locks_dir(root), "lock_dir")?;
     fs::create_dir_all(&lock_dir)?;
@@ -44,27 +51,68 @@ pub(crate) fn runtime_lock(root: &Path) -> OrchResult<RuntimeLock> {
         );
     }
     let path = lock_dir.join("state.lock");
+    match try_acquire_lock(&path, root) {
+        Ok(lock) => Ok(lock),
+        Err(err) if err.code == ErrorCode::RuntimeLockBusy.as_str() => {
+            if lock_is_stale(&path) && reclaim_stale_lock(&path) {
+                return try_acquire_lock(&path, root);
+            }
+            Err(err)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn try_acquire_lock(path: &Path, root: &Path) -> OrchResult<RuntimeLock> {
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
-        .open(&path)
+        .open(path)
         .map_err(|err| {
             if err.kind() == std::io::ErrorKind::AlreadyExists {
                 OrchError::coded("runtime lock busy", ErrorCode::RuntimeLockBusy)
-                    .detail("lock", relpath(&path, root))
+                    .detail("lock", relpath(path, root))
             } else {
                 OrchError::from(err)
             }
         })?;
-    writeln!(
+    if let Err(err) = writeln!(
         file,
         "{}",
         serde_json::json!({"pid": std::process::id(), "created_at": now_iso()})
-    )?;
+    ) {
+        let _ = fs::remove_file(path);
+        return Err(OrchError::from(err));
+    }
     Ok(RuntimeLock {
-        path,
-        root: root.to_path_buf(),
+        path: path.to_path_buf(),
     })
+}
+
+fn lock_is_stale(path: &Path) -> bool {
+    lock_age_seconds(path).is_some_and(|age| age >= LOCK_STALE_AFTER_SECONDS)
+}
+
+fn lock_age_seconds(path: &Path) -> Option<i64> {
+    if let Ok(content) = fs::read_to_string(path) {
+        if let Ok(value) = serde_json::from_str::<Value>(content.trim()) {
+            if let Some(stamp) = parse_iso_datetime(value.get("created_at")) {
+                return Some((utc_now() - stamp).num_seconds());
+            }
+        }
+    }
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    Some(modified.elapsed().ok()?.as_secs() as i64)
+}
+
+fn reclaim_stale_lock(path: &Path) -> bool {
+    let claim = path.with_file_name(format!("state.lock.reclaiming.{}", std::process::id()));
+    if fs::rename(path, &claim).is_ok() {
+        let _ = fs::remove_file(&claim);
+        true
+    } else {
+        false
+    }
 }
 
 pub(crate) fn active_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
@@ -92,13 +140,26 @@ pub(crate) fn all_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
         let Some(expected_lease_id) = lease_path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
-        validate_lease_id(expected_lease_id)?;
+        if validate_lease_id(expected_lease_id).is_err() {
+            continue;
+        }
         let lease_path = repo_path(root, &lease_path, "lease_path")?;
-        let Ok(raw) = fs::read_to_string(&lease_path) else {
-            continue;
-        };
-        let Ok(Value::Object(mut data)) = serde_json::from_str::<Value>(&raw) else {
-            continue;
+        let raw = fs::read_to_string(&lease_path).map_err(|err| {
+            OrchError::coded("cannot read lease file", ErrorCode::CorruptLeaseFile)
+                .detail("lease_id", expected_lease_id)
+                .detail("error", err.to_string())
+        })?;
+        let Value::Object(mut data) = serde_json::from_str::<Value>(&raw).map_err(|err| {
+            OrchError::coded("cannot parse lease file", ErrorCode::CorruptLeaseFile)
+                .detail("lease_id", expected_lease_id)
+                .detail("error", err.to_string())
+        })?
+        else {
+            return Err(OrchError::coded(
+                "lease file is not a json object",
+                ErrorCode::CorruptLeaseFile,
+            )
+            .detail("lease_id", expected_lease_id));
         };
         bind_lease_record_id(&mut data, expected_lease_id)?;
         data.entry("_path".to_string())
@@ -159,7 +220,9 @@ pub(crate) fn save_lease(root: &Path, lease: &LeaseRecord) -> OrchResult<()> {
         leases_dir(root).join(format!("{lease_id}.json")),
         "lease_path",
     )?;
-    atomic_write_json(&path, lease.raw())
+    let mut data = lease.raw().clone();
+    data.retain(|key, _| !key.starts_with('_'));
+    atomic_write_json(&path, &data)
 }
 
 pub(crate) fn lease_stale(lease: &LeaseRecord, now: DateTime<Utc>, stale_after: TimeDelta) -> bool {
@@ -197,9 +260,6 @@ pub(crate) fn compact_lease(
 }
 
 pub(crate) fn report_path_for_lease(root: &Path, lease: &LeaseRecord) -> OrchResult<PathBuf> {
-    if let Some(report_path) = lease.report_path() {
-        return repo_path(root, report_path, "report_path");
-    }
     let lease_id = lease
         .id()
         .ok_or_else(|| OrchError::new("lease missing lease_id"))?;
@@ -261,11 +321,6 @@ pub(crate) fn close_lease_files(
         .ok_or_else(|| OrchError::new("lease missing lease_id"))?;
     validate_lease_id(lease_id)?;
     let mut deleted = Vec::new();
-    remove_if_exists(
-        &leases_dir(root).join(format!("{lease_id}.json")),
-        root,
-        &mut deleted,
-    )?;
 
     let packet_dir = packets_dir(root);
     if packet_dir.exists() {
@@ -294,6 +349,11 @@ pub(crate) fn close_lease_files(
     )?;
     remove_if_exists(
         &buds_dir(root).join(format!("{lease_id}.md")),
+        root,
+        &mut deleted,
+    )?;
+    remove_if_exists(
+        &leases_dir(root).join(format!("{lease_id}.json")),
         root,
         &mut deleted,
     )?;

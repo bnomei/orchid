@@ -1,5 +1,10 @@
 #![allow(dead_code)]
 
+//! Branch-local goal cycles: contract, durable state, evaluator integration, and keep/discard.
+//!
+//! Goals live under `.orchid/goals/<id>/` with `goal.toml`, cycle reports, and JSONL
+//! traces. Cycles advance through ready, running, evaluate, and terminal decisions.
+
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -23,6 +28,7 @@ const STATE_JSON: &str = "state.json";
 const RESULTS_JSONL: &str = "results.jsonl";
 const MEASUREMENTS_JSONL: &str = "measurements.jsonl";
 
+/// Sanitized identifier for a goal directory under `.orchid/goals/`.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct GoalId(String);
@@ -109,6 +115,14 @@ impl GoalInitRequest {
     ) -> OrchResult<Self> {
         let max_duration_raw = max_duration.into();
         let max_duration = parse_duration(&max_duration_raw)?;
+        if !minimum_delta.is_finite() {
+            return Err(OrchError::new("min-delta must be a finite number")
+                .detail("min_delta", minimum_delta.to_string()));
+        }
+        if max_iterations == 0 {
+            return Err(OrchError::new("max-iterations must be at least 1")
+                .detail("max_iterations", max_iterations.to_string()));
+        }
         Ok(Self {
             goal_id,
             goal: goal.into(),
@@ -151,6 +165,7 @@ impl GoalInitRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Durable goal configuration persisted as `goal.toml` under `.orchid/goals/<id>/`.
 pub(crate) struct GoalContract {
     pub(crate) goal_id: GoalId,
     pub(crate) goal: String,
@@ -211,6 +226,7 @@ impl GoalContract {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Per-goal cycle pointer and budget counters persisted as `state.json`.
 pub(crate) struct GoalState {
     pub(crate) status: GoalStatus,
     pub(crate) cycle: String,
@@ -362,6 +378,14 @@ impl GoalDirection {
             Self::LowerIsBetter => "lower-is-better",
             Self::HigherIsBetter => "higher-is-better",
             Self::Target => "target",
+        }
+    }
+
+    pub(crate) fn improvement(self, baseline: f64, candidate: f64) -> Option<f64> {
+        match self {
+            Self::HigherIsBetter => Some(candidate - baseline),
+            Self::LowerIsBetter => Some(baseline - candidate),
+            Self::Target => None,
         }
     }
 }
@@ -566,6 +590,23 @@ pub(crate) fn render_goal_prompt(
     }
 }
 
+pub(crate) fn render_goal_prompt_and_advance(
+    root: &Path,
+    contract: &GoalContract,
+    state: &GoalState,
+) -> OrchResult<String> {
+    let prompt = render_goal_prompt(root, contract, state)?;
+    if state.status == GoalStatus::Ready
+        && !report_path(root, &contract.goal_id, &state.cycle)?.exists()
+    {
+        let mut next = state.clone();
+        next.status = GoalStatus::Running;
+        next.updated_at = now_iso();
+        next.write(root, &contract.goal_id)?;
+    }
+    Ok(prompt)
+}
+
 pub(crate) fn render_no_goal_prompt() -> String {
     "# Goal Setup\n\nNo current goal is initialized.\n\nRun `orchid goal init` with `--goal`, `--metric`, `--direction`, `--min-delta`, `--hypothesis`, `--max-iterations`, and `--max-duration`.\n".to_string()
 }
@@ -730,7 +771,8 @@ fn evaluate_cycle_report(
         return Ok(next);
     }
 
-    let protected_changes = changed_protected_surfaces(root, contract)?;
+    let protected_changes =
+        changed_protected_surfaces(root, contract, next.baseline_commit.as_deref())?;
     if !protected_changes.is_empty() {
         next.status = GoalStatus::Blocked;
         next.budget_exhausted_reason = Some(format!(
@@ -755,13 +797,34 @@ fn evaluate_cycle_report(
         return Ok(next);
     }
 
-    let evaluator = run_evaluator(root, contract, state)?;
+    let mut evaluator = run_evaluator(root, contract, state)?;
     if evaluator.metric != contract.primary_metric {
         return Err(OrchError::new("evaluator metric mismatch")
             .detail("expected", contract.primary_metric.clone())
             .detail("actual", evaluator.metric));
     }
+    if evaluator.status != "pass" {
+        evaluator.recommendation = EvaluatorRecommendation::Blocked;
+        evaluator.reason = format!("evaluator status {}", evaluator.status);
+    }
     evaluator.append_measurement(root, &contract.goal_id, &state.cycle)?;
+
+    if evaluator.recommendation == EvaluatorRecommendation::Keep {
+        if let Some(baseline_value) = state.baseline_value {
+            if let Some(improvement) = contract
+                .direction
+                .improvement(baseline_value, evaluator.candidate)
+            {
+                if improvement < contract.minimum_delta {
+                    evaluator.recommendation = EvaluatorRecommendation::Discard;
+                    evaluator.reason = format!(
+                        "improvement {improvement} below min_delta {}",
+                        contract.minimum_delta
+                    );
+                }
+            }
+        }
+    }
 
     next.last_decision = Some(evaluator.recommendation);
     let recommendation = evaluator.recommendation;
@@ -776,6 +839,35 @@ fn evaluate_cycle_report(
     let result_baseline_commit = next.baseline_commit.clone();
     let result_next_hypothesis = next.next_hypothesis.clone();
     let result_reason = evaluator.reason.clone();
+
+    if recommendation == EvaluatorRecommendation::Keep {
+        let protected_changes =
+            changed_protected_surfaces(root, contract, next.baseline_commit.as_deref())?;
+        if !protected_changes.is_empty() {
+            next.status = GoalStatus::Blocked;
+            next.last_decision = Some(EvaluatorRecommendation::Blocked);
+            next.budget_exhausted_reason = Some(format!(
+                "protected surface changed: {}",
+                protected_changes.join(", ")
+            ));
+            let candidate_commit = gitstate::head_commit(root)?;
+            append_cycle_result(
+                root,
+                contract,
+                CycleResultTrace {
+                    cycle: &result_cycle,
+                    baseline_commit: result_baseline_commit.as_deref(),
+                    candidate_commit: candidate_commit.as_deref(),
+                    next_hypothesis: &result_next_hypothesis,
+                    decision: "blocked",
+                    evaluator: None,
+                    reason: next.budget_exhausted_reason.as_deref(),
+                },
+            )?;
+            next.write(root, &contract.goal_id)?;
+            return Ok(next);
+        }
+    }
 
     if recommendation == EvaluatorRecommendation::Keep {
         close_cycle(root, contract, &mut next, &evaluator)?;
@@ -840,6 +932,8 @@ fn run_evaluator(
                 .map(|value| value.to_string())
                 .unwrap_or_default(),
         )
+        .env("ORCHID_GOAL_DIRECTION", contract.direction.as_str())
+        .env("ORCHID_GOAL_MIN_DELTA", contract.minimum_delta.to_string())
         .output()
         .map_err(OrchError::from)?;
     if !output.status.success() {
@@ -865,13 +959,17 @@ fn evaluator_command(root: &Path, contract: &GoalContract) -> OrchResult<Command
     Ok(command)
 }
 
-fn changed_protected_surfaces(root: &Path, contract: &GoalContract) -> OrchResult<Vec<String>> {
+fn changed_protected_surfaces(
+    root: &Path,
+    contract: &GoalContract,
+    baseline: Option<&str>,
+) -> OrchResult<Vec<String>> {
     let scopes: Vec<String> = contract
         .protected_surfaces
         .iter()
         .map(|path| path_to_string(path))
         .collect();
-    gitstate::changed_protected_paths(root, &scopes)
+    gitstate::changed_protected_paths(root, &scopes, baseline)
 }
 
 fn close_cycle(
@@ -902,8 +1000,27 @@ fn keep_cycle(
     state: &mut GoalState,
     evaluator: &EvaluatorResult,
 ) -> OrchResult<()> {
-    let _staged = gitstate::stage_goal_candidates(root)?;
-    let commit = gitstate::commit_goal_keep(root, contract.goal_id.as_str(), &state.cycle)?;
+    let scope: Vec<String> = contract
+        .scope
+        .iter()
+        .map(|path| path_to_string(path))
+        .collect();
+    let staged_out_of_scope = gitstate::staged_paths_outside_scope(root, &scope)?;
+    if !staged_out_of_scope.is_empty() {
+        return Err(
+            OrchError::new("goal has staged paths outside scope").detail(
+                "paths",
+                Value::Array(staged_out_of_scope.into_iter().map(Value::String).collect()),
+            ),
+        );
+    }
+    let staged = gitstate::stage_goal_candidates(root, &scope)?;
+    let commit = if staged.is_empty() {
+        gitstate::head_commit(root)?
+            .ok_or_else(|| OrchError::new("goal keep requires a git head commit"))?
+    } else {
+        gitstate::commit_goal_keep(root, contract.goal_id.as_str(), &state.cycle)?
+    };
     state.baseline_commit = Some(commit.clone());
     state.baseline_value = Some(evaluator.candidate);
     state.best_commit = Some(commit);

@@ -1,6 +1,11 @@
+//! Priority state machine that decides the next coordinator action from lease/task snapshots.
+//!
+//! [`decide_next`] ranks recover, validate, stage, cleanup, dispatch, and wait phases
+//! so `orchid next` can drive the harness loop without bespoke coordinator logic.
+
 use serde_json::{Map, Value};
 
-use crate::model::{CompactLease, StagePlan};
+use crate::model::{CompactLease, LeaseMode, StagePlan};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ReportReady {
@@ -53,6 +58,7 @@ pub(crate) struct ReadyTask {
     pub(crate) task: String,
     pub(crate) scope: Vec<String>,
     pub(crate) verify: String,
+    pub(crate) fanout_is_serial: bool,
     pub(crate) worker_reasoning_effort: String,
     pub(crate) worker_model: Option<String>,
 }
@@ -66,6 +72,12 @@ impl ReadyTask {
             Value::Array(self.scope.iter().cloned().map(Value::String).collect()),
         );
         map.insert("verify".to_string(), Value::String(self.verify.clone()));
+        if self.fanout_is_serial {
+            map.insert(
+                "fanout_policy".to_string(),
+                Value::String("serial".to_string()),
+            );
+        }
         map.insert(
             "worker_reasoning_effort".to_string(),
             Value::String(self.worker_reasoning_effort.clone()),
@@ -122,6 +134,7 @@ impl Phase {
     }
 }
 
+/// Snapshot of leases, ready tasks, and stage/cleanup candidates fed into planning.
 pub(crate) struct NextInput {
     pub(crate) stale: Vec<CompactLease>,
     pub(crate) reports_ready: Vec<ReportReady>,
@@ -135,6 +148,7 @@ pub(crate) struct NextInput {
     pub(crate) explain: bool,
 }
 
+/// Planned coordinator phase plus suggested CLI command(s) and explanatory details.
 pub(crate) struct NextDecision {
     pub(crate) phase: Phase,
     pub(crate) commands: Vec<Vec<String>>,
@@ -177,6 +191,7 @@ impl NextDecision {
     }
 }
 
+/// Choose the highest-priority orchestration phase and command sequence for `next`.
 pub(crate) fn decide_next(input: NextInput) -> NextDecision {
     let NextInput {
         stale,
@@ -222,15 +237,35 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
             details,
         };
     }
-    if !active.is_empty() {
+    let active_has_serial = active
+        .iter()
+        .any(|lease| lease.mode == LeaseMode::Serial.as_str());
+    let parallel_ready = ready.iter().find(|task| !task.fanout_is_serial);
+    if !active.is_empty() && !active_has_serial {
+        let Some(first) = parallel_ready else {
+            return wait_for_active(active, ready, visible_blocked);
+        };
+        let spec = first.spec.clone();
+        let id = first.id.clone();
         let mut details = Map::new();
         details.insert("active".to_string(), compact_array(active));
+        details.insert("ready".to_string(), ready_array(ready));
         insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
         return NextDecision {
-            phase: Phase::Wait,
-            commands: Vec::new(),
+            phase: Phase::Dispatch,
+            commands: vec![vec![
+                "lease".to_string(),
+                spec,
+                id,
+                "--owner".to_string(),
+                "worker:<agent-id>".to_string(),
+                "--allow-parallel".to_string(),
+            ]],
             details,
         };
+    }
+    if !active.is_empty() {
+        return wait_for_active(active, ready, visible_blocked);
     }
 
     let stage_candidates: Vec<StagePlan> = stage
@@ -273,20 +308,22 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
     }
     if !ready.is_empty() {
         let first = &ready[0];
-        let spec = first.spec.clone();
-        let id = first.id.clone();
+        let mut command = vec![
+            "lease".to_string(),
+            first.spec.clone(),
+            first.id.clone(),
+            "--owner".to_string(),
+            "worker:<agent-id>".to_string(),
+        ];
+        if first.fanout_is_serial {
+            command.push("--serial".to_string());
+        }
         let mut details = Map::new();
         details.insert("ready".to_string(), ready_array(ready));
         insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
         return NextDecision {
             phase: Phase::Dispatch,
-            commands: vec![vec![
-                "lease".to_string(),
-                spec,
-                id,
-                "--owner".to_string(),
-                "worker:<agent-id>".to_string(),
-            ]],
+            commands: vec![command],
             details,
         };
     }
@@ -305,6 +342,22 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
     insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
     NextDecision {
         phase,
+        commands: Vec::new(),
+        details,
+    }
+}
+
+fn wait_for_active(
+    active: Vec<CompactLease>,
+    ready: Vec<ReadyTask>,
+    visible_blocked: Vec<BlockedTask>,
+) -> NextDecision {
+    let mut details = Map::new();
+    details.insert("active".to_string(), compact_array(active));
+    insert_non_empty(&mut details, "ready", ready_array(ready));
+    insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
+    NextDecision {
+        phase: Phase::Wait,
         commands: Vec::new(),
         details,
     }
@@ -382,6 +435,10 @@ mod tests {
     }
 
     fn compact_lease(lease_id: &str) -> CompactLease {
+        compact_lease_with_mode(lease_id, LeaseMode::Single.as_str())
+    }
+
+    fn compact_lease_with_mode(lease_id: &str, mode: &str) -> CompactLease {
         CompactLease {
             id: Value::String(lease_id.to_string()),
             task: Value::String("example/T001".to_string()),
@@ -390,7 +447,7 @@ mod tests {
             agent_id: None,
             worker_reasoning_effort: "medium".to_string(),
             worker_model: None,
-            mode: "single".to_string(),
+            mode: mode.to_string(),
             age: 0,
             stale: false,
         }
@@ -420,8 +477,16 @@ mod tests {
             task: "example/T001".to_string(),
             scope: vec!["src/feature/".to_string()],
             verify: "validator".to_string(),
+            fanout_is_serial: false,
             worker_reasoning_effort: "medium".to_string(),
             worker_model: None,
+        }
+    }
+
+    fn serial_ready_task() -> ReadyTask {
+        ReadyTask {
+            fanout_is_serial: true,
+            ..ready_task()
         }
     }
 
@@ -436,6 +501,7 @@ mod tests {
         StagePlan {
             lease_id: "l_stage".to_string(),
             task: "example/T001".to_string(),
+            git_available: true,
             safe_to_stage,
             pathspecs: pathspecs.into_iter().map(str::to_string).collect(),
             records: Vec::new(),
@@ -482,13 +548,38 @@ mod tests {
                 }),
             ),
             (
-                "active/wait",
-                Phase::Wait,
+                "active-ready/dispatch-parallel",
+                Phase::Dispatch,
                 Box::new(|input| {
                     input.active = vec![compact_lease("l_active")];
                     input.stage = vec![stage_plan(true, vec!["src/planner.rs"])];
                     input.cleanup = vec![cleanup_candidate()];
                     input.ready = vec![ready_task()];
+                    input.blocked = vec![blocked_task()];
+                    input.counts = done_counts();
+                }),
+            ),
+            (
+                "serial-active/wait",
+                Phase::Wait,
+                Box::new(|input| {
+                    input.active = vec![compact_lease_with_mode(
+                        "l_serial",
+                        LeaseMode::Serial.as_str(),
+                    )];
+                    input.stage = vec![stage_plan(true, vec!["src/planner.rs"])];
+                    input.cleanup = vec![cleanup_candidate()];
+                    input.ready = vec![ready_task()];
+                    input.blocked = vec![blocked_task()];
+                    input.counts = done_counts();
+                }),
+            ),
+            (
+                "serial-fanout-ready/wait",
+                Phase::Wait,
+                Box::new(|input| {
+                    input.active = vec![compact_lease("l_active")];
+                    input.ready = vec![serial_ready_task()];
                     input.blocked = vec![blocked_task()];
                     input.counts = done_counts();
                 }),

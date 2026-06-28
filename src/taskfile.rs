@@ -1,3 +1,8 @@
+//! Markdown task files with TOML frontmatter: load, mutate, and round-trip write-back.
+//!
+//! Preserves field order, inline array style, and typed values so `complete` and
+//! `block` can update task state without corrupting hand-authored frontmatter.
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -35,6 +40,7 @@ const TASK_FIELD_ORDER: &[&str] = &[
     "report",
 ];
 
+/// Parsed TOML frontmatter for a task file, including per-field array style metadata.
 #[derive(Debug, Clone)]
 pub(crate) struct TaskFrontmatter {
     raw: Map<String, Value>,
@@ -124,6 +130,7 @@ enum ArrayStyle {
 }
 
 #[derive(Debug, Clone)]
+/// Loaded task file with parsed frontmatter and on-disk path under `specs/<id>/tasks/`.
 pub(crate) struct Task {
     pub(crate) path: PathBuf,
     pub(crate) spec_id: String,
@@ -275,11 +282,38 @@ pub(crate) fn quote_toml_string(value: &str) -> String {
     serde_json::to_string(value).expect("string encoding")
 }
 
+fn toml_key_repr(key: &str) -> String {
+    if !key.is_empty()
+        && key
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        key.to_string()
+    } else {
+        quote_toml_string(key)
+    }
+}
+
 fn dump_toml_value(value: &Value, array_style: Option<ArrayStyle>) -> OrchResult<String> {
     match value {
         Value::String(raw) => Ok(quote_toml_string(raw)),
         Value::Bool(raw) => Ok(if *raw { "true" } else { "false" }.to_string()),
-        Value::Number(raw) if raw.is_i64() || raw.is_u64() => Ok(raw.to_string()),
+        Value::Number(raw) => Ok(raw.to_string()),
+        Value::Object(map) => {
+            let mut parts = Vec::with_capacity(map.len());
+            for (key, item) in map {
+                parts.push(format!(
+                    "{} = {}",
+                    toml_key_repr(key),
+                    dump_toml_value(item, Some(ArrayStyle::Inline))?
+                ));
+            }
+            if parts.is_empty() {
+                Ok("{}".to_string())
+            } else {
+                Ok(format!("{{ {} }}", parts.join(", ")))
+            }
+        }
         Value::Array(items) => {
             if items.is_empty() {
                 if array_style == Some(ArrayStyle::Multiline) {
@@ -290,8 +324,7 @@ fn dump_toml_value(value: &Value, array_style: Option<ArrayStyle>) -> OrchResult
 
             let mut dumped = Vec::with_capacity(items.len());
             for item in items {
-                let stringified = value_to_string(item).unwrap_or_default();
-                dumped.push(quote_toml_string(&stringified));
+                dumped.push(dump_toml_value(item, Some(ArrayStyle::Inline))?);
             }
 
             if array_style == Some(ArrayStyle::Inline) {
@@ -305,8 +338,6 @@ fn dump_toml_value(value: &Value, array_style: Option<ArrayStyle>) -> OrchResult
             Ok(format!("[\n{}\n]", lines.join("\n")))
         }
         Value::Null => Ok(quote_toml_string("")),
-        other => Err(OrchError::new("unsupported frontmatter value type")
-            .detail("type", value_type_name(other))),
     }
 }
 
@@ -380,17 +411,6 @@ fn toml_to_json(value: toml::Value) -> Value {
     }
 }
 
-fn value_type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "NoneType",
-        Value::Bool(_) => "bool",
-        Value::Number(_) => "number",
-        Value::String(_) => "str",
-        Value::Array(_) => "list",
-        Value::Object(_) => "dict",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,6 +435,45 @@ mod tests {
         assert_eq!(parsed["id"], "T900");
         assert_eq!(parsed["scope"], json!(["src/orchid"]));
         assert_eq!(body, "\n## Context\n");
+    }
+
+    #[test]
+    fn task_frontmatter_round_trips_float_and_nested_table_fields() {
+        let mut meta = Map::new();
+        meta.insert("id".to_string(), json!("T900"));
+        meta.insert("status".to_string(), json!("todo"));
+        meta.insert("priority".to_string(), json!(0.5));
+        meta.insert(
+            "meta".to_string(),
+            json!({ "owner": "x", "owner.name": "alice", "team name": "search" }),
+        );
+
+        let dumped = dump_frontmatter(&meta).unwrap();
+        assert!(dumped.contains("\"owner.name\" = \"alice\""));
+        assert!(dumped.contains("\"team name\" = \"search\""));
+        let text = dumped + "\n## Context\n";
+        let (parsed, _) = split_frontmatter(&text, Path::new("task.md")).unwrap();
+
+        assert_eq!(parsed["priority"], json!(0.5));
+        assert_eq!(parsed["meta"]["owner"], "x");
+        assert_eq!(parsed["meta"]["owner.name"], "alice");
+        assert_eq!(parsed["meta"]["team name"], "search");
+    }
+
+    #[test]
+    fn task_frontmatter_round_trips_typed_and_structured_array_items() {
+        let mut meta = Map::new();
+        meta.insert("id".to_string(), json!("T900"));
+        meta.insert("status".to_string(), json!("todo"));
+        meta.insert("covers".to_string(), json!([{ "id": "T1" }]));
+        meta.insert("extra".to_string(), json!([1, 2]));
+
+        let dumped = dump_frontmatter(&meta).unwrap();
+        let text = dumped + "\n## Context\n";
+        let (parsed, _) = split_frontmatter(&text, Path::new("task.md")).unwrap();
+
+        assert_eq!(parsed["covers"], json!([{ "id": "T1" }]));
+        assert_eq!(parsed["extra"], json!([1, 2]));
     }
 
     #[test]

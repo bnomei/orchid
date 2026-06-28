@@ -1,5 +1,10 @@
+//! Git porcelain integration for lease attribution, touched-file checks, and stage plans.
+//!
+//! Invokes the `git` CLI from the repo root; returns empty results when Git is
+//! unavailable so callers can surface `git: false` instead of aborting.
+
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::{Map, Value};
@@ -126,6 +131,20 @@ pub(crate) fn head_commit(root: &Path) -> OrchResult<Option<String>> {
 
 fn git_available(root: &Path) -> bool {
     git(root, &["rev-parse", "--show-toplevel"], true).is_ok()
+}
+
+pub(crate) fn git_common_dir(root: &Path) -> Option<PathBuf> {
+    let raw = git_text(root, &["rev-parse", "--git-common-dir"], true).ok()?;
+    if raw.is_empty() {
+        return None;
+    }
+    let candidate = Path::new(&raw);
+    let absolute = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        root.join(candidate)
+    };
+    std::fs::canonicalize(&absolute).ok()
 }
 
 fn split_z(data: &[u8]) -> Vec<String> {
@@ -510,21 +529,51 @@ pub(crate) fn visible_changed_paths(root: &Path) -> OrchResult<Vec<String>> {
     Ok(changed_paths(&git_status_data(root)?))
 }
 
+pub(crate) fn changed_paths_since(root: &Path, baseline: &str) -> OrchResult<Vec<String>> {
+    if !git_available(root) {
+        return Ok(Vec::new());
+    }
+    let out = git(
+        root,
+        &[
+            "diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            baseline,
+            "HEAD",
+        ],
+        true,
+    )?;
+    Ok(split_z(&out))
+}
+
 pub(crate) fn changed_protected_paths(
     root: &Path,
     protected_surfaces: &[String],
+    baseline: Option<&str>,
 ) -> OrchResult<Vec<String>> {
     let mut changed: Vec<String> = visible_changed_paths(root)?
         .into_iter()
         .filter(|path| path_in_scope(path, protected_surfaces))
         .collect();
+    if let Some(baseline) = baseline {
+        changed.extend(
+            changed_paths_since(root, baseline)?
+                .into_iter()
+                .filter(|path| path_in_scope(path, protected_surfaces)),
+        );
+    }
     changed.sort();
     changed.dedup();
     Ok(changed)
 }
 
-pub(crate) fn stage_goal_candidates(root: &Path) -> OrchResult<Vec<String>> {
-    let candidates = visible_changed_paths(root)?;
+pub(crate) fn stage_goal_candidates(root: &Path, scope: &[String]) -> OrchResult<Vec<String>> {
+    let mut candidates = visible_changed_paths(root)?;
+    if !scope.is_empty() {
+        candidates.retain(|path| path_in_scope(path, scope));
+    }
     if candidates.is_empty() {
         return Ok(candidates);
     }
@@ -532,6 +581,24 @@ pub(crate) fn stage_goal_candidates(root: &Path) -> OrchResult<Vec<String>> {
     args.extend(candidates.iter().map(|path| format!(":(literal){path}")));
     git_owned(root, &args, true)?;
     Ok(candidates)
+}
+
+pub(crate) fn staged_paths_outside_scope(root: &Path, scope: &[String]) -> OrchResult<Vec<String>> {
+    if scope.is_empty() || !git_available(root) {
+        return Ok(Vec::new());
+    }
+    let mut paths = BTreeSet::new();
+    for record in git_status_records(root)? {
+        if !record.staged {
+            continue;
+        }
+        for path in record.visible_paths() {
+            if !path_in_scope(&path, scope) {
+                paths.insert(path);
+            }
+        }
+    }
+    Ok(paths.into_iter().collect())
 }
 
 pub(crate) fn commit_goal_keep(root: &Path, goal_id: &str, cycle: &str) -> OrchResult<String> {
@@ -553,12 +620,17 @@ pub(crate) fn clean_goal_candidates(root: &Path) -> OrchResult<()> {
     Ok(())
 }
 
+/// List repo-relative paths changed during an active or completed lease scope.
 pub(crate) fn touched_for_lease(
     root: &Path,
     lease: &LeaseRecord,
 ) -> OrchResult<Map<String, Value>> {
     let status = git_status_data(root)?;
+    let git_available = status.get("git").and_then(Value::as_bool).unwrap_or(false);
     let baseline: BTreeSet<String> = lease.baseline_changed().into_iter().collect();
+    let completed_window: Option<BTreeSet<String>> = lease
+        .completed_changed()
+        .map(|paths| paths.into_iter().collect());
     let records = git_status_records_from_status(&status);
     let scope = lease.scope();
     let task_path = lease.task_path();
@@ -583,6 +655,12 @@ pub(crate) fn touched_for_lease(
             }
             ambiguous_records.push(record);
             continue;
+        }
+
+        if let Some(window) = &completed_window {
+            if !paths.iter().any(|path| window.contains(path)) {
+                continue;
+            }
         }
 
         changed_records.push(record.clone());
@@ -644,9 +722,14 @@ pub(crate) fn touched_for_lease(
     if !out_of_scope.is_empty() || !ambiguous.is_empty() {
         map.insert("safe_to_stage".to_string(), Value::Bool(false));
     }
+    if !git_available {
+        map.insert("git".to_string(), Value::Bool(false));
+        map.insert("safe_to_stage".to_string(), Value::Bool(false));
+    }
     Ok(map)
 }
 
+/// Build a [`StagePlan`] attributing in-scope edits inside the lease window.
 pub(crate) fn stage_plan_for_lease(root: &Path, lease: &LeaseRecord) -> OrchResult<StagePlan> {
     let data = touched_for_lease(root, lease)?;
     let pathspecs: BTreeSet<String> = string_list(data.get("stage"))
@@ -669,6 +752,7 @@ pub(crate) fn stage_plan_for_lease(root: &Path, lease: &LeaseRecord) -> OrchResu
     Ok(StagePlan {
         lease_id: lease.id().unwrap_or("").to_string(),
         task: lease.get_str("task").unwrap_or("").to_string(),
+        git_available: data.get("git").and_then(Value::as_bool).unwrap_or(true),
         safe_to_stage: data
             .get("safe_to_stage")
             .and_then(Value::as_bool)

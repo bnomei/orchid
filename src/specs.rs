@@ -1,3 +1,8 @@
+//! Spec discovery, task indexing, dependency resolution, and ready-task selection.
+//!
+//! Loads `specs/<id>/` trees, filters inactive specs, and decides which tasks are
+//! dispatchable given scope, fanout policy, and cross-spec dependencies.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -102,6 +107,10 @@ fn resolve_spec_selector(root: &Path, specs: &Path, selector: &str) -> OrchResul
         .into_iter()
         .filter(|candidate| numeric_spec_selector_matches(candidate, &name))
         .collect();
+    let exact_dir = repo_path(root, specs.join(&name), "spec_dir")?;
+    if exact_dir.is_dir() {
+        return Ok(name);
+    }
     match matches.as_slice() {
         [resolved] => Ok(resolved.clone()),
         [] => Err(OrchError::coded("spec not found", ErrorCode::SpecNotFound).detail("spec", name)),
@@ -114,6 +123,11 @@ fn resolve_spec_selector(root: &Path, specs: &Path, selector: &str) -> OrchResul
                 ),
         ),
     }
+}
+
+pub(crate) fn resolve_spec(root: &Path, selector: &str) -> OrchResult<String> {
+    let specs = repo_path(root, root.join("specs"), "specs_dir")?;
+    resolve_spec_selector(root, &specs, selector)
 }
 
 fn resolve_spec_selectors(root: &Path, spec_names: &[String]) -> OrchResult<Vec<String>> {
@@ -306,6 +320,22 @@ pub(crate) fn task_key(task: &Task) -> String {
     format!("{}/{}", task.spec_id, task.id())
 }
 
+fn safe_task_id(task_id: &str) -> OrchResult<&str> {
+    let valid = !task_id.is_empty()
+        && task_id != "."
+        && task_id != ".."
+        && !task_id.contains('/')
+        && !task_id.contains('\\')
+        && !task_id.contains("..");
+    if !valid {
+        return Err(
+            OrchError::coded("invalid task id", ErrorCode::InvalidTaskId)
+                .detail("task_id", task_id),
+        );
+    }
+    Ok(task_id)
+}
+
 pub(crate) fn resolve_task(root: &Path, target: &str, task_id: Option<&str>) -> OrchResult<Task> {
     let target_path = Path::new(target);
     if task_id.is_none() && target_path.extension().and_then(|s| s.to_str()) == Some("md") {
@@ -314,7 +344,7 @@ pub(crate) fn resolve_task(root: &Path, target: &str, task_id: Option<&str>) -> 
     if task_id.is_none() && target.contains('/') {
         let mut parts = target.splitn(2, '/');
         let spec = parts.next().unwrap_or("").to_string();
-        let task = parts.next().unwrap_or("");
+        let task = safe_task_id(parts.next().unwrap_or(""))?;
         let resolved = resolve_spec_selectors(root, &[spec])?;
         return load_task(
             root.join("specs")
@@ -330,6 +360,7 @@ pub(crate) fn resolve_task(root: &Path, target: &str, task_id: Option<&str>) -> 
             ErrorCode::TaskIdRequired,
         ));
     };
+    let task_id = safe_task_id(task_id)?;
     let resolved = resolve_spec_selectors(root, &[target.to_string()])?;
     load_task(
         root.join("specs")
@@ -358,6 +389,7 @@ pub(crate) fn task_by_ref<'a>(
         .find(|task| task.spec_id == spec && task.id() == task_id)
 }
 
+/// Return dispatchable tasks plus blocked entries and lint messages for `ready`.
 pub(crate) fn ready_tasks(
     root: &Path,
     spec_names: Option<&[String]>,
@@ -365,6 +397,7 @@ pub(crate) fn ready_tasks(
     active: Option<&[LeaseRecord]>,
 ) -> OrchResult<ReadyTasksResult> {
     let (tasks, selected_specs) = select_tasks(root, spec_names, all_open)?;
+    let all_tasks = load_tasks(root, None)?;
     let active = active.unwrap_or(&[]);
     let mut ready = Vec::new();
     let mut blocked = Vec::new();
@@ -386,7 +419,10 @@ pub(crate) fn ready_tasks(
             reason = Some("invalid worker_model".to_string());
         } else {
             for dep in task.depends() {
-                match task_by_ref(&tasks, &task.spec_id, &dep) {
+                if dep == "-" {
+                    continue;
+                }
+                match task_by_ref(&all_tasks, &task.spec_id, &dep) {
                     None => {
                         reason = Some(format!("missing dependency:{dep}"));
                         break;
@@ -492,8 +528,14 @@ mod tests {
             "src/feature_extra/file.rs",
             &["src/feature".to_string()]
         ));
+        assert!(path_in_scope("src/main.rs", &[".".to_string()]));
+        assert!(path_in_scope("src/main.rs", &["/".to_string()]));
         assert!(scopes_overlap(
             &["src/feature".to_string()],
+            &["src/feature/file.rs".to_string()]
+        ));
+        assert!(scopes_overlap(
+            &[".".to_string()],
             &["src/feature/file.rs".to_string()]
         ));
         assert!(!scopes_overlap(

@@ -1,3 +1,8 @@
+//! CLI argument parsing and dispatch into orchestration command handlers.
+//!
+//! Subcommands emit compact JSON ACKs by default; goal-related commands may render
+//! Markdown prompts for agent-facing workflows.
+
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -397,6 +402,8 @@ struct BlockArgs {
     reason: String,
 }
 
+/// Parse CLI arguments, resolve the repository root, run the requested subcommand, and
+/// print JSON or Markdown output. Returns a process exit code: `0` on success, `1` on failure.
 pub fn run() -> i32 {
     let cli = Cli::parse();
     let root = match root_from_arg(cli.root.as_deref()) {
@@ -520,7 +527,7 @@ fn cmd_goal_init(root: &Path, args: &GoalInitArgs) -> OrchResult<String> {
 
 fn cmd_goal_current(root: &Path) -> OrchResult<String> {
     match goal::current_goal(root)? {
-        Some((contract, state)) => goal::render_goal_prompt(root, &contract, &state),
+        Some((contract, state)) => goal::render_goal_prompt_and_advance(root, &contract, &state),
         None => Ok(goal::render_no_goal_prompt()),
     }
 }
