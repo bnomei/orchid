@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2026-06-29
+
+### Added
+
+- Added broader regression coverage for lease lifecycle transitions, goal
+  cycles, runtime locks, spec research cleanup, stage planning, scope
+  validation, and planner dispatch.
+
+### Changed
+
+- Refined `next`, `ready`, lease, and research command behavior for serial
+  fanout, scope-disjoint parallel work, stale leases with reports, exact numeric
+  spec selectors, and selected-spec cleanup/stage routing.
+- Updated dependency versions in the lockfile.
+
+### Fixed
+
+- Hardened scope and path validation for leases, task IDs, bud instruction
+  files, report paths, `.orchid` root discovery, and Git stage planning.
+- Fixed goal-cycle decisions around evaluator status, min-delta keep gates,
+  protected-surface rechecks, clean-tree retries, baseline capture, and
+  keep/discard lifecycle transitions.
+- Fixed lease lifecycle edge cases including terminal release/heartbeat,
+  completed-task close guards, active-agent reuse, stale runtime lock recovery,
+  packet refresh on attach, and task completion rollback on failure.
+- Preserved TOML frontmatter arrays, floats, nested tables, and Windows test
+  compatibility across the new hardening paths.
+
 ## [0.4.0] - 2026-06-17
 
 ### Added
