@@ -241,8 +241,10 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
         .iter()
         .any(|lease| lease.mode == LeaseMode::Serial.as_str());
     let parallel_ready = ready.iter().find(|task| !task.fanout_is_serial);
-    if !active.is_empty() && parallel_ready.is_some() && !active_has_serial {
-        let first = parallel_ready.unwrap();
+    if !active.is_empty() && !active_has_serial {
+        let Some(first) = parallel_ready else {
+            return wait_for_active(active, ready, visible_blocked);
+        };
         let spec = first.spec.clone();
         let id = first.id.clone();
         let mut details = Map::new();
@@ -263,15 +265,7 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
         };
     }
     if !active.is_empty() {
-        let mut details = Map::new();
-        details.insert("active".to_string(), compact_array(active));
-        insert_non_empty(&mut details, "ready", ready_array(ready));
-        insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
-        return NextDecision {
-            phase: Phase::Wait,
-            commands: Vec::new(),
-            details,
-        };
+        return wait_for_active(active, ready, visible_blocked);
     }
 
     let stage_candidates: Vec<StagePlan> = stage
@@ -348,6 +342,22 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
     insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
     NextDecision {
         phase,
+        commands: Vec::new(),
+        details,
+    }
+}
+
+fn wait_for_active(
+    active: Vec<CompactLease>,
+    ready: Vec<ReadyTask>,
+    visible_blocked: Vec<BlockedTask>,
+) -> NextDecision {
+    let mut details = Map::new();
+    details.insert("active".to_string(), compact_array(active));
+    insert_non_empty(&mut details, "ready", ready_array(ready));
+    insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
+    NextDecision {
+        phase: Phase::Wait,
         commands: Vec::new(),
         details,
     }
