@@ -314,20 +314,22 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
     }
     if !ready.is_empty() {
         let first = &ready[0];
-        let spec = first.spec.clone();
-        let id = first.id.clone();
+        let mut command = vec![
+            "lease".to_string(),
+            first.spec.clone(),
+            first.id.clone(),
+            "--owner".to_string(),
+            "worker:<agent-id>".to_string(),
+        ];
+        if first.fanout_is_serial {
+            command.push("--serial".to_string());
+        }
         let mut details = Map::new();
         details.insert("ready".to_string(), ready_array(ready));
         insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
         return NextDecision {
             phase: Phase::Dispatch,
-            commands: vec![vec![
-                "lease".to_string(),
-                spec,
-                id,
-                "--owner".to_string(),
-                "worker:<agent-id>".to_string(),
-            ]],
+            commands: vec![command],
             details,
         };
     }

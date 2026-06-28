@@ -107,15 +107,13 @@ fn resolve_spec_selector(root: &Path, specs: &Path, selector: &str) -> OrchResul
         .into_iter()
         .filter(|candidate| numeric_spec_selector_matches(candidate, &name))
         .collect();
+    let exact_dir = repo_path(root, specs.join(&name), "spec_dir")?;
+    if exact_dir.is_dir() {
+        return Ok(name);
+    }
     match matches.as_slice() {
         [resolved] => Ok(resolved.clone()),
-        [] => {
-            let exact_dir = repo_path(root, specs.join(&name), "spec_dir")?;
-            if exact_dir.is_dir() {
-                return Ok(name);
-            }
-            Err(OrchError::coded("spec not found", ErrorCode::SpecNotFound).detail("spec", name))
-        }
+        [] => Err(OrchError::coded("spec not found", ErrorCode::SpecNotFound).detail("spec", name)),
         _ => Err(
             OrchError::coded("spec selector ambiguous", ErrorCode::SpecSelectorAmbiguous)
                 .detail("spec", name)

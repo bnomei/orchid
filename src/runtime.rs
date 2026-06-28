@@ -76,11 +76,14 @@ fn try_acquire_lock(path: &Path, root: &Path) -> OrchResult<RuntimeLock> {
                 OrchError::from(err)
             }
         })?;
-    writeln!(
+    if let Err(err) = writeln!(
         file,
         "{}",
         serde_json::json!({"pid": std::process::id(), "created_at": now_iso()})
-    )?;
+    ) {
+        let _ = fs::remove_file(path);
+        return Err(OrchError::from(err));
+    }
     Ok(RuntimeLock {
         path: path.to_path_buf(),
     })

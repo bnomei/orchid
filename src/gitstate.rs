@@ -583,6 +583,24 @@ pub(crate) fn stage_goal_candidates(root: &Path, scope: &[String]) -> OrchResult
     Ok(candidates)
 }
 
+pub(crate) fn staged_paths_outside_scope(root: &Path, scope: &[String]) -> OrchResult<Vec<String>> {
+    if scope.is_empty() || !git_available(root) {
+        return Ok(Vec::new());
+    }
+    let mut paths = BTreeSet::new();
+    for record in git_status_records(root)? {
+        if !record.staged {
+            continue;
+        }
+        for path in record.visible_paths() {
+            if !path_in_scope(&path, scope) {
+                paths.insert(path);
+            }
+        }
+    }
+    Ok(paths.into_iter().collect())
+}
+
 pub(crate) fn commit_goal_keep(root: &Path, goal_id: &str, cycle: &str) -> OrchResult<String> {
     git(
         root,

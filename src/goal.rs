@@ -1005,6 +1005,15 @@ fn keep_cycle(
         .iter()
         .map(|path| path_to_string(path))
         .collect();
+    let staged_out_of_scope = gitstate::staged_paths_outside_scope(root, &scope)?;
+    if !staged_out_of_scope.is_empty() {
+        return Err(
+            OrchError::new("goal has staged paths outside scope").detail(
+                "paths",
+                Value::Array(staged_out_of_scope.into_iter().map(Value::String).collect()),
+            ),
+        );
+    }
     let staged = gitstate::stage_goal_candidates(root, &scope)?;
     let commit = if staged.is_empty() {
         gitstate::head_commit(root)?

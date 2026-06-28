@@ -605,7 +605,7 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
         .collect::<OrchResult<Vec<_>>>()?;
     let mut reports_ready = Vec::new();
     for lease in &active {
-        if !lease_in_selected_specs(lease, &selected_specs) {
+        if !lease.is_bud() && !lease_in_selected_specs(lease, &selected_specs) {
             continue;
         }
         let report = report_path_for_lease(root, lease)?;
@@ -624,7 +624,7 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
     }
     let completed: Vec<_> = completed_runtime_leases(root)?
         .into_iter()
-        .filter(|lease| lease_in_selected_specs(lease, &selected_specs))
+        .filter(|lease| lease.is_bud() || lease_in_selected_specs(lease, &selected_specs))
         .collect();
     let stage = completed
         .iter()
@@ -690,6 +690,14 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     validate_lease_id(&request.lease)?;
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, &request.lease)?;
+    if !lease.status().is_active() {
+        return Err(OrchError::coded(
+            "cannot complete a lease that is not active",
+            ErrorCode::CompleteRequiresActiveLease,
+        )
+        .detail("lease_id", request.lease.clone())
+        .detail("status", lease.get_str("status").unwrap_or("").to_string()));
+    }
     if lease.is_bud() {
         let completed_at = now_iso();
         let implemented_by = if request.implemented_by.is_empty() {
@@ -719,14 +727,6 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
         return Ok(payload);
     }
 
-    if !lease.status().is_active() {
-        return Err(OrchError::coded(
-            "cannot complete a lease that is not active",
-            ErrorCode::CompleteRequiresActiveLease,
-        )
-        .detail("lease_id", request.lease.clone())
-        .detail("status", lease.get_str("status").unwrap_or("").to_string()));
-    }
     let task_path = lease.task_path();
     let task = load_task(repo_path(root, task_path, "task_path")?, root)?;
     if !task.status_model().is_completable() {
@@ -737,7 +737,8 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
         .detail("task", task_key(&task))
         .detail("status", task.status()));
     }
-    let mut frontmatter = task.frontmatter().clone();
+    let original_frontmatter = task.frontmatter().clone();
+    let mut frontmatter = original_frontmatter.clone();
     let meta = frontmatter.raw_mut();
     insert(meta, "status", "done");
     insert(
@@ -767,12 +768,18 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     }
     let completed_at = meta.get("completed_at").cloned().unwrap_or(Value::Null);
     write_task_frontmatter(&task, frontmatter)?;
-    let completed_status = git_status_data(root)?;
+    let completed_status = match git_status_data(root) {
+        Ok(status) => status,
+        Err(err) => {
+            let _ = write_task_frontmatter(&task, original_frontmatter.clone());
+            return Err(err);
+        }
+    };
     lease.set("status", "completed");
     lease.set("completed_at", completed_at);
     lease.set("completed_changed", changed_paths_value(&completed_status));
     if let Err(err) = save_lease(root, &lease) {
-        let _ = write_task_frontmatter(&task, task.frontmatter().clone());
+        let _ = write_task_frontmatter(&task, original_frontmatter);
         return Err(err);
     }
     let mut payload = json_ok();

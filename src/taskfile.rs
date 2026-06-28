@@ -282,6 +282,18 @@ pub(crate) fn quote_toml_string(value: &str) -> String {
     serde_json::to_string(value).expect("string encoding")
 }
 
+fn toml_key_repr(key: &str) -> String {
+    if !key.is_empty()
+        && key
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        key.to_string()
+    } else {
+        quote_toml_string(key)
+    }
+}
+
 fn dump_toml_value(value: &Value, array_style: Option<ArrayStyle>) -> OrchResult<String> {
     match value {
         Value::String(raw) => Ok(quote_toml_string(raw)),
@@ -291,7 +303,8 @@ fn dump_toml_value(value: &Value, array_style: Option<ArrayStyle>) -> OrchResult
             let mut parts = Vec::with_capacity(map.len());
             for (key, item) in map {
                 parts.push(format!(
-                    "{key} = {}",
+                    "{} = {}",
+                    toml_key_repr(key),
                     dump_toml_value(item, Some(ArrayStyle::Inline))?
                 ));
             }
@@ -430,14 +443,21 @@ mod tests {
         meta.insert("id".to_string(), json!("T900"));
         meta.insert("status".to_string(), json!("todo"));
         meta.insert("priority".to_string(), json!(0.5));
-        meta.insert("meta".to_string(), json!({ "owner": "x" }));
+        meta.insert(
+            "meta".to_string(),
+            json!({ "owner": "x", "owner.name": "alice", "team name": "search" }),
+        );
 
         let dumped = dump_frontmatter(&meta).unwrap();
+        assert!(dumped.contains("\"owner.name\" = \"alice\""));
+        assert!(dumped.contains("\"team name\" = \"search\""));
         let text = dumped + "\n## Context\n";
         let (parsed, _) = split_frontmatter(&text, Path::new("task.md")).unwrap();
 
         assert_eq!(parsed["priority"], json!(0.5));
         assert_eq!(parsed["meta"]["owner"], "x");
+        assert_eq!(parsed["meta"]["owner.name"], "alice");
+        assert_eq!(parsed["meta"]["team name"], "search");
     }
 
     #[test]
