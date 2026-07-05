@@ -3159,6 +3159,32 @@ fn close_blocks_completed_lease_with_unstaged_changes() {
 }
 
 #[test]
+fn complete_close_git_split_allows_completed_non_git_task_without_stage_pathspecs() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    repo.run(&["complete", "--lease", "l_1", "--verified-by", "mayor"]);
+
+    let plan = repo.run(&["git-stage-plan", "--lease", "l_1"]);
+    assert_eq!(plan["git"], false);
+    assert_eq!(plan["safe_to_stage"], false);
+    assert!(plan.get("pathspecs").is_none());
+
+    let closed = repo.run(&["close", "--lease", "l_1"]);
+    assert!(closed["deleted"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(".orchid/leases/l_1.json".to_string())));
+}
+
+#[test]
 fn cleanup_bypasses_stage_guard() {
     let repo = Repo::new();
     repo.init_git();

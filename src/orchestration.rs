@@ -1041,7 +1041,7 @@ pub(crate) fn cleanup(root: &Path, request: &CleanupRequest) -> OrchResult<Map<S
 fn ensure_completed_lease_is_safe_to_close(root: &Path, lease: &LeaseRecord) -> OrchResult<()> {
     if lease.status().is_completed() && !lease.is_bud() {
         let plan = stage_plan_for_lease(root, lease)?;
-        if !plan.pathspecs.is_empty() || !plan.safe_to_stage {
+        if !plan.pathspecs.is_empty() || (plan.git_available && !plan.safe_to_stage) {
             return Err(OrchError::coded(
                 "completed lease has unstaged changes; stage first or use --force",
                 ErrorCode::CloseHasUnstagedChanges,
