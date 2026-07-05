@@ -30,10 +30,10 @@ use crate::planner::{
     decide_next, BlockedTask, CleanupCandidate, NextInput, ReadyTask, ReportReady,
 };
 use crate::runtime::{
-    active_leases, active_leases_lenient, clean_spec_research, close_lease_files, compact_lease,
-    completed_runtime_leases, lease_id_for, lease_stale, load_lease, prune_empty_runtime_dirs,
-    report_path_for_lease, runtime_lock, save_lease, scan_leases, spec_research_dir,
-    CorruptLeaseFile,
+    active_leases, active_leases_lenient, all_leases, clean_spec_research, close_lease_files,
+    compact_lease, completed_runtime_leases, lease_id_for, lease_stale, load_lease,
+    prune_empty_runtime_dirs, report_path_for_lease, runtime_lock, save_lease, scan_leases,
+    spec_research_dir, CorruptLeaseFile,
 };
 use crate::specs::{
     dependency_block, ensure_spec_dispatchable, inactive_spec_names, load_spec_policy, load_tasks,
@@ -317,14 +317,10 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
         request.worker_reasoning_effort.as_deref(),
     )?;
     let worker_model = resolve_worker_model(&request.worker_model, task.worker_model());
+    let task_rel = relpath(&task.path, root);
+    ensure_task_path_not_already_leased(root, &task_rel, &task_key(&task))?;
     let active = active_leases(root)?;
     for lease in &active {
-        if lease.task_path() == relpath(&task.path, root) {
-            return Err(
-                OrchError::coded("task already leased", ErrorCode::TaskAlreadyLeased)
-                    .detail("lease_id", lease.id_value()),
-            );
-        }
         // Active lease ownership is the immutable scope snapshot stored on the
         // lease record; mid-lease task frontmatter edits do not mutate it.
         if scopes_overlap(&task.scope(), &lease.scope()) {
@@ -1728,6 +1724,22 @@ fn ensure_lease_id_available(root: &Path, lease_id: &str) -> OrchResult<()> {
             OrchError::coded("lease id already exists", ErrorCode::LeaseIdAlreadyExists)
                 .detail("lease_id", lease_id),
         );
+    }
+    Ok(())
+}
+
+fn ensure_task_path_not_already_leased(root: &Path, task_path: &str, task: &str) -> OrchResult<()> {
+    for lease in all_leases(root)? {
+        let status = lease.status();
+        if status.as_str() != "released" && lease.task_path() == task_path {
+            return Err(
+                OrchError::coded("task already leased", ErrorCode::TaskAlreadyLeased)
+                    .detail("lease_id", lease.id_value())
+                    .detail("task", task.to_string())
+                    .detail("task_path", task_path.to_string())
+                    .detail("status", status.as_str().to_string()),
+            );
+        }
     }
     Ok(())
 }

@@ -264,6 +264,18 @@ fn task_status(root: &Path, path: &str) -> String {
         .to_string()
 }
 
+fn rewrite_task_status(root: &Path, path: &str, from: &str, to: &str) {
+    let task_path = root.join(path);
+    let text = fs::read_to_string(&task_path).expect("task file");
+    let from = format!("status = \"{from}\"");
+    let to = format!("status = \"{to}\"");
+    assert!(
+        text.contains(&from),
+        "task file did not contain expected status {from}"
+    );
+    fs::write(task_path, text.replacen(&from, &to, 1)).expect("rewrite task status");
+}
+
 fn normalized_contract(mut value: Value) -> Value {
     normalize_value(&mut value);
     value
@@ -1599,6 +1611,59 @@ fn lease_runtime_and_parallel_guards_match_python_contract() {
     assert_eq!(payload["lease_mode"], "parallel");
     let running = repo.run(&["running"]);
     assert_eq!(running["leases"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn lease_rejects_reopened_task_while_completed_lease_exists() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:old",
+        "--lease-id",
+        "l_old",
+    ]);
+    repo.run(&["complete", "--lease", "l_old", "--verified-by", "mayor"]);
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "done"
+    );
+
+    rewrite_task_status(&repo.root, "specs/example/tasks/T001.md", "done", "todo");
+    let blocked = repo.run_fail(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:new",
+        "--lease-id",
+        "l_new",
+    ]);
+    assert_eq!(blocked["code"], "task_already_leased");
+    assert_eq!(blocked["lease_id"], "l_old");
+    assert_eq!(blocked["task"], "example/T001");
+    assert_eq!(blocked["task_path"], "specs/example/tasks/T001.md");
+    assert_eq!(blocked["status"], "completed");
+    assert!(repo.root.join(".orchid/leases/l_old.json").exists());
+    assert!(!repo.root.join(".orchid/leases/l_new.json").exists());
+
+    let cleanup = repo.run(&["cleanup", "--completed"]);
+    assert!(cleanup["deleted"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String(".orchid/leases/l_old.json".to_string())));
+    let leased = repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:new",
+        "--lease-id",
+        "l_new",
+    ]);
+    assert_eq!(leased["lease_id"], "l_new");
 }
 
 #[test]
