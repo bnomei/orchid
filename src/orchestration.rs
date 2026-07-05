@@ -976,15 +976,7 @@ pub(crate) fn close(root: &Path, request: &CloseRequest) -> OrchResult<Map<Strin
         .detail("lease_id", request.lease.clone()));
     }
     if lease.status().is_completed() && !lease.is_bud() && !request.force {
-        let plan = stage_plan_for_lease(root, &lease)?;
-        if !plan.pathspecs.is_empty() || !plan.safe_to_stage {
-            return Err(OrchError::coded(
-                "completed lease has unstaged changes; stage first or use --force",
-                ErrorCode::CloseHasUnstagedChanges,
-            )
-            .detail("lease_id", request.lease.clone())
-            .detail("pathspecs", string_values(plan.pathspecs.clone())));
-        }
+        ensure_completed_lease_is_safe_to_close(root, &lease)?;
     }
     if request.force && lease.status().is_active() && !lease.is_bud() {
         if let Ok(task_path) = repo_path(root, lease.task_path(), "task_path") {
@@ -1013,12 +1005,18 @@ pub(crate) fn cleanup(root: &Path, request: &CleanupRequest) -> OrchResult<Map<S
         ));
     }
     let _lock = runtime_lock(root)?;
+    let leases: Vec<_> = all_leases(root)?
+        .into_iter()
+        .filter(|lease| !lease.status().is_active())
+        .collect();
+    for lease in &leases {
+        if cleanup_lease_needs_stage_guard(lease) {
+            ensure_completed_lease_is_safe_to_close(root, lease)?;
+        }
+    }
     let mut closed = Vec::new();
     let mut deleted = Vec::new();
-    for lease in all_leases(root)? {
-        if lease.status().is_active() {
-            continue;
-        }
+    for lease in leases {
         let (lease_deleted, _) = close_lease_files(root, &lease)?;
         deleted.extend(lease_deleted);
         if let Some(lease_id) = lease.id() {
@@ -1036,6 +1034,28 @@ pub(crate) fn cleanup(root: &Path, request: &CleanupRequest) -> OrchResult<Map<S
         string_values(prune_empty_runtime_dirs(root)?),
     );
     Ok(payload)
+}
+
+fn ensure_completed_lease_is_safe_to_close(root: &Path, lease: &LeaseRecord) -> OrchResult<()> {
+    if lease.status().is_completed() && !lease.is_bud() {
+        let plan = stage_plan_for_lease(root, lease)?;
+        if !plan.pathspecs.is_empty() || !plan.safe_to_stage {
+            return Err(OrchError::coded(
+                "completed lease has unstaged changes; stage first or use --force",
+                ErrorCode::CloseHasUnstagedChanges,
+            )
+            .detail("lease_id", lease.id().unwrap_or("").to_string())
+            .detail("pathspecs", string_values(plan.pathspecs.clone())));
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_lease_needs_stage_guard(lease: &LeaseRecord) -> bool {
+    lease.status().is_completed()
+        && !lease.is_bud()
+        && !lease.task_path().is_empty()
+        && !lease.scope().is_empty()
 }
 
 pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<String, Value>> {

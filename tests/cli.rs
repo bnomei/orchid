@@ -3039,6 +3039,43 @@ fn close_blocks_completed_lease_with_unstaged_changes() {
 }
 
 #[test]
+fn cleanup_bypasses_stage_guard() {
+    let repo = Repo::new();
+    repo.init_git();
+    let instructions = repo.root.join("bud-instructions.md");
+    fs::write(&instructions, "Safe cleanup candidate.\n").unwrap();
+    repo.run(&[
+        "bud",
+        "--title",
+        "Safe cleanup candidate",
+        "--scope",
+        "src/other/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_0",
+    ]);
+    repo.run(&["complete", "--lease", "l_0", "--verified-by", "mayor"]);
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    fs::write(repo.root.join("src/feature/work.txt"), "work\n").unwrap();
+    repo.run(&["complete", "--lease", "l_1", "--verified-by", "mayor"]);
+
+    let failed = repo.run_fail(&["cleanup", "--completed"]);
+    assert_eq!(failed["code"], "close_has_unstaged_changes");
+    assert_eq!(failed["lease_id"], "l_1");
+    assert!(repo.root.join(".orchid/leases/l_0.json").exists());
+    assert!(repo.root.join(".orchid/leases/l_1.json").exists());
+}
+
+#[test]
 fn close_succeeds_after_changes_are_committed() {
     let repo = Repo::new();
     repo.init_git();
