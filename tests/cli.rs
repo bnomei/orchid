@@ -345,6 +345,32 @@ fn bare_goal_without_current_goal_renders_init_markdown() {
 }
 
 #[test]
+#[cfg(unix)]
+fn goal_current_symlink_escape_is_rejected_before_read() {
+    let repo = Repo::new();
+    repo.init_git();
+    init_ready_goal(
+        &repo,
+        "symlink-goal",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":118.5,\"delta\":1.5,\"reason\":\"baseline\"}'",
+        "10",
+    );
+
+    let outside = repo._tmp.path().join("outside-goal-current");
+    fs::write(&outside, "symlink-goal\n").unwrap();
+    let current = repo.root.join(".orchid/goal-current");
+    fs::remove_file(&current).unwrap();
+    std::os::unix::fs::symlink(&outside, &current).unwrap();
+
+    for args in [vec!["goal"], vec!["goal", "status"], vec!["goal", "finish"]] {
+        let failed = repo.run_fail(&args);
+        assert_eq!(failed["code"], "path_outside_repo");
+    }
+
+    assert_eq!(fs::read_to_string(outside).unwrap(), "symlink-goal\n");
+}
+
+#[test]
 fn goal_init_without_evaluator_creates_files_and_setup_state() {
     let repo = Repo::new();
     let stdout = repo.run_stdout(&[

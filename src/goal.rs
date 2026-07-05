@@ -184,7 +184,8 @@ impl GoalContract {
     pub(crate) fn write(&self, root: &Path) -> OrchResult<()> {
         let dir = safe_goal_dir(root, &self.goal_id)?;
         atomic_write(&dir.join(GOAL_TOML), &self.to_toml())?;
-        atomic_write(&goal_current_path(root), &(self.goal_id.to_string() + "\n"))?;
+        let current_path = repo_path(root, goal_current_path(root), "goal_current_path")?;
+        atomic_write(&current_path, &(self.goal_id.to_string() + "\n"))?;
         Ok(())
     }
 
@@ -563,7 +564,7 @@ pub(crate) fn init_goal(root: &Path, request: GoalInitRequest) -> OrchResult<Str
 }
 
 pub(crate) fn current_goal(root: &Path) -> OrchResult<Option<(GoalContract, GoalState)>> {
-    let current_path = goal_current_path(root);
+    let current_path = repo_path(root, goal_current_path(root), "goal_current_path")?;
     if !current_path.exists() {
         return Ok(None);
     }
