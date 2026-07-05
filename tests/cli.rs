@@ -777,6 +777,57 @@ fn goal_evaluates_discard_recommendation_with_git_reset_and_clean() {
 }
 
 #[test]
+fn goal_baseline_ref_expression_is_rejected_before_discard_reset() {
+    let repo = Repo::new();
+    repo.init_git();
+    init_ready_goal(
+        &repo,
+        "discard-ref-goal",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"discard\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":130.0,\"delta\":-10.0,\"reason\":\"regressed\"}'",
+        "10",
+    );
+
+    let tracked_path = repo.root.join("specs/example/requirements.md");
+    fs::write(&tracked_path, "# Requirements\n\nsecond commit\n").unwrap();
+    git(&repo.root, &["add", "specs/example/requirements.md"]);
+    git(&repo.root, &["commit", "-m", "second"]);
+    let head_before = git_stdout(&repo.root, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    git(
+        &repo.root,
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+    );
+
+    let state_path = repo.root.join(".orchid/goals/discard-ref-goal/state.json");
+    let mut state: Value = serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+    state["baseline_commit"] = Value::String("origin/main~1".to_string());
+    fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+    fs::write(&tracked_path, "# Requirements\n\ncandidate change\n").unwrap();
+    write_goal_report(
+        &repo,
+        "discard-ref-goal",
+        "C001",
+        "ready_for_evaluation",
+        "try a smaller change",
+    );
+
+    let failed = repo.run_fail(&["goal"]);
+
+    assert_eq!(failed["code"], "invalid_goal_baseline_commit");
+    assert_eq!(failed["baseline_commit"], "origin/main~1");
+    assert_eq!(
+        git_stdout(&repo.root, &["rev-parse", "HEAD"]).trim(),
+        head_before
+    );
+    assert_eq!(
+        fs::read_to_string(&tracked_path).unwrap(),
+        "# Requirements\n\ncandidate change\n"
+    );
+}
+
+#[test]
 fn goal_keep_retry_after_crash_does_not_wedge() {
     let repo = Repo::new();
     repo.init_git();

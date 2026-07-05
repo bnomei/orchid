@@ -611,8 +611,32 @@ pub(crate) fn commit_goal_keep(root: &Path, goal_id: &str, cycle: &str) -> OrchR
 }
 
 pub(crate) fn reset_hard(root: &Path, commit: &str) -> OrchResult<()> {
+    let commit = validate_full_commit_oid(root, commit)?;
     git(root, &["reset", "--hard", commit], true)?;
     Ok(())
+}
+
+fn validate_full_commit_oid<'a>(root: &Path, commit: &'a str) -> OrchResult<&'a str> {
+    if !is_full_hex_object_id(commit) {
+        return Err(invalid_goal_baseline_commit(commit));
+    }
+
+    let commit_object = format!("{commit}^{{commit}}");
+    git(root, &["cat-file", "-e", &commit_object], true)
+        .map_err(|err| invalid_goal_baseline_commit(commit).detail("stderr", err.details))?;
+    Ok(commit)
+}
+
+fn is_full_hex_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn invalid_goal_baseline_commit(commit: &str) -> OrchError {
+    OrchError::with_code(
+        "invalid goal baseline commit",
+        "invalid_goal_baseline_commit",
+    )
+    .detail("baseline_commit", commit.to_string())
 }
 
 pub(crate) fn clean_goal_candidates(root: &Path) -> OrchResult<()> {
