@@ -276,15 +276,83 @@ fn tmp_path(path: &Path, attempt: u32) -> PathBuf {
 }
 
 fn replace_file(tmp: &Path, path: &Path) -> OrchResult<()> {
-    match fs::rename(tmp, path) {
+    replace_file_with(
+        tmp,
+        path,
+        |from, to| fs::rename(from, to),
+        |target| fs::remove_file(target),
+    )
+}
+
+fn replace_file_with(
+    tmp: &Path,
+    path: &Path,
+    mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+    mut remove_file: impl FnMut(&Path) -> std::io::Result<()>,
+) -> OrchResult<()> {
+    match rename(tmp, path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-            fs::remove_file(path)?;
-            fs::rename(tmp, path)?;
-            Ok(())
+            replace_file_with_backup(tmp, path, &mut rename, &mut remove_file)
         }
         Err(error) => Err(error.into()),
     }
+}
+
+fn replace_file_with_backup(
+    tmp: &Path,
+    path: &Path,
+    rename: &mut impl FnMut(&Path, &Path) -> std::io::Result<()>,
+    remove_file: &mut impl FnMut(&Path) -> std::io::Result<()>,
+) -> OrchResult<()> {
+    let mut last_error = None;
+    for attempt in 0..100 {
+        let backup = backup_path(path, attempt);
+        if fs::symlink_metadata(&backup).is_ok() {
+            last_error = Some(std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                "backup file already exists",
+            ));
+            continue;
+        }
+        match rename(path, &backup) {
+            Ok(()) => match rename(tmp, path) {
+                Ok(()) => {
+                    remove_file(&backup)?;
+                    return Ok(());
+                }
+                Err(install_error) => match rename(&backup, path) {
+                    Ok(()) => return Err(install_error.into()),
+                    Err(restore_error) => {
+                        return Err(OrchError::new("I/O error")
+                            .detail(
+                                "message",
+                                format!(
+                                    "{install_error}; failed to restore backup: {restore_error}"
+                                ),
+                            )
+                            .detail("backup", path_to_string(&backup)));
+                    }
+                },
+            },
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                last_error = Some(error);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| std::io::Error::new(ErrorKind::AlreadyExists, "backup file exists"))
+        .into())
+}
+
+fn backup_path(path: &Path, attempt: u32) -> PathBuf {
+    path.with_file_name(format!(
+        ".{}.{}.{}.bak",
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("tmp"),
+        std::process::id(),
+        attempt
+    ))
 }
 
 pub(crate) fn atomic_write_json<T: Serialize>(path: &Path, data: &T) -> OrchResult<()> {
@@ -300,6 +368,7 @@ pub(crate) fn path_to_string(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
     fn discover_orchid_root_requires_marker_directory() {
@@ -315,5 +384,49 @@ mod tests {
         fs::create_dir(root.join(".orchid")).expect("marker dir");
 
         assert_eq!(discover_orchid_root(&child), Some(root));
+    }
+
+    #[test]
+    fn replace_file_already_exists_fallback_restores_destination_after_install_failure() {
+        let tmp_dir = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp_dir.path().join("state.json");
+        let tmp = tmp_dir
+            .path()
+            .join(format!(".state.json.{}.0.tmp", std::process::id()));
+        fs::write(&path, "original\n").expect("write destination");
+        fs::write(&tmp, "replacement\n").expect("write temp");
+
+        let rename_count = Cell::new(0);
+        let result = replace_file_with(
+            &tmp,
+            &path,
+            |from, to| {
+                rename_count.set(rename_count.get() + 1);
+                match rename_count.get() {
+                    1 => Err(std::io::Error::new(
+                        ErrorKind::AlreadyExists,
+                        "simulated replace collision",
+                    )),
+                    3 => Err(std::io::Error::new(
+                        ErrorKind::PermissionDenied,
+                        "simulated reinstall failure",
+                    )),
+                    _ => fs::rename(from, to),
+                }
+            },
+            |target| fs::remove_file(target),
+        );
+
+        let error = result.expect_err("install failure should be returned");
+        assert_eq!(error.code, "i_o_error");
+        assert_eq!(
+            fs::read_to_string(&path).expect("destination"),
+            "original\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&tmp).expect("temp remains"),
+            "replacement\n"
+        );
+        assert_eq!(rename_count.get(), 4);
     }
 }
