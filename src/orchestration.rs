@@ -724,6 +724,8 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
         if !request.commit_review.is_empty() {
             lease.set("commit_review", request.commit_review.clone());
         }
+        let completed_status = git_status_data(root)?;
+        lease.set("completed_changed", changed_paths_value(&completed_status));
         save_lease(root, &lease)?;
         let mut payload = json_ok();
         insert(&mut payload, "lease_id", request.lease.clone());

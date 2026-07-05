@@ -3910,6 +3910,40 @@ fn stage_plan_excludes_in_scope_edits_made_after_complete() {
 }
 
 #[test]
+fn bud_stage_plan_excludes_in_scope_edits_made_after_complete() {
+    let repo = Repo::new();
+    repo.init_git();
+    let instructions = repo.root.join("bud-instructions.md");
+    fs::write(&instructions, "Change feature work only.\n").unwrap();
+    repo.run(&[
+        "bud",
+        "--title",
+        "Feature bud",
+        "--scope",
+        "src/feature/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_bud",
+    ]);
+    fs::write(repo.root.join("src/feature/work.txt"), "worker edit\n").unwrap();
+    repo.run(&["complete", "--lease", "l_bud", "--verified-by", "mayor"]);
+    fs::write(
+        repo.root.join("src/feature/extra.txt"),
+        "post-complete edit\n",
+    )
+    .unwrap();
+
+    let plan = repo.run(&["git-stage-plan", "--lease", "l_bud"]);
+    assert_eq!(
+        plan["pathspecs"],
+        serde_json::json!([":(literal)src/feature/work.txt"])
+    );
+    let plan_str = plan["pathspecs"].to_string();
+    assert!(!plan_str.contains("extra.txt"));
+}
+
+#[test]
 fn git_status_exposes_porcelain_v2_status_records() {
     let repo = Repo::new();
     fs::write(repo.root.join("src/feature/mixed.txt"), "base\n").unwrap();
