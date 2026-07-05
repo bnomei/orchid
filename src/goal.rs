@@ -960,7 +960,8 @@ fn run_evaluator(
 fn evaluator_command(root: &Path, contract: &GoalContract) -> OrchResult<Command> {
     let goal_dir = safe_goal_dir(root, &contract.goal_id)?;
     // Goal evaluators are trusted project commands. They may execute repo-defined
-    // code such as `just goal-eval`; run goal loops only in trusted worktrees.
+    // code such as `just goal-eval` and inherit the coordinator environment.
+    // Run goal loops only in trusted worktrees.
     let mut command = Command::new("sh");
     command
         .arg("-c")
