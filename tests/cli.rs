@@ -2703,9 +2703,11 @@ fn stray_misnamed_json_does_not_abort_lease_scan() {
 #[test]
 fn corrupt_lease_file_fails_scope_enumeration_closed() {
     let repo = Repo::new();
+    repo.write_task_file("corrupt", "T001", "todo", "src/a/");
+    repo.write_task_file("corrupt", "T002", "todo", "src/b/");
     repo.run(&[
         "lease",
-        "example",
+        "corrupt",
         "T001",
         "--owner",
         "worker:a",
@@ -2716,7 +2718,7 @@ fn corrupt_lease_file_fails_scope_enumeration_closed() {
     fs::write(leases_dir.join("l_ghost.json"), "{").unwrap();
     let payload = repo.run_fail(&[
         "lease",
-        "example",
+        "corrupt",
         "T002",
         "--owner",
         "worker:b",
@@ -2841,7 +2843,7 @@ fn next_waits_for_serial_fanout_ready_task_under_active_lease() {
 }
 
 #[test]
-fn lease_overlap_uses_live_task_scope_after_expansion() {
+fn active_lease_scope_snapshot_controls_ready_next_and_lease_after_task_scope_edit() {
     let repo = Repo::new();
     let t1 = repo.write_task_file("sx", "T001", "todo", "src/a/");
     repo.write_task_file("sx", "T002", "todo", "src/b/");
@@ -2861,7 +2863,36 @@ fn lease_overlap_uses_live_task_scope_after_expansion() {
     )
     .unwrap();
 
-    let failed = repo.run_fail(&[
+    let lease_record: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lease_record["scope"], serde_json::json!(["src/a/"]));
+
+    let ready = repo.run(&["ready", "--spec", "sx", "--explain"]);
+    let ready_tasks: Vec<&str> = ready["ready"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|task| task["task"].as_str().unwrap())
+        .collect();
+    assert!(ready_tasks.contains(&"sx/T002"));
+
+    let next = repo.run(&["next", "--spec", "sx", "--explain"]);
+    assert_eq!(next["phase"], "dispatch");
+    assert_eq!(
+        next["cmd"],
+        serde_json::json!([
+            "lease",
+            "sx",
+            "T002",
+            "--owner",
+            "worker:<agent-id>",
+            "--allow-parallel"
+        ])
+    );
+
+    let lease = repo.run(&[
         "lease",
         "sx",
         "T002",
@@ -2871,8 +2902,68 @@ fn lease_overlap_uses_live_task_scope_after_expansion() {
         "l_2",
         "--allow-parallel",
     ]);
-    assert_eq!(failed["code"], "scope_conflict");
-    assert_eq!(failed["lease_id"], "l_1");
+    assert_eq!(lease["lease_id"], "l_2");
+    assert_eq!(lease["task"], "sx/T002");
+}
+
+#[test]
+fn active_lease_scope_snapshot_controls_bud_and_git_touched_after_task_scope_edit() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join("src/a")).unwrap();
+    fs::create_dir_all(repo.root.join("src/b")).unwrap();
+    fs::write(repo.root.join("src/a/base.txt"), "base\n").unwrap();
+    fs::write(repo.root.join("src/b/base.txt"), "base\n").unwrap();
+    let t1 = repo.write_task_file("sx", "T001", "todo", "src/a/");
+    let instructions = repo.root.join("bud-instructions.md");
+    fs::write(&instructions, "Work in src/b only.\n").unwrap();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "sx",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    let task = fs::read_to_string(&t1).unwrap();
+    fs::write(
+        &t1,
+        task.replace("scope = [\"src/a/\"]", "scope = [\"src/a/\", \"src/b/\"]"),
+    )
+    .unwrap();
+
+    let bud = repo.run(&[
+        "bud",
+        "--title",
+        "Bud on edited task scope",
+        "--scope",
+        "src/b/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_bud_scope_snapshot",
+        "--allow-parallel",
+    ]);
+    assert_eq!(bud["lease_id"], "l_bud_scope_snapshot");
+    assert_eq!(bud["scope"], serde_json::json!(["src/b/"]));
+
+    fs::write(repo.root.join("src/a/work.txt"), "in stored scope\n").unwrap();
+    fs::write(
+        repo.root.join("src/b/work.txt"),
+        "only in edited task scope\n",
+    )
+    .unwrap();
+    let touched = repo.run(&["git-touched", "--lease", "l_1"]);
+    assert_eq!(
+        touched["stage"],
+        serde_json::json!(["specs/sx/tasks/T001.md", "src/a/work.txt"])
+    );
+    assert_eq!(
+        touched["blocked_by"]["out_of_scope"],
+        serde_json::json!(["src/b/work.txt"])
+    );
+    assert_eq!(touched["safe_to_stage"], false);
 }
 
 #[test]

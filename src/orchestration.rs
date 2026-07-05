@@ -310,11 +310,12 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
                     .detail("lease_id", lease.id_value()),
             );
         }
-        let effective_scope = effective_lease_scope(root, lease);
-        if scopes_overlap(&task.scope(), &effective_scope) {
+        // Active lease ownership is the immutable scope snapshot stored on the
+        // lease record; mid-lease task frontmatter edits do not mutate it.
+        if scopes_overlap(&task.scope(), &lease.scope()) {
             return Err(OrchError::coded("scope conflict", ErrorCode::ScopeConflict)
                 .detail("lease_id", lease.id_value())
-                .detail("scope", string_values(effective_scope)));
+                .detail("scope", string_values(lease.scope())));
         }
     }
     if let Some(serial_lease) = active
@@ -1800,22 +1801,6 @@ fn lease_in_selected_specs(lease: &LeaseRecord, selected_specs: &[String]) -> bo
     let task = lease.get_str("task").unwrap_or("");
     let spec = task.split_once('/').map(|(spec, _)| spec).unwrap_or("");
     !spec.is_empty() && selected_specs.iter().any(|selected| selected == spec)
-}
-
-fn effective_lease_scope(root: &Path, lease: &LeaseRecord) -> Vec<String> {
-    let mut scope = lease.scope();
-    if !lease.is_bud() {
-        if let Ok(task_path) = repo_path(root, lease.task_path(), "task_path") {
-            if let Ok(task) = load_task(task_path, root) {
-                for entry in task.scope() {
-                    if !scope.contains(&entry) {
-                        scope.push(entry);
-                    }
-                }
-            }
-        }
-    }
-    scope
 }
 
 fn specs_arg(specs: &[String]) -> Option<&[String]> {
