@@ -30,9 +30,10 @@ use crate::planner::{
     decide_next, BlockedTask, CleanupCandidate, NextInput, ReadyTask, ReportReady,
 };
 use crate::runtime::{
-    active_leases, all_leases, clean_spec_research, close_lease_files, compact_lease,
+    active_leases, active_leases_lenient, clean_spec_research, close_lease_files, compact_lease,
     completed_runtime_leases, lease_id_for, lease_stale, load_lease, prune_empty_runtime_dirs,
-    report_path_for_lease, runtime_lock, save_lease, spec_research_dir,
+    report_path_for_lease, runtime_lock, save_lease, scan_leases, spec_research_dir,
+    CorruptLeaseFile,
 };
 use crate::specs::{
     dependency_block, ensure_spec_dispatchable, inactive_spec_names, load_spec_policy, load_tasks,
@@ -176,7 +177,19 @@ pub(crate) struct ReportCheckRequest {
 }
 
 pub(crate) fn ready(root: &Path, request: &ReadyRequest) -> OrchResult<Map<String, Value>> {
-    let active = active_leases(root)?;
+    let active_scan = active_leases_lenient(root)?;
+    if !active_scan.corrupt_leases.is_empty() {
+        let mut payload = json_ok();
+        insert(&mut payload, "phase", "blocked");
+        insert(
+            &mut payload,
+            "reason",
+            "corrupt lease files require manual recovery before dispatch",
+        );
+        insert_corrupt_leases(&mut payload, &active_scan.corrupt_leases);
+        return Ok(payload);
+    }
+    let active = active_scan.leases;
     let (ready, blocked, _) = ready_tasks(
         root,
         specs_arg(&request.specs),
@@ -243,10 +256,12 @@ pub(crate) fn status(root: &Path, request: &StatusRequest) -> OrchResult<Map<Str
         (load_tasks(root, None)?, Vec::new())
     };
     let counts = nonzero_counts(selected_task_counts(&tasks));
-    let active = active_leases(root)?.len();
+    let active_scan = active_leases_lenient(root)?;
+    let active = active_scan.leases.len();
     let mut payload = json_ok();
     insert(&mut payload, "tasks", tasks.len() as i64);
     insert(&mut payload, "counts", Value::Object(counts));
+    insert_corrupt_leases(&mut payload, &active_scan.corrupt_leases);
     insert_non_empty(&mut payload, "specs", string_values(selected_specs));
     if request.all_open {
         insert_non_empty(
@@ -592,7 +607,24 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
     let stale_after = parse_duration(&request.older_than)?;
     let now = Utc::now();
     let (tasks, selected_specs) = select_tasks(root, specs_arg(&request.specs), request.all_open)?;
-    let active = active_leases(root)?;
+    let active_scan = active_leases_lenient(root)?;
+    if !active_scan.corrupt_leases.is_empty() {
+        let mut payload = json_ok();
+        insert(&mut payload, "phase", "blocked");
+        insert(
+            &mut payload,
+            "reason",
+            "corrupt lease files require manual recovery before dispatch",
+        );
+        insert_corrupt_leases(&mut payload, &active_scan.corrupt_leases);
+        insert(
+            &mut payload,
+            "counts",
+            Value::Object(selected_task_counts(&tasks)),
+        );
+        return Ok(payload);
+    }
+    let active = active_scan.leases;
     let (ready, blocked, _) = ready_tasks(
         root,
         specs_arg(&request.specs),
@@ -873,12 +905,10 @@ pub(crate) fn heartbeat(root: &Path, lease_id: &str) -> OrchResult<Map<String, V
 }
 
 pub(crate) fn running(root: &Path) -> OrchResult<Map<String, Value>> {
+    let active = active_leases_lenient(root)?;
     let mut payload = json_ok();
-    insert(
-        &mut payload,
-        "leases",
-        compact_leases(active_leases(root)?)?,
-    );
+    insert(&mut payload, "leases", compact_leases(active.leases)?);
+    insert_corrupt_leases(&mut payload, &active.corrupt_leases);
     Ok(payload)
 }
 
@@ -886,7 +916,8 @@ pub(crate) fn stale(root: &Path, older_than: &str) -> OrchResult<Map<String, Val
     let cutoff = Utc::now() - parse_duration(older_than)?;
     let epoch = Utc.timestamp_opt(0, 0).single().unwrap();
     let mut stale = Vec::new();
-    for lease in active_leases(root)? {
+    let active = active_leases_lenient(root)?;
+    for lease in active.leases {
         let raw = lease
             .heartbeat_or_started()
             .and_then(value_to_string)
@@ -906,6 +937,7 @@ pub(crate) fn stale(root: &Path, older_than: &str) -> OrchResult<Map<String, Val
     }
     let mut payload = json_ok();
     insert(&mut payload, "stale", objects_array(stale));
+    insert_corrupt_leases(&mut payload, &active.corrupt_leases);
     Ok(payload)
 }
 
@@ -1008,7 +1040,11 @@ pub(crate) fn cleanup(root: &Path, request: &CleanupRequest) -> OrchResult<Map<S
         ));
     }
     let _lock = runtime_lock(root)?;
-    let leases: Vec<_> = all_leases(root)?
+    let scan = scan_leases(root)?;
+    let corrupt_leases = scan.corrupt_leases;
+    fail_on_corrupt_lease_identity_for_cleanup(&corrupt_leases)?;
+    let leases: Vec<_> = scan
+        .leases
         .into_iter()
         .filter(|lease| !lease.status().is_active())
         .collect();
@@ -1031,6 +1067,7 @@ pub(crate) fn cleanup(root: &Path, request: &CleanupRequest) -> OrchResult<Map<S
     let mut payload = json_ok();
     insert_non_empty(&mut payload, "closed", string_values(closed));
     insert_non_empty(&mut payload, "deleted", string_values(deleted));
+    insert_corrupt_leases(&mut payload, &corrupt_leases);
     insert_non_empty(
         &mut payload,
         "pruned",
@@ -1059,6 +1096,23 @@ fn cleanup_lease_needs_stage_guard(lease: &LeaseRecord) -> bool {
         && !lease.is_bud()
         && !lease.task_path().is_empty()
         && !lease.scope().is_empty()
+}
+
+fn fail_on_corrupt_lease_identity_for_cleanup(
+    corrupt_leases: &[CorruptLeaseFile],
+) -> OrchResult<()> {
+    if let Some(corrupt) = corrupt_leases
+        .iter()
+        .find(|lease| lease.error.contains("invalid lease id"))
+    {
+        return Err(
+            OrchError::coded("invalid lease id", ErrorCode::InvalidLeaseId)
+                .detail("lease_id", corrupt.lease_id.clone())
+                .detail("path", corrupt.path.clone())
+                .detail("error", corrupt.error.clone()),
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<String, Value>> {
@@ -1503,11 +1557,14 @@ pub(crate) fn report_check(
 pub(crate) fn git_status(root: &Path) -> OrchResult<Map<String, Value>> {
     let mut payload = json_ok();
     payload.extend(git_status_data(root)?);
-    let active_ids = active_leases(root)?
+    let active_scan = active_leases_lenient(root)?;
+    let active_ids = active_scan
+        .leases
         .into_iter()
         .filter_map(|lease| lease.id().map(str::to_string))
         .collect();
     insert_non_empty(&mut payload, "active_leases", string_values(active_ids));
+    insert_corrupt_leases(&mut payload, &active_scan.corrupt_leases);
     Ok(payload)
 }
 
@@ -1590,15 +1647,20 @@ fn compact_leases(leases: Vec<LeaseRecord>) -> OrchResult<Value> {
 }
 
 fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value>> {
-    let matches = all_leases(root)?
+    let scan = scan_leases(root)?;
+    let corrupt_leases = scan.corrupt_leases;
+    let matches = scan
+        .leases
         .into_iter()
         .filter(|lease| lease.agent_id() == Some(agent_id))
         .collect::<Vec<_>>();
     if matches.is_empty() {
-        return Err(
-            OrchError::coded("agent lease not found", ErrorCode::AgentLeaseNotFound)
-                .detail("agent_id", agent_id),
-        );
+        let mut error = OrchError::coded("agent lease not found", ErrorCode::AgentLeaseNotFound)
+            .detail("agent_id", agent_id);
+        if !corrupt_leases.is_empty() {
+            error = error.detail("corrupt_leases", corrupt_leases_value(&corrupt_leases));
+        }
+        return Err(error);
     }
     let active = matches
         .iter()
@@ -1609,22 +1671,27 @@ fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value
             .iter()
             .filter_map(|lease| lease.id().map(str::to_string))
             .collect::<Vec<_>>();
-        return Err(
+        let mut error =
             OrchError::coded("agent has no active lease", ErrorCode::AgentLeaseNotFound)
                 .detail("agent_id", agent_id)
-                .detail("terminal_leases", string_values(lease_ids)),
-        );
+                .detail("terminal_leases", string_values(lease_ids));
+        if !corrupt_leases.is_empty() {
+            error = error.detail("corrupt_leases", corrupt_leases_value(&corrupt_leases));
+        }
+        return Err(error);
     }
     if active.len() > 1 {
         let lease_ids = active
             .iter()
             .filter_map(|lease| lease.id().map(str::to_string))
             .collect::<Vec<_>>();
-        return Err(
-            OrchError::coded("agent lease ambiguous", ErrorCode::AgentLeaseAmbiguous)
-                .detail("agent_id", agent_id)
-                .detail("leases", string_values(lease_ids)),
-        );
+        let mut error = OrchError::coded("agent lease ambiguous", ErrorCode::AgentLeaseAmbiguous)
+            .detail("agent_id", agent_id)
+            .detail("leases", string_values(lease_ids));
+        if !corrupt_leases.is_empty() {
+            error = error.detail("corrupt_leases", corrupt_leases_value(&corrupt_leases));
+        }
+        return Err(error);
     }
     let lease = active[0];
     let mut payload = json_ok();
@@ -1650,6 +1717,7 @@ fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value
     if let Some(report_path) = lease.report_path() {
         insert(&mut payload, "report", report_path);
     }
+    insert_corrupt_leases(&mut payload, &corrupt_leases);
     Ok(payload)
 }
 
@@ -1788,6 +1856,19 @@ fn insert_non_empty(map: &mut Map<String, Value>, key: &str, value: Value) {
         return;
     }
     map.insert(key.to_string(), value);
+}
+
+fn insert_corrupt_leases(map: &mut Map<String, Value>, corrupt_leases: &[CorruptLeaseFile]) {
+    insert_non_empty(map, "corrupt_leases", corrupt_leases_value(corrupt_leases));
+}
+
+fn corrupt_leases_value(corrupt_leases: &[CorruptLeaseFile]) -> Value {
+    Value::Array(
+        corrupt_leases
+            .iter()
+            .map(|lease| Value::Object(lease.to_payload()))
+            .collect(),
+    )
 }
 
 fn nonzero_counts(counts: Map<String, Value>) -> Map<String, Value> {

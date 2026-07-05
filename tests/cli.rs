@@ -2700,8 +2700,24 @@ fn stray_misnamed_json_does_not_abort_lease_scan() {
     assert_eq!(leases[0]["id"], "l_real");
 }
 
+fn write_corrupt_lease(repo: &Repo, lease_id: &str) {
+    let leases_dir = repo.root.join(".orchid/leases");
+    fs::create_dir_all(&leases_dir).unwrap();
+    fs::write(leases_dir.join(format!("{lease_id}.json")), "{").unwrap();
+}
+
+fn write_lease_json(repo: &Repo, lease_id: &str, value: Value) {
+    let leases_dir = repo.root.join(".orchid/leases");
+    fs::create_dir_all(&leases_dir).unwrap();
+    fs::write(
+        leases_dir.join(format!("{lease_id}.json")),
+        serde_json::to_string(&value).unwrap(),
+    )
+    .unwrap();
+}
+
 #[test]
-fn corrupt_lease_file_fails_scope_enumeration_closed() {
+fn corrupt_lease_file_fails_mutating_admission_closed() {
     let repo = Repo::new();
     repo.write_task_file("corrupt", "T001", "todo", "src/a/");
     repo.write_task_file("corrupt", "T002", "todo", "src/b/");
@@ -2714,8 +2730,7 @@ fn corrupt_lease_file_fails_scope_enumeration_closed() {
         "--lease-id",
         "l_real",
     ]);
-    let leases_dir = repo.root.join(".orchid/leases");
-    fs::write(leases_dir.join("l_ghost.json"), "{").unwrap();
+    write_corrupt_lease(&repo, "l_ghost");
     let payload = repo.run_fail(&[
         "lease",
         "corrupt",
@@ -2726,6 +2741,177 @@ fn corrupt_lease_file_fails_scope_enumeration_closed() {
         "l_b",
     ]);
     assert_eq!(payload["code"], "corrupt_lease_file");
+    assert_eq!(payload["lease_id"], "l_ghost");
+    assert_eq!(payload["path"], ".orchid/leases/l_ghost.json");
+    assert!(repo.root.join(".orchid/leases/l_real.json").exists());
+    assert!(!repo.root.join(".orchid/leases/l_b.json").exists());
+}
+
+#[test]
+fn object_shaped_corrupt_lease_ids_warn_without_wedging_aggregate_scan() {
+    let repo = Repo::new();
+    repo.write_task_file("corrupt", "T001", "todo", "src/a/");
+    repo.write_task_file("corrupt", "T002", "todo", "src/b/");
+    repo.run(&[
+        "lease",
+        "corrupt",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_real",
+    ]);
+    write_lease_json(
+        &repo,
+        "l_bad",
+        serde_json::json!({
+            "lease_id": "../../../outside-lease",
+            "status": "active"
+        }),
+    );
+    write_lease_json(
+        &repo,
+        "l_wrong",
+        serde_json::json!({
+            "lease_id": "l_other",
+            "status": "active"
+        }),
+    );
+
+    let running = repo.run(&["running"]);
+    assert_eq!(running["leases"][0]["id"], "l_real");
+    let corrupt = running["corrupt_leases"].as_array().unwrap();
+    assert_eq!(corrupt.len(), 2);
+    assert_eq!(corrupt[0]["lease_id"], "l_bad");
+    assert_eq!(corrupt[0]["path"], ".orchid/leases/l_bad.json");
+    assert!(corrupt[0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("invalid lease id"));
+    assert_eq!(corrupt[1]["lease_id"], "l_wrong");
+    assert_eq!(corrupt[1]["path"], ".orchid/leases/l_wrong.json");
+    assert!(corrupt[1]["error"]
+        .as_str()
+        .unwrap()
+        .contains("invalid lease id"));
+
+    let failed = repo.run_fail(&[
+        "lease",
+        "corrupt",
+        "T002",
+        "--owner",
+        "worker:b",
+        "--lease-id",
+        "l_b",
+    ]);
+    assert_eq!(failed["code"], "corrupt_lease_file");
+    assert_eq!(failed["lease_id"], "l_bad");
+}
+
+#[test]
+fn corrupt_lease_file_warns_but_keeps_aggregate_status_online() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_real",
+    ]);
+    let lease_path = repo.root.join(".orchid/leases/l_real.json");
+    let mut lease: Value = serde_json::from_str(&fs::read_to_string(&lease_path).unwrap()).unwrap();
+    lease["started_at"] = Value::String("2020-01-01T00:00:00Z".to_string());
+    lease["heartbeat_at"] = Value::String("2020-01-01T00:00:00Z".to_string());
+    fs::write(&lease_path, serde_json::to_string(&lease).unwrap()).unwrap();
+    write_corrupt_lease(&repo, "l_ghost");
+
+    let running = repo.run(&["running"]);
+    assert_eq!(running["leases"][0]["id"], "l_real");
+    assert_eq!(running["corrupt_leases"][0]["lease_id"], "l_ghost");
+    assert_eq!(
+        running["corrupt_leases"][0]["path"],
+        ".orchid/leases/l_ghost.json"
+    );
+    assert!(running["corrupt_leases"][0]["error"].as_str().is_some());
+
+    let stale = repo.run(&["stale", "--older-than", "30m"]);
+    assert_eq!(stale["stale"][0]["id"], "l_real");
+    assert_eq!(stale["corrupt_leases"][0]["lease_id"], "l_ghost");
+
+    let status = repo.run(&["status"]);
+    assert_eq!(status["active"], 1);
+    assert_eq!(status["corrupt_leases"][0]["lease_id"], "l_ghost");
+
+    let git_status = repo.run(&["git-status"]);
+    assert_eq!(git_status["active_leases"], serde_json::json!(["l_real"]));
+    assert_eq!(git_status["corrupt_leases"][0]["lease_id"], "l_ghost");
+}
+
+#[test]
+fn ready_blocks_when_corrupt_lease_file_exists() {
+    let repo = Repo::new();
+    repo.write_task_file("corrupt", "T001", "todo", "src/a/");
+    write_corrupt_lease(&repo, "l_ghost");
+
+    let payload = repo.run(&["ready", "--spec", "corrupt", "--explain"]);
+    assert_eq!(payload["phase"], "blocked");
+    assert!(payload.get("ready").is_none());
+    assert_eq!(payload["corrupt_leases"][0]["lease_id"], "l_ghost");
+    assert_eq!(
+        payload["reason"],
+        "corrupt lease files require manual recovery before dispatch"
+    );
+}
+
+#[test]
+fn next_blocks_recovery_when_corrupt_lease_file_exists() {
+    let repo = Repo::new();
+    repo.write_task_file("corrupt", "T001", "todo", "src/a/");
+    repo.write_task_file("corrupt", "T002", "todo", "src/b/");
+    repo.run(&[
+        "lease",
+        "corrupt",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_real",
+    ]);
+    write_corrupt_lease(&repo, "l_ghost");
+
+    let payload = repo.run(&["next", "--spec", "corrupt", "--explain"]);
+    assert_eq!(payload["phase"], "blocked");
+    assert!(payload.get("cmd").is_none());
+    assert!(payload.get("cmds").is_none());
+    assert_eq!(payload["corrupt_leases"][0]["lease_id"], "l_ghost");
+    assert_eq!(
+        payload["reason"],
+        "corrupt lease files require manual recovery before dispatch"
+    );
+}
+
+#[test]
+fn cleanup_closes_completed_leases_and_warns_about_corrupt_lease_file() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_real",
+    ]);
+    repo.run(&["complete", "--lease", "l_real", "--verified-by", "mayor"]);
+    write_corrupt_lease(&repo, "l_ghost");
+
+    let cleanup = repo.run(&["cleanup", "--completed"]);
+    assert_eq!(cleanup["closed"], serde_json::json!(["l_real"]));
+    assert_eq!(cleanup["corrupt_leases"][0]["lease_id"], "l_ghost");
+    assert!(!repo.root.join(".orchid/leases/l_real.json").exists());
+    assert!(repo.root.join(".orchid/leases/l_ghost.json").exists());
 }
 
 #[test]

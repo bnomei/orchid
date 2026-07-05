@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, TimeDelta, Utc};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sha1::{Digest, Sha1};
 
 use crate::core::{
@@ -124,10 +124,56 @@ pub(crate) fn active_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
         .collect())
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CorruptLeaseFile {
+    pub(crate) lease_id: String,
+    pub(crate) path: String,
+    pub(crate) error: String,
+}
+
+impl CorruptLeaseFile {
+    pub(crate) fn to_payload(&self) -> Map<String, Value> {
+        let mut map = Map::new();
+        map.insert("lease_id".to_string(), Value::String(self.lease_id.clone()));
+        map.insert("path".to_string(), Value::String(self.path.clone()));
+        map.insert("error".to_string(), Value::String(self.error.clone()));
+        map
+    }
+
+    fn to_error(&self) -> OrchError {
+        OrchError::coded("cannot parse lease file", ErrorCode::CorruptLeaseFile)
+            .detail("lease_id", self.lease_id.clone())
+            .detail("path", self.path.clone())
+            .detail("error", self.error.clone())
+    }
+}
+
+pub(crate) struct LeaseScan {
+    pub(crate) leases: Vec<LeaseRecord>,
+    pub(crate) corrupt_leases: Vec<CorruptLeaseFile>,
+}
+
 pub(crate) fn all_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
+    let scan = scan_leases(root)?;
+    if let Some(corrupt) = scan.corrupt_leases.first() {
+        return Err(corrupt.to_error());
+    }
+    Ok(scan.leases)
+}
+
+pub(crate) fn active_leases_lenient(root: &Path) -> OrchResult<LeaseScan> {
+    let mut scan = scan_leases(root)?;
+    scan.leases.retain(|lease| lease.status().is_active());
+    Ok(scan)
+}
+
+pub(crate) fn scan_leases(root: &Path) -> OrchResult<LeaseScan> {
     let path = leases_dir(root);
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok(LeaseScan {
+            leases: Vec::new(),
+            corrupt_leases: Vec::new(),
+        });
     }
     repo_path(root, &path, "leases_dir")?;
     let mut lease_paths: Vec<PathBuf> = fs::read_dir(path)?
@@ -138,6 +184,7 @@ pub(crate) fn all_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
     lease_paths.sort();
 
     let mut leases = Vec::new();
+    let mut corrupt_leases = Vec::new();
     for lease_path in lease_paths {
         let Some(expected_lease_id) = lease_path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
@@ -146,29 +193,53 @@ pub(crate) fn all_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
             continue;
         }
         let lease_path = repo_path(root, &lease_path, "lease_path")?;
-        let raw = fs::read_to_string(&lease_path).map_err(|err| {
-            OrchError::coded("cannot read lease file", ErrorCode::CorruptLeaseFile)
-                .detail("lease_id", expected_lease_id)
-                .detail("error", err.to_string())
-        })?;
-        let Value::Object(mut data) = serde_json::from_str::<Value>(&raw).map_err(|err| {
-            OrchError::coded("cannot parse lease file", ErrorCode::CorruptLeaseFile)
-                .detail("lease_id", expected_lease_id)
-                .detail("error", err.to_string())
-        })?
-        else {
-            return Err(OrchError::coded(
-                "lease file is not a json object",
-                ErrorCode::CorruptLeaseFile,
-            )
-            .detail("lease_id", expected_lease_id));
+        let path = relpath(&lease_path, root);
+        let raw = match fs::read_to_string(&lease_path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                corrupt_leases.push(CorruptLeaseFile {
+                    lease_id: expected_lease_id.to_string(),
+                    path,
+                    error: err.to_string(),
+                });
+                continue;
+            }
         };
-        bind_lease_record_id(&mut data, expected_lease_id)?;
+        let parsed = match serde_json::from_str::<Value>(&raw) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                corrupt_leases.push(CorruptLeaseFile {
+                    lease_id: expected_lease_id.to_string(),
+                    path,
+                    error: err.to_string(),
+                });
+                continue;
+            }
+        };
+        let Value::Object(mut data) = parsed else {
+            corrupt_leases.push(CorruptLeaseFile {
+                lease_id: expected_lease_id.to_string(),
+                path,
+                error: "lease file is not a json object".to_string(),
+            });
+            continue;
+        };
+        if let Err(err) = bind_lease_record_id(&mut data, expected_lease_id) {
+            corrupt_leases.push(CorruptLeaseFile {
+                lease_id: expected_lease_id.to_string(),
+                path,
+                error: err.message,
+            });
+            continue;
+        }
         data.entry("_path".to_string())
-            .or_insert_with(|| Value::String(relpath(&lease_path, root)));
+            .or_insert_with(|| Value::String(path));
         leases.push(LeaseRecord::from_map(data));
     }
-    Ok(leases)
+    Ok(LeaseScan {
+        leases,
+        corrupt_leases,
+    })
 }
 
 pub(crate) fn load_lease(root: &Path, lease_id: &str) -> OrchResult<LeaseRecord> {
