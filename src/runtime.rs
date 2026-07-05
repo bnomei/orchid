@@ -1,7 +1,9 @@
 //! `.orchid/` runtime persistence: leases, packets, reports, and the command lock.
 //!
 //! Mutating commands acquire a short-lived [`RuntimeLock`]; stale locks from dead
-//! owners are reclaimed so a crash cannot wedge every later command.
+//! owners are reclaimed so a crash cannot wedge every later command. The file
+//! lock is an accepted best-effort tradeoff: commands are expected to finish
+//! before the stale timeout, not survive concurrent stale-lock succession.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
