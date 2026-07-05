@@ -123,6 +123,11 @@ impl GoalInitRequest {
             return Err(OrchError::new("max-iterations must be at least 1")
                 .detail("max_iterations", max_iterations.to_string()));
         }
+        if scope.is_empty() {
+            return Err(OrchError::new(
+                "goal scope must include at least one --scope path",
+            ));
+        }
         Ok(Self {
             goal_id,
             goal: goal.into(),
@@ -1010,6 +1015,11 @@ fn keep_cycle(
         .iter()
         .map(|path| path_to_string(path))
         .collect();
+    if scope.is_empty() {
+        return Err(OrchError::new(
+            "goal scope must include at least one --scope path",
+        ));
+    }
     let staged_out_of_scope = gitstate::staged_paths_outside_scope(root, &scope)?;
     if !staged_out_of_scope.is_empty() {
         return Err(
@@ -1441,7 +1451,7 @@ next_hypothesis = "next"
             "10h",
             "cache normalized query features",
             vec![],
-            vec![],
+            vec![PathBuf::from(".")],
         )
         .unwrap()
         .into_contract_and_state("2026-06-17T12:00:00Z".to_string());
@@ -1531,7 +1541,7 @@ next_hypothesis = "next"
             "10h",
             "cache normalized query features",
             vec![PathBuf::from("justfile")],
-            vec![],
+            vec![PathBuf::from(".")],
         )
         .unwrap()
         .into_contract("2026-06-17T12:00:00Z".to_string())

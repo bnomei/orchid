@@ -230,6 +230,8 @@ fn init_ready_goal(repo: &Repo, goal_id: &str, evaluator: &str, max_iterations: 
         max_iterations,
         "--max-duration",
         "10h",
+        "--scope",
+        ".",
     ]);
 }
 
@@ -392,6 +394,8 @@ fn goal_init_without_evaluator_creates_files_and_setup_state() {
         "10",
         "--max-duration",
         "10h",
+        "--scope",
+        ".",
     ]);
 
     assert!(stdout.starts_with("# Goal Setup"));
@@ -443,6 +447,8 @@ fn goal_init_defaults_id_from_sanitized_branch_leaf() {
         "10",
         "--max-duration",
         "10h",
+        "--scope",
+        ".",
     ]);
 
     assert_eq!(
@@ -480,6 +486,8 @@ fn goal_init_with_valid_evaluator_records_baseline_and_renders_ready_markdown() 
         "10",
         "--max-duration",
         "10h",
+        "--scope",
+        ".",
     ]);
 
     assert!(stdout.starts_with("# Goal Ready"));
@@ -545,6 +553,8 @@ fn bare_goal_renders_running_prompt_for_missing_cycle_report() {
         "10",
         "--max-duration",
         "10h",
+        "--scope",
+        ".",
     ]);
     let state_path = repo.root.join(".orchid/goals/running-goal/state.json");
     let mut state: Value = serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
@@ -657,6 +667,110 @@ fn goal_artifact_symlink_escape_is_rejected_before_append() {
     let failed = repo.run_fail(&["goal"]);
     assert_eq!(failed["code"], "path_outside_repo");
     assert_eq!(fs::read_to_string(outside).unwrap(), "keep me\n");
+}
+
+#[test]
+fn goal_keep_empty_scope_is_rejected_at_init() {
+    let repo = Repo::new();
+
+    let failed = repo.run_fail(&[
+        "goal",
+        "init",
+        "--id",
+        "empty-scope-goal",
+        "--goal",
+        "G",
+        "--evaluator",
+        "true",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "5",
+        "--hypothesis",
+        "h",
+        "--max-iterations",
+        "10",
+        "--max-duration",
+        "10h",
+    ]);
+
+    assert_eq!(
+        failed["code"],
+        "goal_scope_must_include_at_least_one_scope_path"
+    );
+    assert!(failed["error"].as_str().unwrap().contains("--scope"));
+    assert!(!repo.root.join(".orchid/goals/empty-scope-goal").exists());
+}
+
+#[test]
+fn goal_keep_empty_scope_persisted_contract_is_rejected() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run_stdout(&[
+        "goal",
+        "init",
+        "--id",
+        "manual-empty-scope-goal",
+        "--goal",
+        "G",
+        "--evaluator",
+        "printf '%s\\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"r\"}'",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "5",
+        "--hypothesis",
+        "h",
+        "--max-iterations",
+        "10",
+        "--max-duration",
+        "10h",
+        "--scope",
+        "src/ranker.rs",
+    ]);
+    let contract_path = repo
+        .root
+        .join(".orchid/goals/manual-empty-scope-goal/goal.toml");
+    let contract = fs::read_to_string(&contract_path).unwrap();
+    fs::write(
+        &contract_path,
+        contract.replace("scope = [\"src/ranker.rs\"]", "scope = []"),
+    )
+    .unwrap();
+    fs::create_dir_all(repo.root.join("src")).unwrap();
+    fs::write(repo.root.join("src/ranker.rs"), "fn rank() {}\n").unwrap();
+    fs::write(repo.root.join("incidental.md"), "incidental\n").unwrap();
+    write_goal_report(
+        &repo,
+        "manual-empty-scope-goal",
+        "C001",
+        "ready_for_evaluation",
+        "next",
+    );
+
+    let failed = repo.run_fail(&["goal"]);
+
+    assert_eq!(
+        failed["code"],
+        "goal_scope_must_include_at_least_one_scope_path"
+    );
+    assert_eq!(
+        git_stdout(&repo.root, &["log", "-1", "--pretty=%s"]).trim(),
+        "initial"
+    );
+    let porcelain = git_stdout(&repo.root, &["status", "--porcelain"]);
+    assert!(
+        porcelain.contains("?? incidental.md"),
+        "status: {porcelain}"
+    );
+    assert!(
+        porcelain.contains("?? src/ranker.rs"),
+        "status: {porcelain}"
+    );
 }
 
 #[test]
@@ -1187,6 +1301,8 @@ fn protected_surface_change_blocks_automatic_decision() {
         "10h",
         "--protected-surface",
         "justfile",
+        "--scope",
+        ".",
     ]);
     fs::write(repo.root.join("justfile"), "goal-eval:\n\t@echo changed\n").unwrap();
     write_goal_report(
@@ -1237,6 +1353,8 @@ fn protected_surface_edited_during_evaluation_blocks_keep() {
         "10h",
         "--protected-surface",
         "justfile",
+        "--scope",
+        ".",
     ]);
     write_goal_report(
         &repo,
@@ -1280,6 +1398,8 @@ fn protected_surface_committed_in_cycle_blocks_automatic_decision() {
         "10h",
         "--protected-surface",
         "justfile",
+        "--scope",
+        ".",
     ]);
     fs::write(repo.root.join("justfile"), "goal-eval:\n\t@echo changed\n").unwrap();
     git(&repo.root, &["add", "justfile"]);
