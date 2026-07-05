@@ -808,6 +808,10 @@ fn evaluate_cycle_report(
     }
 
     let mut evaluator = run_evaluator(root, contract, state)?;
+    let persisted = GoalState::read(root, &contract.goal_id)?;
+    if matches!(persisted.status, GoalStatus::Stopped | GoalStatus::Done) {
+        return Ok(persisted);
+    }
     if evaluator.metric != contract.primary_metric {
         return Err(OrchError::new("evaluator metric mismatch")
             .detail("expected", contract.primary_metric.clone())

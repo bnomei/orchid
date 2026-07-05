@@ -664,6 +664,42 @@ fn bare_goal_evaluates_ready_report_and_records_keep_decision() {
 }
 
 #[test]
+fn bare_goal_preserves_concurrent_finish_after_evaluator_returns() {
+    let repo = Repo::new();
+    repo.init_git();
+    init_ready_goal(
+        &repo,
+        "finish-race-goal",
+        "tmp=\"$ORCHID_GOAL_DIR/state.json.tmp\" && sed 's/\"status\": \"ready\"/\"status\": \"stopped\"/' \"$ORCHID_GOAL_DIR/state.json\" > \"$tmp\" && mv \"$tmp\" \"$ORCHID_GOAL_DIR/state.json\" && printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"should not be recorded\",\"sample_count\":99}'",
+        "10",
+    );
+    fs::write(repo.root.join("candidate.txt"), "candidate\n").unwrap();
+    write_goal_report(
+        &repo,
+        "finish-race-goal",
+        "C001",
+        "ready_for_evaluation",
+        "precompute static rank weights",
+    );
+
+    let stdout = repo.run_stdout(&["goal"]);
+
+    assert!(stdout.starts_with("# Goal Finish"));
+    let state = goal_state(&repo, "finish-race-goal");
+    assert_eq!(state["status"], "stopped");
+    assert_eq!(state["cycle"], "C001");
+    assert_eq!(state["iterations_completed"], 0);
+    assert_eq!(state["last_decision"], Value::Null);
+    assert_eq!(
+        git_stdout(&repo.root, &["log", "-1", "--pretty=%s"]).trim(),
+        "initial"
+    );
+    let goal_root = repo.root.join(".orchid/goals/finish-race-goal");
+    assert!(!goal_root.join("measurements.jsonl").exists());
+    assert!(!goal_root.join("results.jsonl").exists());
+}
+
+#[test]
 #[cfg(unix)]
 fn goal_artifact_symlink_escape_is_rejected_before_append() {
     let repo = Repo::new();
