@@ -4,6 +4,7 @@
 .frigg
 specs/
 docs/
+.devana
 
 # macOS
 .DS_Store
