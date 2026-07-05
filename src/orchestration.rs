@@ -35,9 +35,9 @@ use crate::runtime::{
     report_path_for_lease, runtime_lock, save_lease, spec_research_dir,
 };
 use crate::specs::{
-    ensure_spec_dispatchable, inactive_spec_names, load_spec_policy, load_tasks, ready_tasks,
-    resolve_task, scopes_overlap, select_tasks, selected_task_counts, status_set, task_by_ref,
-    task_key,
+    dependency_block, ensure_spec_dispatchable, inactive_spec_names, load_spec_policy, load_tasks,
+    ready_tasks, resolve_task, scopes_overlap, select_tasks, selected_task_counts, status_set,
+    task_by_ref, task_key,
 };
 use crate::taskfile::{
     load_task, quote_toml_string, read_optional, split_frontmatter, write_task_frontmatter,
@@ -290,6 +290,11 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
                 .detail("task", task_key(&task))
                 .detail("scope", bad_scope.to_string()),
         );
+    }
+    if let Some(block) = dependency_block(&task, &load_tasks(root, None)?) {
+        return Err(OrchError::with_code(block.reason(), block.error_code())
+            .detail("task", task_key(&task))
+            .detail("dependency", block.reference().to_string()));
     }
     require_valid_task_worker_execution_metadata(&task)?;
     let worker_reasoning_effort = resolve_worker_reasoning_effort_for_task(

@@ -389,6 +389,50 @@ pub(crate) fn task_by_ref<'a>(
         .find(|task| task.spec_id == spec && task.id() == task_id)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DependencyBlock {
+    Missing(String),
+    Unmet(String),
+}
+
+impl DependencyBlock {
+    pub(crate) fn reason(&self) -> String {
+        match self {
+            DependencyBlock::Missing(dep) => format!("missing dependency:{dep}"),
+            DependencyBlock::Unmet(dep) => format!("unmet dependency:{dep}"),
+        }
+    }
+
+    pub(crate) fn error_code(&self) -> &'static str {
+        match self {
+            DependencyBlock::Missing(_) => "missing_dependency",
+            DependencyBlock::Unmet(_) => "unmet_dependency",
+        }
+    }
+
+    pub(crate) fn reference(&self) -> &str {
+        match self {
+            DependencyBlock::Missing(dep) | DependencyBlock::Unmet(dep) => dep,
+        }
+    }
+}
+
+pub(crate) fn dependency_block(task: &Task, all_tasks: &[Task]) -> Option<DependencyBlock> {
+    for dep in task.depends() {
+        if dep == "-" {
+            continue;
+        }
+        match task_by_ref(all_tasks, &task.spec_id, &dep) {
+            None => return Some(DependencyBlock::Missing(dep)),
+            Some(dep_task) if dep_task.status() != "done" => {
+                return Some(DependencyBlock::Unmet(dep));
+            }
+            Some(_) => {}
+        }
+    }
+    None
+}
+
 /// Return dispatchable tasks plus blocked entries and lint messages for `ready`.
 pub(crate) fn ready_tasks(
     root: &Path,
@@ -417,23 +461,8 @@ pub(crate) fn ready_tasks(
             reason = Some("invalid worker_reasoning_effort".to_string());
         } else if !task.worker_model_is_valid() {
             reason = Some("invalid worker_model".to_string());
-        } else {
-            for dep in task.depends() {
-                if dep == "-" {
-                    continue;
-                }
-                match task_by_ref(&all_tasks, &task.spec_id, &dep) {
-                    None => {
-                        reason = Some(format!("missing dependency:{dep}"));
-                        break;
-                    }
-                    Some(dep_task) if dep_task.status() != "done" => {
-                        reason = Some(format!("unmet dependency:{dep}"));
-                        break;
-                    }
-                    Some(_) => {}
-                }
-            }
+        } else if let Some(block) = dependency_block(task, &all_tasks) {
+            reason = Some(block.reason());
         }
 
         if reason.is_none() {

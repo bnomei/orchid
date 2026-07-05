@@ -1468,6 +1468,45 @@ fn lease_runtime_and_parallel_guards_match_python_contract() {
 }
 
 #[test]
+fn lease_skips_depends() {
+    let repo = Repo::new();
+
+    let payload = repo.run_fail(&[
+        "lease",
+        "example",
+        "T002",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_dep",
+    ]);
+    assert_eq!(payload["code"], "unmet_dependency");
+    assert_eq!(payload["task"], "example/T002");
+    assert_eq!(payload["dependency"], "T001");
+    assert!(!repo.root.join(".orchid/leases/l_dep.json").exists());
+
+    let task_path = repo.root.join("specs/example/tasks/T001.md");
+    let task = fs::read_to_string(&task_path).unwrap();
+    fs::write(
+        &task_path,
+        task.replace("status = \"todo\"", "status = \"done\""),
+    )
+    .unwrap();
+
+    let payload = repo.run(&[
+        "lease",
+        "example",
+        "T002",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_dep",
+    ]);
+    assert_eq!(payload["lease_id"], "l_dep");
+    assert_eq!(payload["task"], "example/T002");
+}
+
+#[test]
 fn invalid_lease_ids_are_rejected_before_runtime_file_access() {
     let repo = Repo::new();
     let outside_lease = repo.root.parent().unwrap().join("outside-lease.json");
