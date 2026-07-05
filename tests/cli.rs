@@ -628,6 +628,38 @@ fn bare_goal_evaluates_ready_report_and_records_keep_decision() {
 }
 
 #[test]
+#[cfg(unix)]
+fn goal_artifact_symlink_escape_is_rejected_before_append() {
+    let repo = Repo::new();
+    repo.init_git();
+    init_ready_goal(
+        &repo,
+        "artifact-symlink-goal",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"cycle\"}'",
+        "10",
+    );
+    fs::write(repo.root.join("candidate.txt"), "candidate\n").unwrap();
+    write_goal_report(
+        &repo,
+        "artifact-symlink-goal",
+        "C001",
+        "ready_for_evaluation",
+        "next",
+    );
+
+    let outside = repo._tmp.path().join("outside-results.jsonl");
+    fs::write(&outside, "keep me\n").unwrap();
+    let results = repo
+        .root
+        .join(".orchid/goals/artifact-symlink-goal/results.jsonl");
+    std::os::unix::fs::symlink(&outside, &results).unwrap();
+
+    let failed = repo.run_fail(&["goal"]);
+    assert_eq!(failed["code"], "path_outside_repo");
+    assert_eq!(fs::read_to_string(outside).unwrap(), "keep me\n");
+}
+
+#[test]
 fn goal_keep_commits_only_in_scope_changes() {
     let repo = Repo::new();
     repo.init_git();

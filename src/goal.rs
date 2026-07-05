@@ -182,15 +182,15 @@ pub(crate) struct GoalContract {
 
 impl GoalContract {
     pub(crate) fn write(&self, root: &Path) -> OrchResult<()> {
-        let dir = safe_goal_dir(root, &self.goal_id)?;
-        atomic_write(&dir.join(GOAL_TOML), &self.to_toml())?;
+        let path = goal_artifact_path(root, &self.goal_id, GOAL_TOML, "goal_toml")?;
+        atomic_write(&path, &self.to_toml())?;
         let current_path = repo_path(root, goal_current_path(root), "goal_current_path")?;
         atomic_write(&current_path, &(self.goal_id.to_string() + "\n"))?;
         Ok(())
     }
 
     pub(crate) fn read(root: &Path, goal_id: &GoalId) -> OrchResult<Self> {
-        let path = safe_goal_dir(root, goal_id)?.join(GOAL_TOML);
+        let path = goal_artifact_path(root, goal_id, GOAL_TOML, "goal_toml")?;
         toml::from_str(&read_text(&path)?).map_err(|err| {
             OrchError::new("invalid goal.toml")
                 .detail("path", path_to_string(&path))
@@ -267,11 +267,12 @@ impl GoalState {
     }
 
     pub(crate) fn write(&self, root: &Path, goal_id: &GoalId) -> OrchResult<()> {
-        atomic_write_json(&safe_goal_dir(root, goal_id)?.join(STATE_JSON), self)
+        let path = goal_artifact_path(root, goal_id, STATE_JSON, "goal_state")?;
+        atomic_write_json(&path, self)
     }
 
     pub(crate) fn read(root: &Path, goal_id: &GoalId) -> OrchResult<Self> {
-        let path = safe_goal_dir(root, goal_id)?.join(STATE_JSON);
+        let path = goal_artifact_path(root, goal_id, STATE_JSON, "goal_state")?;
         serde_json::from_str(&read_text(&path)?).map_err(|err| {
             OrchError::new("invalid goal state")
                 .detail("path", path_to_string(&path))
@@ -504,7 +505,7 @@ impl EvaluatorResult {
         row.entry("cycle".to_string())
             .or_insert_with(|| Value::String(cycle.to_string()));
         append_jsonl(
-            &safe_goal_dir(root, goal_id)?.join(MEASUREMENTS_JSONL),
+            &goal_artifact_path(root, goal_id, MEASUREMENTS_JSONL, "goal_measurements")?,
             &row,
         )
     }
@@ -515,7 +516,10 @@ pub(crate) fn append_result(
     goal_id: &GoalId,
     result: &Map<String, Value>,
 ) -> OrchResult<()> {
-    append_jsonl(&safe_goal_dir(root, goal_id)?.join(RESULTS_JSONL), result)
+    append_jsonl(
+        &goal_artifact_path(root, goal_id, RESULTS_JSONL, "goal_results")?,
+        result,
+    )
 }
 
 pub(crate) fn next_cycle_id(cycle: &str) -> OrchResult<String> {
@@ -1192,7 +1196,7 @@ struct GoalResultCounts {
 }
 
 fn goal_result_counts(root: &Path, goal_id: &GoalId) -> OrchResult<GoalResultCounts> {
-    let path = safe_goal_dir(root, goal_id)?.join(RESULTS_JSONL);
+    let path = goal_artifact_path(root, goal_id, RESULTS_JSONL, "goal_results")?;
     if !path.exists() {
         return Ok(GoalResultCounts::default());
     }
@@ -1248,6 +1252,15 @@ fn safe_goal_dir(root: &Path, goal_id: &GoalId) -> OrchResult<PathBuf> {
         return Err(invalid_goal_id(goal_id.as_str()));
     }
     Ok(dir)
+}
+
+fn goal_artifact_path(
+    root: &Path,
+    goal_id: &GoalId,
+    filename: &str,
+    label: &str,
+) -> OrchResult<PathBuf> {
+    repo_path(root, safe_goal_dir(root, goal_id)?.join(filename), label)
 }
 
 fn append_jsonl(path: &Path, data: &Map<String, Value>) -> OrchResult<()> {
