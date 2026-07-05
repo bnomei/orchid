@@ -78,6 +78,20 @@ impl Repo {
         serde_json::from_slice(&output.stdout).expect("json stdout")
     }
 
+    fn run_fail_in(&self, cwd: &Path, args: &[&str]) -> Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_orchid"))
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .expect("run orchid");
+        assert!(
+            !output.status.success(),
+            "orchid unexpectedly passed\nstdout:{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        serde_json::from_slice(&output.stdout).expect("json stdout")
+    }
+
     fn run_fail(&self, args: &[&str]) -> Value {
         let output = Command::new(env!("CARGO_BIN_EXE_orchid"))
             .arg("--root")
@@ -3711,6 +3725,31 @@ fn root_discovery_walks_up_to_orchid_runtime_from_subdir() {
 
     let payload = repo.run_in(&package_dir, &["status", "--agent-id", "agent_123"]);
     assert_eq!(payload["lease_id"], "l_test");
+}
+
+#[test]
+fn discover_orchid_ancestor_root_prefers_nested_git_worktree() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--agent-id",
+        "agent_123",
+        "--lease-id",
+        "l_parent",
+    ]);
+
+    let nested = repo.root.join("nested-project");
+    copy_dir(Path::new(FIXTURE), &nested);
+    git(&nested, &["init", "-b", "main"]);
+    let package_dir = nested.join("crates/example/src");
+    fs::create_dir_all(&package_dir).unwrap();
+
+    let payload = repo.run_fail_in(&package_dir, &["status", "--agent-id", "agent_123"]);
+    assert_eq!(payload["code"], "agent_lease_not_found");
 }
 
 #[test]

@@ -7,6 +7,7 @@ use std::env;
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 use serde::Serialize;
 
@@ -17,7 +18,9 @@ pub(crate) fn root_from_arg(value: Option<&str>) -> OrchResult<PathBuf> {
         return abs_clean(expand_home(value));
     }
     let path = abs_clean(env::current_dir()?)?;
-    Ok(discover_orchid_root(&path).unwrap_or(path))
+    Ok(discover_git_root(&path)
+        .or_else(|| discover_orchid_root(&path))
+        .unwrap_or(path))
 }
 
 fn expand_home(value: &str) -> PathBuf {
@@ -72,6 +75,22 @@ pub(crate) fn discover_orchid_root(path: &Path) -> Option<PathBuf> {
                 .unwrap_or(false)
         })
         .map(Path::to_path_buf)
+}
+
+fn discover_git_root(path: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["-C", path.to_str()?, "rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8(output.stdout).ok()?;
+    let root = root.trim();
+    if root.is_empty() {
+        return None;
+    }
+    abs_clean(PathBuf::from(root)).ok()
 }
 
 pub(crate) fn orch_dir(root: &Path) -> PathBuf {
