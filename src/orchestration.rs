@@ -1209,7 +1209,7 @@ fn ensure_completed_lease_is_safe_to_close(root: &Path, lease: &LeaseRecord) -> 
 }
 
 fn cleanup_lease_needs_stage_guard(lease: &LeaseRecord) -> bool {
-    lease.status().is_completed()
+    (lease.status().is_completed() || lease.status().is_released())
         && !lease.is_bud()
         && !lease.task_path().is_empty()
         && !lease.scope().is_empty()

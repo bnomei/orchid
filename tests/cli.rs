@@ -4072,6 +4072,31 @@ fn cleanup_bypasses_stage_guard() {
 }
 
 #[test]
+fn cleanup_rejects_released_task_lease_with_unstaged_changes() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_released_dirty",
+    ]);
+    fs::write(repo.root.join("src/feature/work.txt"), "work\n").unwrap();
+    repo.run(&["release", "l_released_dirty", "--reason", "paused"]);
+
+    let failed = repo.run_fail(&["cleanup", "--completed"]);
+    assert_eq!(failed["code"], "close_has_unstaged_changes");
+    assert_eq!(failed["lease_id"], "l_released_dirty");
+    assert!(repo
+        .root
+        .join(".orchid/leases/l_released_dirty.json")
+        .exists());
+}
+
+#[test]
 fn close_succeeds_after_changes_are_committed() {
     let repo = Repo::new();
     repo.init_git();
