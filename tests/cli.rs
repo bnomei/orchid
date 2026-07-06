@@ -3839,9 +3839,39 @@ fn next_dispatches_scope_disjoint_ready_tasks_with_parallel_flag() {
 }
 
 #[test]
-fn next_includes_released_lease_in_cleanup() {
+fn next_includes_released_lease_in_reports_ready() {
     let repo = Repo::new();
     let lease = repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_released_validate",
+    ]);
+    fs::write(
+        repo.root.join(lease["report"].as_str().unwrap()),
+        "+++\nlease_id = \"l_released_validate\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
+    )
+    .unwrap();
+    repo.run(&[
+        "release",
+        "l_released_validate",
+        "--reason",
+        "worker-stopped",
+    ]);
+
+    let payload = repo.run(&["next", "--spec", "example"]);
+    assert_eq!(payload["phase"], "validate");
+    assert_eq!(payload["reports_ready"][0]["lease_id"], "l_released_validate");
+    assert_eq!(payload["reports_ready"][0]["task"], "example/T001");
+}
+
+#[test]
+fn next_includes_released_lease_in_cleanup() {
+    let repo = Repo::new();
+    repo.run(&[
         "lease",
         "example",
         "T001",
@@ -3856,17 +3886,13 @@ fn next_includes_released_lease_in_cleanup() {
         .join(packet["packet"].as_str().unwrap())
         .exists());
     assert!(repo.root.join(".orchid/leases/l_released_cleanup.json").exists());
-    fs::write(
-        repo.root.join(lease["report"].as_str().unwrap()),
-        "+++\nlease_id = \"l_released_cleanup\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
-    )
-    .unwrap();
     repo.run(&["release", "l_released_cleanup", "--reason", "abandoned"]);
 
     let payload = repo.run(&["next", "--spec", "example"]);
     assert_eq!(payload["phase"], "cleanup");
     assert_eq!(payload["cleanup"][0]["lease_id"], "l_released_cleanup");
     assert!(payload.get("stage").is_none());
+    assert!(payload.get("reports_ready").is_none());
 }
 
 #[test]
