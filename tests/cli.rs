@@ -2169,6 +2169,53 @@ fn lease_agent_metadata_attach_and_status_lookup_work() {
 }
 
 #[test]
+fn attach_agent_rejects_completed_lease() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:unassigned",
+        "--lease-id",
+        "l_done",
+    ]);
+    repo.run(&["packet", "--lease", "l_done", "--role", "worker"]);
+    let packet_path = repo.root.join(".orchid/packets/l_done-worker.md");
+    assert!(packet_path.exists());
+    let before_packet = fs::read_to_string(&packet_path).unwrap();
+    let before_lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_done.json")).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        repo.root.join(".orchid/reports/l_done.md"),
+        "+++\nlease_id = \"l_done\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
+    )
+    .unwrap();
+    repo.run(&["complete", "--lease", "l_done", "--verified-by", "validator:x"]);
+
+    let failed = repo.run_fail(&[
+        "lease-attach-agent",
+        "--lease",
+        "l_done",
+        "--agent-id",
+        "agent_new",
+    ]);
+    assert_eq!(failed["code"], "lease_not_active");
+    assert_eq!(failed["status"], "completed");
+
+    let after_packet = fs::read_to_string(&packet_path).unwrap();
+    assert_eq!(after_packet, before_packet);
+    let after_lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_done.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(after_lease["agent_id"], before_lease["agent_id"]);
+    assert_eq!(after_lease["owner"], before_lease["owner"]);
+}
+
+#[test]
 fn attach_agent_refreshes_existing_worker_packet() {
     let repo = Repo::new();
     repo.run(&[

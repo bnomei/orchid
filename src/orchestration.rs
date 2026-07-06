@@ -605,6 +605,14 @@ pub(crate) fn lease_attach_agent(
     validate_lease_id(&request.lease)?;
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, &request.lease)?;
+    if !lease.status().is_active() {
+        return Err(OrchError::coded(
+            "cannot attach agent to a lease that is not active",
+            ErrorCode::LeaseNotActive,
+        )
+        .detail("lease_id", request.lease.clone())
+        .detail("status", lease.get_str("status").unwrap_or("").to_string()));
+    }
     ensure_agent_id_available(root, Some(&request.agent_id), Some(&request.lease))?;
     let worker_packet_exists = lease
         .worker_packet_path()
