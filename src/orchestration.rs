@@ -301,6 +301,12 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
         .detail("task", task_key(&task))
         .detail("verification_mode", task.verification_mode().to_string()));
     }
+    if task.scope().is_empty() {
+        return Err(
+            OrchError::coded("missing scope", ErrorCode::ScopeRequired)
+                .detail("task", task_key(&task)),
+        );
+    }
     if let Some(bad_scope) = task
         .scope()
         .iter()

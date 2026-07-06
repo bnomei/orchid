@@ -3626,6 +3626,38 @@ fn lease_rejects_empty_owner() {
 }
 
 #[test]
+fn lease_rejects_empty_scope() {
+    let repo = Repo::new();
+    let task_path = repo.root.join("specs/example/tasks/T001.md");
+    let content = fs::read_to_string(&task_path).unwrap();
+    let updated = content.replace("scope = [\"src/feature/\"]", "scope = []");
+    fs::write(&task_path, updated).unwrap();
+
+    let lint = repo.run_fail(&["lint"]);
+    assert_eq!(lint["ok"], false);
+    let errors = lint["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|err| {
+        err["task"] == "example/T001" && err["error"] == "missing scope"
+    }));
+
+    let payload = repo.run_fail(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_empty",
+    ]);
+    assert_eq!(payload["code"], "scope_required");
+    assert!(!repo.root.join(".orchid/leases/l_empty.json").exists());
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+}
+
+#[test]
 fn lease_rejects_blank_scope_entries() {
     let repo = Repo::new();
     let spec_dir = repo.root.join("specs/blanklease");
