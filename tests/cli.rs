@@ -249,7 +249,7 @@ fn init_ready_goal(repo: &Repo, goal_id: &str, evaluator: &str, max_iterations: 
     ]);
 }
 
-fn task_status(root: &Path, path: &str) -> String {
+fn task_frontmatter(root: &Path, path: &str) -> toml::Value {
     let text = fs::read_to_string(root.join(path)).expect("task file");
     let text = text.replace("\r\n", "\n");
     let start = "+++\n".len();
@@ -257,8 +257,12 @@ fn task_status(root: &Path, path: &str) -> String {
         .find("\n+++\n")
         .map(|idx| idx + start)
         .expect("frontmatter end");
-    let meta: toml::Value = toml::from_str(&text[start..end]).expect("frontmatter toml");
-    meta.get("status")
+    toml::from_str(&text[start..end]).expect("frontmatter toml")
+}
+
+fn task_status(root: &Path, path: &str) -> String {
+    task_frontmatter(root, path)
+        .get("status")
         .and_then(toml::Value::as_str)
         .unwrap_or("todo")
         .to_string()
@@ -4080,6 +4084,66 @@ fn block_rewrites_task_with_nested_table_frontmatter() {
     let rewritten = fs::read_to_string(&path).unwrap();
     assert!(rewritten.contains("owner"));
     assert!(rewritten.contains("team-a"));
+}
+
+#[test]
+fn complete_clears_block_metadata() {
+    let repo = Repo::new();
+    repo.run(&["block", "example", "T001", "--reason", "waiting on API"]);
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "blocked"
+    );
+    let meta = task_frontmatter(&repo.root, "specs/example/tasks/T001.md");
+    assert!(meta.get("blocked_at").is_some());
+    assert_eq!(
+        meta.get("blocked_reason").and_then(toml::Value::as_str),
+        Some("waiting on API")
+    );
+
+    rewrite_task_status(&repo.root, "specs/example/tasks/T001.md", "blocked", "todo");
+    let meta = task_frontmatter(&repo.root, "specs/example/tasks/T001.md");
+    assert_eq!(
+        meta.get("status").and_then(toml::Value::as_str),
+        Some("todo")
+    );
+    assert!(meta.get("blocked_at").is_some());
+    assert!(meta.get("blocked_reason").is_some());
+
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_block_clear",
+    ]);
+    repo.run(&[
+        "complete",
+        "--lease",
+        "l_block_clear",
+        "--verified-by",
+        "mayor",
+    ]);
+
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "done"
+    );
+    let meta = task_frontmatter(&repo.root, "specs/example/tasks/T001.md");
+    assert_eq!(
+        meta.get("status").and_then(toml::Value::as_str),
+        Some("done")
+    );
+    assert!(
+        meta.get("blocked_at").is_none(),
+        "done task should not retain blocked_at"
+    );
+    assert!(
+        meta.get("blocked_reason").is_none(),
+        "done task should not retain blocked_reason"
+    );
 }
 
 #[test]

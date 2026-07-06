@@ -837,6 +837,8 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     let mut frontmatter = original_frontmatter.clone();
     let meta = frontmatter.raw_mut();
     insert(meta, "status", "done");
+    meta.remove("blocked_at");
+    meta.remove("blocked_reason");
     insert(meta, "verification_status", verification_status.clone());
     insert(meta, "completed_at", now_iso());
     let implemented_by = if request.implemented_by.is_empty() {
