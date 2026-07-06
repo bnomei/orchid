@@ -3874,7 +3874,7 @@ fn complete_rolls_back_task_when_lease_save_fails() {
 }
 
 #[test]
-fn complete_git_false_window_marks_recovered_stage_plan_unsafe() {
+fn complete_rejects_when_git_unavailable() {
     let repo = Repo::new();
     repo.init_git();
     repo.run(&[
@@ -3892,49 +3892,23 @@ fn complete_git_false_window_marks_recovered_stage_plan_unsafe() {
     let git_bak = repo.root.join(".git.bak");
     fs::rename(&git_dir, &git_bak).unwrap();
 
-    repo.run(&[
+    let failed = repo.run_fail(&[
         "complete",
         "--lease",
         "l_git_false",
         "--verified-by",
         "mayor",
     ]);
-
+    assert_eq!(failed["code"], "complete_unsafe_to_stage");
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
     let lease: Value = serde_json::from_str(
         &fs::read_to_string(repo.root.join(".orchid/leases/l_git_false.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(lease["status"], "completed");
-    assert!(lease.get("completed_changed").is_none());
-    assert_eq!(lease["completed_changed_unavailable"], true);
-
-    fs::rename(&git_bak, &git_dir).unwrap();
-    fs::write(
-        repo.root.join("src/feature/extra.txt"),
-        "post-completion edit\n",
-    )
-    .unwrap();
-
-    let touched = repo.run(&["git-touched", "--lease", "l_git_false"]);
-    assert_ne!(touched.get("git"), Some(&Value::Bool(false)));
-    assert_eq!(touched["safe_to_stage"], false);
-    assert_eq!(touched["completion_snapshot_missing"], true);
-    assert!(touched.get("stage").is_none());
-    let blocked = touched["blocked_by"]["completion_snapshot_missing"]
-        .as_array()
-        .unwrap();
-    assert!(blocked.iter().any(|path| path == "src/feature/extra.txt"));
-    assert!(blocked.iter().any(|path| path == "src/feature/work.txt"));
-
-    let plan = repo.run(&["git-stage-plan", "--lease", "l_git_false"]);
-    assert_ne!(plan.get("git"), Some(&Value::Bool(false)));
-    assert_eq!(plan["safe_to_stage"], false);
-    assert!(plan.get("pathspecs").is_none());
-    assert!(plan["excluded"]["completion_snapshot_missing"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|path| path == "src/feature/extra.txt"));
+    assert_eq!(lease["status"], "active");
 }
 
 #[test]
@@ -4010,6 +3984,78 @@ fn complete_clean_spec_research_failure_keeps_completion() {
     )
     .unwrap();
     assert_eq!(lease["status"], "completed");
+}
+
+#[test]
+fn complete_rejects_when_git_touched_unsafe() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_test",
+    ]);
+    fs::write(
+        repo.root.join("src/feature/work.txt"),
+        "changed during lease\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.root.join("src/other/work.txt"),
+        "changed during lease\n",
+    )
+    .unwrap();
+    let touched = repo.run(&["git-touched", "--lease", "l_test"]);
+    assert_eq!(touched["safe_to_stage"], false);
+
+    let failed = repo.run_fail(&["complete", "--lease", "l_test", "--verified-by", "mayor"]);
+    assert_eq!(failed["code"], "complete_unsafe_to_stage");
+    assert_eq!(failed["lease_id"], "l_test");
+    assert_eq!(
+        failed["blocked_by"]["out_of_scope"],
+        serde_json::json!(["src/other/work.txt"])
+    );
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_test.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lease["status"], "active");
+
+    let bud_repo = Repo::new();
+    bud_repo.init_git();
+    let instructions = bud_repo.root.join("bud-instructions.md");
+    fs::write(&instructions, "Change feature work only.\n").unwrap();
+    bud_repo.run(&[
+        "bud",
+        "--title",
+        "Feature bud",
+        "--scope",
+        "src/feature/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_bud",
+    ]);
+    fs::write(bud_repo.root.join("src/feature/bud.txt"), "in scope\n").unwrap();
+    fs::write(bud_repo.root.join("src/other/bud.txt"), "out of scope\n").unwrap();
+    let bud_touched = bud_repo.run(&["git-touched", "--lease", "l_bud"]);
+    assert_eq!(bud_touched["safe_to_stage"], false);
+
+    let bud_failed = bud_repo.run_fail(&["complete", "--lease", "l_bud", "--verified-by", "mayor"]);
+    assert_eq!(bud_failed["code"], "complete_unsafe_to_stage");
+    let bud_lease: Value = serde_json::from_str(
+        &fs::read_to_string(bud_repo.root.join(".orchid/leases/l_bud.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(bud_lease["status"], "active");
 }
 
 #[test]

@@ -732,6 +732,7 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
         .detail("lease_id", request.lease.clone())
         .detail("status", lease.get_str("status").unwrap_or("").to_string()));
     }
+    ensure_lease_safe_to_complete(root, &lease)?;
     if lease.is_bud() {
         let completed_at = now_iso();
         let implemented_by = if request.implemented_by.is_empty() {
@@ -1070,6 +1071,26 @@ pub(crate) fn cleanup(root: &Path, request: &CleanupRequest) -> OrchResult<Map<S
         string_values(prune_empty_runtime_dirs(root)?),
     );
     Ok(payload)
+}
+
+fn ensure_lease_safe_to_complete(root: &Path, lease: &LeaseRecord) -> OrchResult<()> {
+    let touched = touched_for_lease(root, lease)?;
+    if touched
+        .get("safe_to_stage")
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
+        let mut err = OrchError::coded(
+            "cannot complete while git-touched reports unsafe staging",
+            ErrorCode::CompleteUnsafeToStage,
+        )
+        .detail("lease_id", lease.id().unwrap_or("").to_string());
+        if let Some(blocked_by) = touched.get("blocked_by") {
+            err = err.detail("blocked_by", blocked_by.clone());
+        }
+        return Err(err);
+    }
+    Ok(())
 }
 
 fn ensure_completed_lease_is_safe_to_close(root: &Path, lease: &LeaseRecord) -> OrchResult<()> {
