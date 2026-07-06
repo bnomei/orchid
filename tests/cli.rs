@@ -4488,6 +4488,31 @@ fn complete_rejects_released_lease_after_release() {
 }
 
 #[test]
+fn report_check_rejects_completed_lease() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_done",
+    ]);
+    fs::write(
+        repo.root.join(".orchid/reports/l_done.md"),
+        "+++\nlease_id = \"l_done\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
+    )
+    .unwrap();
+    repo.run(&["complete", "--lease", "l_done", "--verified-by", "validator:x"]);
+
+    let failed = repo.run_fail(&["report-check", ".orchid/reports/l_done.md"]);
+    assert_eq!(failed["code"], "lease_not_active");
+    assert_eq!(failed["lease_id"], "l_done");
+    assert_eq!(failed["status"], "completed");
+}
+
+#[test]
 fn report_check_rejects_report_path_that_claims_another_lease() {
     let repo = Repo::new();
     repo.write_task_file("example", "T005", "todo", "src/other/");
