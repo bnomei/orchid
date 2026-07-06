@@ -2193,7 +2193,13 @@ fn attach_agent_rejects_completed_lease() {
         "+++\nlease_id = \"l_done\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
     )
     .unwrap();
-    repo.run(&["complete", "--lease", "l_done", "--verified-by", "validator:x"]);
+    repo.run(&[
+        "complete",
+        "--lease",
+        "l_done",
+        "--verified-by",
+        "validator:x",
+    ]);
 
     let failed = repo.run_fail(&[
         "lease-attach-agent",
@@ -3608,10 +3614,7 @@ fn lease_rejects_empty_owner() {
         "l_empty_ws",
     ]);
     assert_eq!(whitespace_failed["code"], "lease_owner_required");
-    assert!(!repo
-        .root
-        .join(".orchid/leases/l_empty_ws.json")
-        .exists());
+    assert!(!repo.root.join(".orchid/leases/l_empty_ws.json").exists());
     assert_eq!(
         task_status(&repo.root, "specs/example/tasks/T001.md"),
         "todo"
@@ -4488,7 +4491,7 @@ fn complete_rejects_released_lease_after_release() {
 }
 
 #[test]
-fn report_check_rejects_completed_lease() {
+fn report_check_accepts_terminal_leases() {
     let repo = Repo::new();
     repo.run(&[
         "lease",
@@ -4504,12 +4507,40 @@ fn report_check_rejects_completed_lease() {
         "+++\nlease_id = \"l_done\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
     )
     .unwrap();
-    repo.run(&["complete", "--lease", "l_done", "--verified-by", "validator:x"]);
+    repo.run(&[
+        "complete",
+        "--lease",
+        "l_done",
+        "--verified-by",
+        "validator:x",
+    ]);
 
-    let failed = repo.run_fail(&["report-check", ".orchid/reports/l_done.md"]);
-    assert_eq!(failed["code"], "lease_not_active");
-    assert_eq!(failed["lease_id"], "l_done");
-    assert_eq!(failed["status"], "completed");
+    let completed = repo.run(&["report-check", ".orchid/reports/l_done.md"]);
+    assert_eq!(completed["lease_id"], "l_done");
+    assert_eq!(completed["task"], "example/T001");
+    assert_eq!(completed["status"], "ready_for_validation");
+
+    repo.write_task_file("example", "T005", "todo", "src/released/");
+    repo.run(&[
+        "lease",
+        "example",
+        "T005",
+        "--owner",
+        "worker:b",
+        "--lease-id",
+        "l_released",
+    ]);
+    fs::write(
+        repo.root.join(".orchid/reports/l_released.md"),
+        "+++\nlease_id = \"l_released\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
+    )
+    .unwrap();
+    repo.run(&["release", "l_released", "--reason", "paused"]);
+
+    let released = repo.run(&["report-check", ".orchid/reports/l_released.md"]);
+    assert_eq!(released["lease_id"], "l_released");
+    assert_eq!(released["task"], "example/T005");
+    assert_eq!(released["status"], "ready_for_validation");
 }
 
 #[test]
@@ -5392,7 +5423,13 @@ fn packet_rejects_completed_lease() {
         "+++\nlease_id = \"l_done\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
     )
     .unwrap();
-    repo.run(&["complete", "--lease", "l_done", "--verified-by", "validator:x"]);
+    repo.run(&[
+        "complete",
+        "--lease",
+        "l_done",
+        "--verified-by",
+        "validator:x",
+    ]);
     let lease_before: Value = serde_json::from_str(
         &fs::read_to_string(repo.root.join(".orchid/leases/l_done.json")).unwrap(),
     )

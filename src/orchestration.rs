@@ -1609,14 +1609,6 @@ pub(crate) fn report_check(
         );
     }
     let lease = load_lease(root, lease_id)?;
-    if !lease.status().is_active() {
-        return Err(OrchError::coded(
-            "cannot report-check a lease that is not active",
-            ErrorCode::LeaseNotActive,
-        )
-        .detail("lease_id", lease_id)
-        .detail("status", lease.get_str("status").unwrap_or("").to_string()));
-    }
     let expected_report_path = report_path_for_lease(root, &lease)?;
     let expected_report = relpath(&expected_report_path, root);
     if expected_report != report_path.rel {
