@@ -4357,6 +4357,23 @@ fn block_rejects_human_checkpoint_spec() {
 }
 
 #[test]
+fn block_rejects_inactive_spec_via_md_path() {
+    let repo = Repo::new();
+    let task_path = repo.write_task_file("_example", "T001", "todo", "src/archived/");
+    let task_rel = task_path.strip_prefix(&repo.root).unwrap().to_str().unwrap();
+
+    let selector_failed = repo.run_fail(&["block", "_example", "T001", "--reason", "hold"]);
+    assert_eq!(selector_failed["code"], "invalid_spec_id");
+
+    let md_failed = repo.run_fail(&["block", task_rel, "--reason", "hold"]);
+    assert_eq!(md_failed["code"], "inactive_spec");
+    assert_eq!(
+        task_status(&repo.root, task_rel),
+        "todo"
+    );
+}
+
+#[test]
 fn block_rejects_completed_task() {
     let repo = Repo::new();
     repo.run(&[
