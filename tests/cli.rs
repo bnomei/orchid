@@ -4606,6 +4606,29 @@ fn stage_plan_marks_unsafe_when_git_unavailable() {
 }
 
 #[test]
+fn git_touched_and_stage_plan_respect_runtime_lock() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_lock",
+    ]);
+    let lock_dir = repo.root.join(".orchid/locks");
+    fs::create_dir_all(&lock_dir).unwrap();
+    fs::write(lock_dir.join("state.lock"), "held\n").unwrap();
+
+    let touched = repo.run_fail(&["git-touched", "--lease", "l_lock"]);
+    assert_eq!(touched["code"], "runtime_lock_busy");
+
+    let plan = repo.run_fail(&["git-stage-plan", "--lease", "l_lock"]);
+    assert_eq!(plan["code"], "runtime_lock_busy");
+}
+
+#[test]
 fn stage_plan_excludes_in_scope_edits_made_after_complete() {
     let repo = Repo::new();
     repo.init_git();

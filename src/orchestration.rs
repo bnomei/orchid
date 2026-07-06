@@ -1607,6 +1607,7 @@ pub(crate) fn git_status(root: &Path) -> OrchResult<Map<String, Value>> {
 
 pub(crate) fn git_touched(root: &Path, lease_id: &str) -> OrchResult<Map<String, Value>> {
     validate_lease_id(lease_id)?;
+    let _lock = runtime_lock(root)?;
     let lease = load_lease(root, lease_id)?;
     let data = touched_for_lease(root, &lease)?;
     let mut payload = json_ok();
@@ -1616,6 +1617,7 @@ pub(crate) fn git_touched(root: &Path, lease_id: &str) -> OrchResult<Map<String,
 
 pub(crate) fn git_stage_plan(root: &Path, lease_id: &str) -> OrchResult<Map<String, Value>> {
     validate_lease_id(lease_id)?;
+    let _lock = runtime_lock(root)?;
     let lease = load_lease(root, lease_id)?;
     let mut payload = json_ok();
     payload.extend(stage_plan_for_lease(root, &lease)?.to_payload());
