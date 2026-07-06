@@ -3874,7 +3874,7 @@ fn complete_rolls_back_task_when_lease_save_fails() {
 }
 
 #[test]
-fn complete_git_false_window_omits_completed_changed_and_attributes_after_recovery() {
+fn complete_git_false_window_marks_recovered_stage_plan_unsafe() {
     let repo = Repo::new();
     repo.init_git();
     repo.run(&[
@@ -3906,17 +3906,35 @@ fn complete_git_false_window_omits_completed_changed_and_attributes_after_recove
     .unwrap();
     assert_eq!(lease["status"], "completed");
     assert!(lease.get("completed_changed").is_none());
+    assert_eq!(lease["completed_changed_unavailable"], true);
 
     fs::rename(&git_bak, &git_dir).unwrap();
+    fs::write(
+        repo.root.join("src/feature/extra.txt"),
+        "post-completion edit\n",
+    )
+    .unwrap();
+
+    let touched = repo.run(&["git-touched", "--lease", "l_git_false"]);
+    assert_ne!(touched.get("git"), Some(&Value::Bool(false)));
+    assert_eq!(touched["safe_to_stage"], false);
+    assert_eq!(touched["completion_snapshot_missing"], true);
+    assert!(touched.get("stage").is_none());
+    let blocked = touched["blocked_by"]["completion_snapshot_missing"]
+        .as_array()
+        .unwrap();
+    assert!(blocked.iter().any(|path| path == "src/feature/extra.txt"));
+    assert!(blocked.iter().any(|path| path == "src/feature/work.txt"));
 
     let plan = repo.run(&["git-stage-plan", "--lease", "l_git_false"]);
     assert_ne!(plan.get("git"), Some(&Value::Bool(false)));
-    assert_ne!(plan.get("safe_to_stage"), Some(&Value::Bool(false)));
-    assert!(plan["pathspecs"]
+    assert_eq!(plan["safe_to_stage"], false);
+    assert!(plan.get("pathspecs").is_none());
+    assert!(plan["excluded"]["completion_snapshot_missing"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|pathspec| pathspec.as_str().unwrap().contains("src/feature/work.txt")));
+        .any(|path| path == "src/feature/extra.txt"));
 }
 
 #[test]

@@ -447,6 +447,8 @@ pub(crate) fn apply_completed_changed_snapshot(
 ) {
     if status.get("git").and_then(Value::as_bool).unwrap_or(false) {
         lease.set("completed_changed", changed_paths_value(status));
+    } else {
+        lease.set("completed_changed_unavailable", true);
     }
 }
 
@@ -665,6 +667,7 @@ pub(crate) fn touched_for_lease(
     let completed_window: Option<BTreeSet<String>> = lease
         .completed_changed()
         .map(|paths| paths.into_iter().collect());
+    let completed_snapshot_missing = lease.status().is_completed() && completed_window.is_none();
     let records = git_status_records_from_status(&status);
     let scope = lease.scope();
     let task_path = lease.task_path();
@@ -672,10 +675,12 @@ pub(crate) fn touched_for_lease(
     let mut stage_paths = BTreeSet::new();
     let mut out_of_scope = BTreeSet::new();
     let mut ambiguous = BTreeSet::new();
+    let mut missing_completion_snapshot = BTreeSet::new();
     let mut changed_records = Vec::new();
     let mut stage_records = Vec::new();
     let mut out_of_scope_records = Vec::new();
     let mut ambiguous_records = Vec::new();
+    let mut missing_completion_snapshot_records = Vec::new();
 
     for record in records {
         let paths = record.visible_paths();
@@ -688,6 +693,14 @@ pub(crate) fn touched_for_lease(
                 ambiguous.insert(path);
             }
             ambiguous_records.push(record);
+            continue;
+        }
+
+        if completed_snapshot_missing {
+            for path in paths {
+                missing_completion_snapshot.insert(path);
+            }
+            missing_completion_snapshot_records.push(record);
             continue;
         }
 
@@ -736,6 +749,11 @@ pub(crate) fn touched_for_lease(
         "ambiguous",
         ambiguous.iter().cloned().collect(),
     );
+    insert_array_if_non_empty(
+        &mut blocked_by,
+        "completion_snapshot_missing",
+        missing_completion_snapshot.iter().cloned().collect(),
+    );
     if !blocked_by.is_empty() {
         map.insert("blocked_by".to_string(), Value::Object(blocked_by));
     }
@@ -746,6 +764,11 @@ pub(crate) fn touched_for_lease(
         &out_of_scope_records,
     );
     insert_records_value_if_non_empty(&mut blocked_by_records, "ambiguous", &ambiguous_records);
+    insert_records_value_if_non_empty(
+        &mut blocked_by_records,
+        "completion_snapshot_missing",
+        &missing_completion_snapshot_records,
+    );
     if !blocked_by_records.is_empty() {
         map.insert(
             "blocked_by_records".to_string(),
@@ -753,7 +776,11 @@ pub(crate) fn touched_for_lease(
         );
     }
     insert_array_if_non_empty(&mut map, "preexisting_dirty", preexisting_dirty);
-    if !out_of_scope.is_empty() || !ambiguous.is_empty() {
+    if completed_snapshot_missing {
+        map.insert("completion_snapshot_missing".to_string(), Value::Bool(true));
+    }
+    if !out_of_scope.is_empty() || !ambiguous.is_empty() || !missing_completion_snapshot.is_empty()
+    {
         map.insert("safe_to_stage".to_string(), Value::Bool(false));
     }
     if !git_available {
