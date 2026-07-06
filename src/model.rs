@@ -324,6 +324,10 @@ impl LeaseStatus {
     pub(crate) fn is_completed(&self) -> bool {
         matches!(self, Self::Completed)
     }
+
+    pub(crate) fn is_released(&self) -> bool {
+        matches!(self, Self::Released)
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

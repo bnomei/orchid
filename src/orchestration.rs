@@ -31,7 +31,8 @@ use crate::planner::{
 };
 use crate::runtime::{
     active_leases, active_leases_lenient, all_leases, clean_spec_research, close_lease_files,
-    compact_lease, completed_runtime_leases, lease_id_for, lease_stale, load_lease,
+    compact_lease, cleanup_runtime_leases, completed_runtime_leases, lease_id_for, lease_stale,
+    load_lease,
     prune_empty_runtime_dirs, report_path_for_lease, runtime_lock, save_lease, scan_leases,
     spec_research_dir, CorruptLeaseFile,
 };
@@ -702,11 +703,15 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
         .into_iter()
         .filter(|lease| lease.is_bud() || lease_in_selected_specs(lease, &selected_specs))
         .collect();
+    let cleanup_leases: Vec<_> = cleanup_runtime_leases(root)?
+        .into_iter()
+        .filter(|lease| lease.is_bud() || lease_in_selected_specs(lease, &selected_specs))
+        .collect();
     let stage = completed
         .iter()
         .map(|lease| stage_plan_for_lease(root, lease))
         .collect::<OrchResult<Vec<_>>>()?;
-    let cleanup = completed
+    let cleanup = cleanup_leases
         .iter()
         .map(|lease| CleanupCandidate {
             lease_id: lease.id().unwrap_or("").to_string(),

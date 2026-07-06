@@ -472,6 +472,13 @@ pub(crate) fn completed_runtime_leases(root: &Path) -> OrchResult<Vec<LeaseRecor
         .collect())
 }
 
+pub(crate) fn cleanup_runtime_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
+    Ok(all_leases(root)?
+        .into_iter()
+        .filter(|lease| lease.status().is_completed() || lease.status().is_released())
+        .collect())
+}
+
 pub(crate) fn lease_id_for(task_path: &Path, owner: &str) -> LeaseId {
     let seed = format!("{}:{}:{}", path_to_string(task_path), owner, now_iso());
     let mut hasher = Sha1::new();
