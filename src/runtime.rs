@@ -131,14 +131,34 @@ pub(crate) fn active_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
 pub(crate) struct CorruptLeaseFile {
     pub(crate) lease_id: String,
     pub(crate) path: String,
+    pub(crate) code: String,
     pub(crate) error: String,
 }
 
 impl CorruptLeaseFile {
+    fn new(
+        lease_id: impl Into<String>,
+        path: impl Into<String>,
+        code: impl Into<String>,
+        error: impl Into<String>,
+    ) -> Self {
+        Self {
+            lease_id: lease_id.into(),
+            path: path.into(),
+            code: code.into(),
+            error: error.into(),
+        }
+    }
+
+    pub(crate) fn is_invalid_lease_id(&self) -> bool {
+        self.code == ErrorCode::InvalidLeaseId.as_str()
+    }
+
     pub(crate) fn to_payload(&self) -> Map<String, Value> {
         let mut map = Map::new();
         map.insert("lease_id".to_string(), Value::String(self.lease_id.clone()));
         map.insert("path".to_string(), Value::String(self.path.clone()));
+        map.insert("code".to_string(), Value::String(self.code.clone()));
         map.insert("error".to_string(), Value::String(self.error.clone()));
         map
     }
@@ -200,47 +220,52 @@ pub(crate) fn scan_leases(root: &Path) -> OrchResult<LeaseScan> {
         let raw = match fs::read_to_string(&lease_path) {
             Ok(raw) => raw,
             Err(err) => {
-                corrupt_leases.push(CorruptLeaseFile {
-                    lease_id: expected_lease_id.to_string(),
+                corrupt_leases.push(CorruptLeaseFile::new(
+                    expected_lease_id,
                     path,
-                    error: err.to_string(),
-                });
+                    ErrorCode::CorruptLeaseFile.as_str(),
+                    err.to_string(),
+                ));
                 continue;
             }
         };
         let parsed = match serde_json::from_str::<Value>(&raw) {
             Ok(parsed) => parsed,
             Err(err) => {
-                corrupt_leases.push(CorruptLeaseFile {
-                    lease_id: expected_lease_id.to_string(),
+                corrupt_leases.push(CorruptLeaseFile::new(
+                    expected_lease_id,
                     path,
-                    error: err.to_string(),
-                });
+                    ErrorCode::CorruptLeaseFile.as_str(),
+                    err.to_string(),
+                ));
                 continue;
             }
         };
         let Value::Object(mut data) = parsed else {
-            corrupt_leases.push(CorruptLeaseFile {
-                lease_id: expected_lease_id.to_string(),
+            corrupt_leases.push(CorruptLeaseFile::new(
+                expected_lease_id,
                 path,
-                error: "lease file is not a json object".to_string(),
-            });
+                ErrorCode::CorruptLeaseFile.as_str(),
+                "lease file is not a json object",
+            ));
             continue;
         };
         if let Err(err) = bind_lease_record_id(&mut data, expected_lease_id) {
-            corrupt_leases.push(CorruptLeaseFile {
-                lease_id: expected_lease_id.to_string(),
+            corrupt_leases.push(CorruptLeaseFile::new(
+                expected_lease_id,
                 path,
-                error: err.message,
-            });
+                err.code,
+                err.message,
+            ));
             continue;
         }
         if let Some(error) = lease_status_field_error(&data) {
-            corrupt_leases.push(CorruptLeaseFile {
-                lease_id: expected_lease_id.to_string(),
+            corrupt_leases.push(CorruptLeaseFile::new(
+                expected_lease_id,
                 path,
+                ErrorCode::CorruptLeaseFile.as_str(),
                 error,
-            });
+            ));
             continue;
         }
         data.entry("_path".to_string())
@@ -272,11 +297,12 @@ pub(crate) fn load_lease(root: &Path, lease_id: &str) -> OrchResult<LeaseRecord>
     };
     bind_lease_record_id(&mut data, lease_id)?;
     if let Some(error) = lease_status_field_error(&data) {
-        return Err(CorruptLeaseFile {
-            lease_id: lease_id.to_string(),
-            path: relpath(&path, root),
+        return Err(CorruptLeaseFile::new(
+            lease_id,
+            relpath(&path, root),
+            ErrorCode::CorruptLeaseFile.as_str(),
             error,
-        }
+        )
         .to_error());
     }
     data.entry("_path".to_string())

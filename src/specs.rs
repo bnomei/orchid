@@ -406,10 +406,10 @@ impl DependencyBlock {
         }
     }
 
-    pub(crate) fn error_code(&self) -> &'static str {
+    pub(crate) fn error_code(&self) -> ErrorCode {
         match self {
-            DependencyBlock::Missing(_) => "missing_dependency",
-            DependencyBlock::Unmet(_) => "unmet_dependency",
+            DependencyBlock::Missing(_) => ErrorCode::MissingDependency,
+            DependencyBlock::Unmet(_) => ErrorCode::UnmetDependency,
         }
     }
 

@@ -38,6 +38,7 @@ pub(crate) enum ErrorCode {
     InvalidTaskId,
     LeaseIdAlreadyExists,
     LeaseNotFound,
+    MissingDependency,
     ParallelNotConfirmed,
     PathOutsideRepo,
     InvalidReportStatus,
@@ -56,6 +57,7 @@ pub(crate) enum ErrorCode {
     TaskIdRequired,
     TaskNotCompletable,
     TaskNotTodo,
+    UnmetDependency,
 }
 
 impl ErrorCode {
@@ -70,9 +72,7 @@ impl ErrorCode {
             ErrorCode::CloseHasUnstagedChanges => "close_has_unstaged_changes",
             ErrorCode::CompleteRequiresActiveLease => "complete_requires_active_lease",
             ErrorCode::CompleteUnsafeToStage => "complete_unsafe_to_stage",
-            ErrorCode::CompleteVerificationStatusInvalid => {
-                "complete_verification_status_invalid"
-            }
+            ErrorCode::CompleteVerificationStatusInvalid => "complete_verification_status_invalid",
             ErrorCode::CompleteVerifiedByRequired => "complete_verified_by_required",
             ErrorCode::CorruptLeaseFile => "corrupt_lease_file",
             ErrorCode::HumanCheckpoint => "human_checkpoint",
@@ -90,6 +90,7 @@ impl ErrorCode {
             ErrorCode::InvalidTaskId => "invalid_task_id",
             ErrorCode::LeaseIdAlreadyExists => "lease_id_already_exists",
             ErrorCode::LeaseNotFound => "lease_not_found",
+            ErrorCode::MissingDependency => "missing_dependency",
             ErrorCode::ParallelNotConfirmed => "parallel_not_confirmed",
             ErrorCode::PathOutsideRepo => "path_outside_repo",
             ErrorCode::InvalidReportStatus => "invalid_report_status",
@@ -108,6 +109,7 @@ impl ErrorCode {
             ErrorCode::TaskIdRequired => "task_id_required",
             ErrorCode::TaskNotCompletable => "task_not_completable",
             ErrorCode::TaskNotTodo => "task_not_todo",
+            ErrorCode::UnmetDependency => "unmet_dependency",
         }
     }
 }

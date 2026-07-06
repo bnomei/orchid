@@ -18,8 +18,8 @@ pub(crate) fn root_from_arg(value: Option<&str>) -> OrchResult<PathBuf> {
         return abs_clean(expand_home(value));
     }
     let path = abs_clean(env::current_dir()?)?;
-    Ok(discover_git_root(&path)
-        .or_else(|| discover_orchid_root(&path))
+    Ok(discover_orchid_root(&path)
+        .or_else(|| discover_git_root(&path))
         .unwrap_or(path))
 }
 

@@ -78,20 +78,6 @@ impl Repo {
         serde_json::from_slice(&output.stdout).expect("json stdout")
     }
 
-    fn run_fail_in(&self, cwd: &Path, args: &[&str]) -> Value {
-        let output = Command::new(env!("CARGO_BIN_EXE_orchid"))
-            .current_dir(cwd)
-            .args(args)
-            .output()
-            .expect("run orchid");
-        assert!(
-            !output.status.success(),
-            "orchid unexpectedly passed\nstdout:{}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        serde_json::from_slice(&output.stdout).expect("json stdout")
-    }
-
     fn run_fail(&self, args: &[&str]) -> Value {
         let output = Command::new(env!("CARGO_BIN_EXE_orchid"))
             .arg("--root")
@@ -1745,8 +1731,8 @@ fn lease_rejects_reopened_task_while_completed_lease_exists() {
     assert!(repo.root.join(".orchid/leases/l_old.json").exists());
     assert!(!repo.root.join(".orchid/leases/l_new.json").exists());
 
-    let cleanup = repo.run(&["cleanup", "--completed"]);
-    assert!(cleanup["deleted"]
+    let closed = repo.run(&["close", "--lease", "l_old", "--force"]);
+    assert!(closed["deleted"]
         .as_array()
         .unwrap()
         .contains(&Value::String(".orchid/leases/l_old.json".to_string())));
@@ -3168,6 +3154,7 @@ fn next_blocks_recovery_when_corrupt_lease_file_exists() {
 #[test]
 fn cleanup_closes_completed_leases_and_warns_about_corrupt_lease_file() {
     let repo = Repo::new();
+    repo.init_git();
     repo.run(&[
         "lease",
         "example",
@@ -3178,6 +3165,8 @@ fn cleanup_closes_completed_leases_and_warns_about_corrupt_lease_file() {
         "l_real",
     ]);
     repo.run(&["complete", "--lease", "l_real", "--verified-by", "mayor"]);
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-m", "complete lease"]);
     write_corrupt_lease(&repo, "l_ghost");
 
     let cleanup = repo.run(&["cleanup", "--completed"]);
@@ -3636,9 +3625,9 @@ fn lease_rejects_empty_scope() {
     let lint = repo.run_fail(&["lint"]);
     assert_eq!(lint["ok"], false);
     let errors = lint["errors"].as_array().unwrap();
-    assert!(errors.iter().any(|err| {
-        err["task"] == "example/T001" && err["error"] == "missing scope"
-    }));
+    assert!(errors
+        .iter()
+        .any(|err| { err["task"] == "example/T001" && err["error"] == "missing scope" }));
 
     let payload = repo.run_fail(&[
         "lease",
@@ -3760,7 +3749,7 @@ fn next_prefers_validate_over_recover_for_stale_lease_with_report() {
 }
 
 #[test]
-fn stale_omits_leases_with_reports() {
+fn stale_includes_leases_with_reports() {
     let repo = Repo::new();
     repo.run(&[
         "lease",
@@ -3789,7 +3778,7 @@ fn stale_omits_leases_with_reports() {
         .iter()
         .map(|item| item["id"].as_str().unwrap())
         .collect();
-    assert!(!stale_ids.contains(&"l_123"));
+    assert!(stale_ids.contains(&"l_123"));
 }
 
 #[test]
@@ -3887,11 +3876,11 @@ fn next_includes_released_lease_in_cleanup() {
         "l_released_cleanup",
     ]);
     let packet = repo.run(&["packet", "--lease", "l_released_cleanup"]);
+    assert!(repo.root.join(packet["packet"].as_str().unwrap()).exists());
     assert!(repo
         .root
-        .join(packet["packet"].as_str().unwrap())
+        .join(".orchid/leases/l_released_cleanup.json")
         .exists());
-    assert!(repo.root.join(".orchid/leases/l_released_cleanup.json").exists());
     repo.run(&["release", "l_released_cleanup", "--reason", "abandoned"]);
 
     let payload = repo.run(&["next", "--spec", "example"]);
@@ -4009,7 +3998,7 @@ fn close_blocks_completed_lease_with_unstaged_changes() {
 }
 
 #[test]
-fn complete_close_git_split_allows_completed_non_git_task_without_stage_pathspecs() {
+fn complete_close_git_split_blocks_completed_non_git_task_without_completion_snapshot() {
     let repo = Repo::new();
     repo.run(&[
         "lease",
@@ -4027,7 +4016,15 @@ fn complete_close_git_split_allows_completed_non_git_task_without_stage_pathspec
     assert_eq!(plan["safe_to_stage"], false);
     assert!(plan.get("pathspecs").is_none());
 
-    let closed = repo.run(&["close", "--lease", "l_1"]);
+    let failed = repo.run_fail(&["close", "--lease", "l_1"]);
+    assert_eq!(failed["code"], "close_has_unstaged_changes");
+    assert_eq!(failed["lease_id"], "l_1");
+
+    let cleanup = repo.run_fail(&["cleanup", "--completed"]);
+    assert_eq!(cleanup["code"], "close_has_unstaged_changes");
+    assert_eq!(cleanup["lease_id"], "l_1");
+
+    let closed = repo.run(&["close", "--lease", "l_1", "--force"]);
     assert!(closed["deleted"]
         .as_array()
         .unwrap()
@@ -4423,17 +4420,18 @@ fn block_rejects_human_checkpoint_spec() {
 fn block_rejects_inactive_spec_via_md_path() {
     let repo = Repo::new();
     let task_path = repo.write_task_file("_example", "T001", "todo", "src/archived/");
-    let task_rel = task_path.strip_prefix(&repo.root).unwrap().to_str().unwrap();
+    let task_rel = task_path
+        .strip_prefix(&repo.root)
+        .unwrap()
+        .to_str()
+        .unwrap();
 
     let selector_failed = repo.run_fail(&["block", "_example", "T001", "--reason", "hold"]);
     assert_eq!(selector_failed["code"], "invalid_spec_id");
 
     let md_failed = repo.run_fail(&["block", task_rel, "--reason", "hold"]);
     assert_eq!(md_failed["code"], "inactive_spec");
-    assert_eq!(
-        task_status(&repo.root, task_rel),
-        "todo"
-    );
+    assert_eq!(task_status(&repo.root, task_rel), "todo");
 }
 
 #[test]
@@ -4563,6 +4561,42 @@ fn complete_rejects_when_git_unavailable() {
     )
     .unwrap();
     assert_eq!(lease["status"], "active");
+}
+
+#[test]
+fn complete_checks_touched_paths_when_git_appears_after_lease_creation() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_no_baseline",
+    ]);
+    repo.init_git();
+    fs::write(repo.root.join("src/feature/work.txt"), "in scope\n").unwrap();
+    fs::write(repo.root.join("src/other/work.txt"), "out of scope\n").unwrap();
+
+    let failed = repo.run_fail(&[
+        "complete",
+        "--lease",
+        "l_no_baseline",
+        "--verified-by",
+        "mayor",
+    ]);
+
+    assert_eq!(failed["code"], "complete_unsafe_to_stage");
+    assert_eq!(failed["lease_id"], "l_no_baseline");
+    assert_eq!(
+        failed["blocked_by"]["out_of_scope"],
+        serde_json::json!(["src/other/work.txt"])
+    );
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
 }
 
 #[test]
@@ -4846,8 +4880,12 @@ fn complete_rejects_invalid_verification_status() {
             "bud path should reject verification_status={status:?}"
         );
         let lease_json: Value = serde_json::from_str(
-            &fs::read_to_string(bud_repo.root.join(".orchid/leases/l_invalid_verify_bud.json"))
-                .unwrap(),
+            &fs::read_to_string(
+                bud_repo
+                    .root
+                    .join(".orchid/leases/l_invalid_verify_bud.json"),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(lease_json["status"], "active");
@@ -5066,7 +5104,7 @@ fn root_discovery_walks_up_to_orchid_runtime_from_subdir() {
 }
 
 #[test]
-fn discover_orchid_ancestor_root_prefers_nested_git_worktree() {
+fn root_discovery_prefers_orchid_ancestor_over_nested_git_worktree() {
     let repo = Repo::new();
     repo.run(&[
         "lease",
@@ -5086,8 +5124,8 @@ fn discover_orchid_ancestor_root_prefers_nested_git_worktree() {
     let package_dir = nested.join("crates/example/src");
     fs::create_dir_all(&package_dir).unwrap();
 
-    let payload = repo.run_fail_in(&package_dir, &["status", "--agent-id", "agent_123"]);
-    assert_eq!(payload["code"], "agent_lease_not_found");
+    let payload = repo.run_in(&package_dir, &["status", "--agent-id", "agent_123"]);
+    assert_eq!(payload["lease_id"], "l_parent");
 }
 
 #[test]
@@ -6004,12 +6042,15 @@ fn remaining_public_commands_keep_their_json_contracts() {
         "+++\nlease_id = \"l_test\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
     )
     .unwrap();
+    let stale_with_report = repo.run(&["stale", "--older-than", "30m"]);
+    assert_eq!(stale_with_report["stale"][0]["id"], "l_test");
+
     let report = repo.run(&["report-check", ".orchid/reports/l_test.md"]);
     assert_eq!(report["next"], "validation");
 
     let release = repo.run(&["release", "l_test", "--reason", "paused"]);
     assert_eq!(release["lease_id"], "l_test");
-    let close = repo.run(&["close", "--lease", "l_test"]);
+    let close = repo.run(&["close", "--lease", "l_test", "--force"]);
     assert_eq!(close["lease_id"], "l_test");
 
     let git_status = repo.run(&["git-status"]);

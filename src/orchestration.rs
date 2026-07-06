@@ -30,11 +30,10 @@ use crate::planner::{
     decide_next, BlockedTask, CleanupCandidate, NextInput, ReadyTask, ReportReady,
 };
 use crate::runtime::{
-    active_leases, active_leases_lenient, all_leases, clean_spec_research, close_lease_files,
-    compact_lease, cleanup_runtime_leases, completed_runtime_leases, lease_id_for, lease_stale,
-    load_lease,
-    prune_empty_runtime_dirs, report_path_for_lease, runtime_lock, save_lease, scan_leases,
-    spec_research_dir, CorruptLeaseFile,
+    active_leases, active_leases_lenient, all_leases, clean_spec_research, cleanup_runtime_leases,
+    close_lease_files, compact_lease, completed_runtime_leases, lease_id_for, lease_stale,
+    load_lease, prune_empty_runtime_dirs, report_path_for_lease, runtime_lock, save_lease,
+    scan_leases, spec_research_dir, CorruptLeaseFile,
 };
 use crate::specs::{
     dependency_block, ensure_spec_dispatchable, inactive_spec_names, load_spec_policy, load_tasks,
@@ -303,10 +302,8 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
         .detail("verification_mode", task.verification_mode().to_string()));
     }
     if task.scope().is_empty() {
-        return Err(
-            OrchError::coded("missing scope", ErrorCode::ScopeRequired)
-                .detail("task", task_key(&task)),
-        );
+        return Err(OrchError::coded("missing scope", ErrorCode::ScopeRequired)
+            .detail("task", task_key(&task)));
     }
     if let Some(bad_scope) = task
         .scope()
@@ -331,7 +328,7 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
         );
     }
     if let Some(block) = dependency_block(&task, &load_tasks(root, None)?) {
-        return Err(OrchError::with_code(block.reason(), block.error_code())
+        return Err(OrchError::coded(block.reason(), block.error_code())
             .detail("task", task_key(&task))
             .detail("dependency", block.reference().to_string()));
     }
@@ -990,12 +987,6 @@ pub(crate) fn stale(root: &Path, older_than: &str) -> OrchResult<Map<String, Val
             .unwrap_or_default();
         let heartbeat = parse_iso_datetime_str(&raw).unwrap_or(epoch);
         if heartbeat < cutoff {
-            if report_path_for_lease(root, &lease)
-                .map(|path| path.exists())
-                .unwrap_or(false)
-            {
-                continue;
-            }
             let mut item = Map::new();
             item.insert("id".to_string(), lease.id_value());
             item.insert("task".to_string(), lease.task_value());
@@ -1152,11 +1143,10 @@ pub(crate) fn cleanup(root: &Path, request: &CleanupRequest) -> OrchResult<Map<S
 }
 
 fn ensure_lease_safe_to_complete(root: &Path, lease: &LeaseRecord) -> OrchResult<()> {
-    if !lease.has_git_baseline() {
+    let touched = touched_for_lease(root, lease)?;
+    if !lease.has_git_baseline() && touched.get("git").and_then(Value::as_bool) == Some(false) {
         return Ok(());
     }
-
-    let touched = touched_for_lease(root, lease)?;
     if lease_completion_is_unsafe(&touched) {
         let mut err = OrchError::coded(
             "cannot complete while git-touched reports unsafe staging",
@@ -1192,11 +1182,9 @@ fn lease_completion_is_unsafe(touched: &Map<String, Value>) -> bool {
 }
 
 fn ensure_completed_lease_is_safe_to_close(root: &Path, lease: &LeaseRecord) -> OrchResult<()> {
-    if !lease.is_bud()
-        && (lease.status().is_completed() || lease.status().is_released())
-    {
+    if !lease.is_bud() && (lease.status().is_completed() || lease.status().is_released()) {
         let plan = stage_plan_for_lease(root, lease)?;
-        if !plan.pathspecs.is_empty() || (plan.git_available && !plan.safe_to_stage) {
+        if stage_plan_blocks_close(&plan) {
             return Err(OrchError::coded(
                 "lease has unstaged changes; stage first or use --force",
                 ErrorCode::CloseHasUnstagedChanges,
@@ -1206,6 +1194,10 @@ fn ensure_completed_lease_is_safe_to_close(root: &Path, lease: &LeaseRecord) -> 
         }
     }
     Ok(())
+}
+
+fn stage_plan_blocks_close(plan: &crate::model::StagePlan) -> bool {
+    !plan.pathspecs.is_empty() || !plan.excluded.is_empty() || !plan.safe_to_stage
 }
 
 fn cleanup_lease_needs_stage_guard(lease: &LeaseRecord) -> bool {
@@ -1220,7 +1212,7 @@ fn fail_on_corrupt_lease_identity_for_cleanup(
 ) -> OrchResult<()> {
     if let Some(corrupt) = corrupt_leases
         .iter()
-        .find(|lease| lease.error.contains("invalid lease id"))
+        .find(|lease| lease.is_invalid_lease_id())
     {
         return Err(
             OrchError::coded("invalid lease id", ErrorCode::InvalidLeaseId)
