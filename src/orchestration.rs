@@ -277,6 +277,12 @@ pub(crate) fn status(root: &Path, request: &StatusRequest) -> OrchResult<Map<Str
 }
 
 pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<String, Value>> {
+    if nonempty_trimmed(&request.owner).is_none() {
+        return Err(OrchError::coded(
+            "owner is required",
+            ErrorCode::LeaseOwnerRequired,
+        ));
+    }
     let requested_lease_id = request.lease_id.clone().map(LeaseId::parse).transpose()?;
     let _lock = runtime_lock(root)?;
     ensure_runtime_dirs(root)?;

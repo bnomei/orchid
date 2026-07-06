@@ -3529,6 +3529,49 @@ fn lint_rejects_blank_scope_entries() {
 }
 
 #[test]
+fn lease_rejects_empty_owner() {
+    let repo = Repo::new();
+    let failed = repo.run_fail(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "",
+        "--agent-id",
+        "agent_123",
+        "--lease-id",
+        "l_empty",
+    ]);
+    assert_eq!(failed["code"], "lease_owner_required");
+    assert!(!repo.root.join(".orchid/leases/l_empty.json").exists());
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+
+    let whitespace_failed = repo.run_fail(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "   ",
+        "--agent-id",
+        "agent_123",
+        "--lease-id",
+        "l_empty_ws",
+    ]);
+    assert_eq!(whitespace_failed["code"], "lease_owner_required");
+    assert!(!repo
+        .root
+        .join(".orchid/leases/l_empty_ws.json")
+        .exists());
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+}
+
+#[test]
 fn lease_rejects_blank_scope_entries() {
     let repo = Repo::new();
     let spec_dir = repo.root.join("specs/blanklease");
