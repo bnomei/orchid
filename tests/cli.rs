@@ -4115,6 +4115,74 @@ fn complete_rejects_when_git_touched_unsafe() {
 }
 
 #[test]
+fn complete_rejects_empty_verified_by() {
+    let task_repo = Repo::new();
+    task_repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_empty_verify_task",
+    ]);
+    let failed = task_repo.run_fail(&[
+        "complete",
+        "--lease",
+        "l_empty_verify_task",
+        "--verified-by",
+        "",
+    ]);
+    assert_eq!(failed["code"], "complete_verified_by_required");
+    assert_eq!(
+        task_status(&task_repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+
+    let whitespace_failed = task_repo.run_fail(&[
+        "complete",
+        "--lease",
+        "l_empty_verify_task",
+        "--verified-by",
+        "   ",
+    ]);
+    assert_eq!(whitespace_failed["code"], "complete_verified_by_required");
+    assert_eq!(
+        task_status(&task_repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+
+    let bud_repo = Repo::new();
+    let instructions = bud_repo.root.join("bud-instructions.md");
+    fs::write(&instructions, "Reject empty verified_by.\n").unwrap();
+    bud_repo.run(&[
+        "bud",
+        "--title",
+        "Reject empty verified_by",
+        "--scope",
+        "src/other/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_empty_verify_bud",
+    ]);
+    let bud_failed = bud_repo.run_fail(&[
+        "complete",
+        "--lease",
+        "l_empty_verify_bud",
+        "--verified-by",
+        "",
+    ]);
+    assert_eq!(bud_failed["code"], "complete_verified_by_required");
+    let lease_json: Value = serde_json::from_str(
+        &fs::read_to_string(bud_repo.root.join(".orchid/leases/l_empty_verify_bud.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lease_json["status"], "active");
+    assert!(lease_json.get("verified_by").is_none());
+}
+
+#[test]
 fn complete_rejects_task_not_in_completable_status() {
     let repo = Repo::new();
     repo.run(&[

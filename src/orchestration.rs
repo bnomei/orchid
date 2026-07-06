@@ -723,6 +723,12 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
 
 pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map<String, Value>> {
     validate_lease_id(&request.lease)?;
+    if nonempty_trimmed(&request.verified_by).is_none() {
+        return Err(OrchError::coded(
+            "verified_by is required",
+            ErrorCode::CompleteVerifiedByRequired,
+        ));
+    }
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, &request.lease)?;
     if !lease.status().is_active() {
