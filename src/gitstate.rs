@@ -129,7 +129,7 @@ pub(crate) fn head_commit(root: &Path) -> OrchResult<Option<String>> {
     Ok(Some(git_text(root, &["rev-parse", "HEAD"], true)?))
 }
 
-fn git_available(root: &Path) -> bool {
+pub(crate) fn git_available(root: &Path) -> bool {
     git(root, &["rev-parse", "--show-toplevel"], true).is_ok()
 }
 

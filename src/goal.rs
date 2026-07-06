@@ -781,14 +781,11 @@ fn evaluate_cycle_report(
         return Ok(next);
     }
 
-    let protected_changes =
-        changed_protected_surfaces(root, contract, next.baseline_commit.as_deref())?;
-    if !protected_changes.is_empty() {
+    if let Some(reason) =
+        protected_surface_block_reason(root, contract, next.baseline_commit.as_deref())?
+    {
         next.status = GoalStatus::Blocked;
-        next.budget_exhausted_reason = Some(format!(
-            "protected surface changed: {}",
-            protected_changes.join(", ")
-        ));
+        next.budget_exhausted_reason = Some(reason);
         let candidate_commit = gitstate::head_commit(root)?;
         append_cycle_result(
             root,
@@ -855,15 +852,12 @@ fn evaluate_cycle_report(
     let result_reason = evaluator.reason.clone();
 
     if recommendation == EvaluatorRecommendation::Keep {
-        let protected_changes =
-            changed_protected_surfaces(root, contract, next.baseline_commit.as_deref())?;
-        if !protected_changes.is_empty() {
+        if let Some(reason) =
+            protected_surface_block_reason(root, contract, next.baseline_commit.as_deref())?
+        {
             next.status = GoalStatus::Blocked;
             next.last_decision = Some(EvaluatorRecommendation::Blocked);
-            next.budget_exhausted_reason = Some(format!(
-                "protected surface changed: {}",
-                protected_changes.join(", ")
-            ));
+            next.budget_exhausted_reason = Some(reason);
             let candidate_commit = gitstate::head_commit(root)?;
             append_cycle_result(
                 root,
@@ -976,17 +970,33 @@ fn evaluator_command(root: &Path, contract: &GoalContract) -> OrchResult<Command
     Ok(command)
 }
 
-fn changed_protected_surfaces(
+fn protected_surface_block_reason(
     root: &Path,
     contract: &GoalContract,
     baseline: Option<&str>,
-) -> OrchResult<Vec<String>> {
+) -> OrchResult<Option<String>> {
+    if contract.protected_surfaces.is_empty() {
+        return Ok(None);
+    }
+    if !gitstate::git_available(root) {
+        return Ok(Some(
+            "git unavailable; cannot verify protected surfaces".to_string(),
+        ));
+    }
     let scopes: Vec<String> = contract
         .protected_surfaces
         .iter()
         .map(|path| path_to_string(path))
         .collect();
-    gitstate::changed_protected_paths(root, &scopes, baseline)
+    let protected_changes = gitstate::changed_protected_paths(root, &scopes, baseline)?;
+    if protected_changes.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(format!(
+            "protected surface changed: {}",
+            protected_changes.join(", ")
+        )))
+    }
 }
 
 fn close_cycle(

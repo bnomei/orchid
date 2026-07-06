@@ -1434,6 +1434,62 @@ fn protected_surface_edited_during_evaluation_blocks_keep() {
 }
 
 #[test]
+fn protected_surface_blocks_when_git_unavailable() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run_stdout(&[
+        "goal",
+        "init",
+        "--id",
+        "git-false-goal",
+        "--goal",
+        "Reduce search ranking p95",
+        "--evaluator",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"baseline\"}'",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta",
+        "5",
+        "--hypothesis",
+        "cache normalized query features",
+        "--max-iterations",
+        "10",
+        "--max-duration",
+        "10h",
+        "--protected-surface",
+        "justfile",
+        "--scope",
+        ".",
+    ]);
+    fs::write(repo.root.join("justfile"), "goal-eval:\n\t@echo changed\n").unwrap();
+    write_goal_report(
+        &repo,
+        "git-false-goal",
+        "C001",
+        "ready_for_evaluation",
+        "next attempt",
+    );
+
+    let git_dir = repo.root.join(".git");
+    let git_bak = repo.root.join(".git.bak");
+    fs::rename(&git_dir, &git_bak).unwrap();
+
+    let stdout = repo.run_stdout(&["goal"]);
+    assert!(stdout.starts_with("# Goal Blocked"));
+    assert!(stdout.contains("git unavailable; cannot verify protected surfaces"));
+    let state = goal_state(&repo, "git-false-goal");
+    assert_eq!(state["status"], "blocked");
+    assert!(!repo
+        .root
+        .join(".orchid/goals/git-false-goal/measurements.jsonl")
+        .exists());
+    let status = repo.run_stdout(&["goal", "status"]);
+    assert!(status.contains("- Kept cycles: `0`"));
+}
+
+#[test]
 fn protected_surface_committed_in_cycle_blocks_automatic_decision() {
     let repo = Repo::new();
     repo.init_git();
