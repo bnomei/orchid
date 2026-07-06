@@ -680,12 +680,8 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
         })
         .map(|lease| compact_lease(lease, Some(now), Some(stale_after)))
         .collect::<OrchResult<Vec<_>>>()?;
-    let released: Vec<_> = all_leases(root)?
-        .into_iter()
-        .filter(|lease| lease.status().is_released())
-        .collect();
     let mut reports_ready = Vec::new();
-    for lease in active.iter().chain(released.iter()) {
+    for lease in &active {
         if !lease.is_bud() && !lease_in_selected_specs(lease, &selected_specs) {
             continue;
         }

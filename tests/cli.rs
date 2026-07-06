@@ -3839,7 +3839,7 @@ fn next_dispatches_scope_disjoint_ready_tasks_with_parallel_flag() {
 }
 
 #[test]
-fn next_includes_released_lease_in_reports_ready() {
+fn next_cleans_released_lease_with_report_without_validation_commands() {
     let repo = Repo::new();
     let lease = repo.run(&[
         "lease",
@@ -3863,9 +3863,15 @@ fn next_includes_released_lease_in_reports_ready() {
     ]);
 
     let payload = repo.run(&["next", "--spec", "example"]);
-    assert_eq!(payload["phase"], "validate");
-    assert_eq!(payload["reports_ready"][0]["lease_id"], "l_released_validate");
-    assert_eq!(payload["reports_ready"][0]["task"], "example/T001");
+    assert_eq!(payload["phase"], "cleanup");
+    assert_eq!(payload["cleanup"][0]["lease_id"], "l_released_validate");
+    assert_eq!(payload["cleanup"][0]["task"], "example/T001");
+    assert!(payload.get("reports_ready").is_none());
+    assert!(payload.get("cmds").is_none());
+    assert_eq!(
+        payload["cmd"],
+        serde_json::json!(["close", "--lease", "l_released_validate"])
+    );
 }
 
 #[test]
