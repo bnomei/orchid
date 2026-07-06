@@ -3957,6 +3957,32 @@ fn close_keeps_lease_json_when_dependent_delete_fails() {
 }
 
 #[test]
+fn close_blocks_released_lease_with_unstaged_changes() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    fs::write(repo.root.join("src/feature/work.txt"), "work\n").unwrap();
+    repo.run(&["release", "l_1", "--reason", "worker-stopped"]);
+
+    let failed = repo.run_fail(&["close", "--lease", "l_1"]);
+    assert_eq!(failed["code"], "close_has_unstaged_changes");
+
+    assert!(repo.root.join(".orchid/leases/l_1.json").exists());
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+}
+
+#[test]
 fn close_blocks_completed_lease_with_unstaged_changes() {
     let repo = Repo::new();
     repo.init_git();

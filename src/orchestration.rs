@@ -1082,7 +1082,10 @@ pub(crate) fn close(root: &Path, request: &CloseRequest) -> OrchResult<Map<Strin
         )
         .detail("lease_id", request.lease.clone()));
     }
-    if lease.status().is_completed() && !lease.is_bud() && !request.force {
+    if !lease.is_bud()
+        && (lease.status().is_completed() || lease.status().is_released())
+        && !request.force
+    {
         ensure_completed_lease_is_safe_to_close(root, &lease)?;
     }
     if request.force && lease.status().is_active() && !lease.is_bud() {
@@ -1189,11 +1192,13 @@ fn lease_completion_is_unsafe(touched: &Map<String, Value>) -> bool {
 }
 
 fn ensure_completed_lease_is_safe_to_close(root: &Path, lease: &LeaseRecord) -> OrchResult<()> {
-    if lease.status().is_completed() && !lease.is_bud() {
+    if !lease.is_bud()
+        && (lease.status().is_completed() || lease.status().is_released())
+    {
         let plan = stage_plan_for_lease(root, lease)?;
         if !plan.pathspecs.is_empty() || (plan.git_available && !plan.safe_to_stage) {
             return Err(OrchError::coded(
-                "completed lease has unstaged changes; stage first or use --force",
+                "lease has unstaged changes; stage first or use --force",
                 ErrorCode::CloseHasUnstagedChanges,
             )
             .detail("lease_id", lease.id().unwrap_or("").to_string())
