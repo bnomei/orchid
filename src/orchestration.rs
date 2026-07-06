@@ -1074,12 +1074,12 @@ pub(crate) fn cleanup(root: &Path, request: &CleanupRequest) -> OrchResult<Map<S
 }
 
 fn ensure_lease_safe_to_complete(root: &Path, lease: &LeaseRecord) -> OrchResult<()> {
+    if !lease.has_git_baseline() {
+        return Ok(());
+    }
+
     let touched = touched_for_lease(root, lease)?;
-    if touched
-        .get("safe_to_stage")
-        .and_then(Value::as_bool)
-        == Some(false)
-    {
+    if lease_completion_is_unsafe(&touched) {
         let mut err = OrchError::coded(
             "cannot complete while git-touched reports unsafe staging",
             ErrorCode::CompleteUnsafeToStage,
@@ -1091,6 +1091,26 @@ fn ensure_lease_safe_to_complete(root: &Path, lease: &LeaseRecord) -> OrchResult
         return Err(err);
     }
     Ok(())
+}
+
+fn lease_completion_is_unsafe(touched: &Map<String, Value>) -> bool {
+    if touched.get("git").and_then(Value::as_bool) == Some(false) {
+        return true;
+    }
+
+    let Some(blocked_by) = touched.get("blocked_by").and_then(Value::as_object) else {
+        return false;
+    };
+
+    ["out_of_scope", "completion_snapshot_missing"]
+        .iter()
+        .any(|key| {
+            blocked_by
+                .get(*key)
+                .and_then(Value::as_array)
+                .map(|paths| !paths.is_empty())
+                .unwrap_or(false)
+        })
 }
 
 fn ensure_completed_lease_is_safe_to_close(root: &Path, lease: &LeaseRecord) -> OrchResult<()> {

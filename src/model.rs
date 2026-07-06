@@ -453,6 +453,12 @@ impl LeaseRecord {
         self.get_str("lease_mode").unwrap_or("").to_string()
     }
 
+    pub(crate) fn has_git_baseline(&self) -> bool {
+        self.get_str("base_head")
+            .map(|value| !value.is_empty())
+            .unwrap_or(false)
+    }
+
     pub(crate) fn owner_value(&self) -> Value {
         self.get("owner").cloned().unwrap_or(Value::Null)
     }
