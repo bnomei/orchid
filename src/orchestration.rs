@@ -914,6 +914,7 @@ pub(crate) fn block(root: &Path, request: &BlockRequest) -> OrchResult<Map<Strin
     let _lock = runtime_lock(root)?;
     ensure_runtime_dirs(root)?;
     let task = resolve_task(root, &request.target, request.task_id.as_deref())?;
+    ensure_spec_dispatchable(root, &task.spec_id)?;
     if task.status_model().is_done() {
         return Err(OrchError::coded(
             "cannot block a completed task",

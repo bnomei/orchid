@@ -4179,6 +4179,62 @@ fn complete_clears_block_metadata() {
 }
 
 #[test]
+fn block_rejects_manual_spec() {
+    let repo = Repo::new();
+    fs::write(
+        repo.root.join("specs/example/spec.toml"),
+        "execution_policy = \"manual\"\n",
+    )
+    .unwrap();
+
+    let lease_failed = repo.run_fail(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_manual",
+    ]);
+    assert_eq!(lease_failed["code"], "spec_manual");
+
+    let block_failed = repo.run_fail(&["block", "example", "T001", "--reason", "hold"]);
+    assert_eq!(block_failed["code"], "spec_manual");
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+}
+
+#[test]
+fn block_rejects_human_checkpoint_spec() {
+    let repo = Repo::new();
+    fs::write(
+        repo.root.join("specs/example/spec.toml"),
+        "human_checkpoint = \"before-implementation\"\n",
+    )
+    .unwrap();
+
+    let lease_failed = repo.run_fail(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_checkpoint",
+    ]);
+    assert_eq!(lease_failed["code"], "human_checkpoint");
+
+    let block_failed = repo.run_fail(&["block", "example", "T001", "--reason", "hold"]);
+    assert_eq!(block_failed["code"], "human_checkpoint");
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+}
+
+#[test]
 fn block_rejects_completed_task() {
     let repo = Repo::new();
     repo.run(&[
