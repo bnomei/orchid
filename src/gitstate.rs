@@ -440,6 +440,16 @@ pub(crate) fn changed_paths_value(status: &Map<String, Value>) -> Value {
     string_array(changed_paths(status))
 }
 
+/// Store `completed_changed` only when git was available at complete time.
+pub(crate) fn apply_completed_changed_snapshot(
+    lease: &mut LeaseRecord,
+    status: &Map<String, Value>,
+) {
+    if status.get("git").and_then(Value::as_bool).unwrap_or(false) {
+        lease.set("completed_changed", changed_paths_value(status));
+    }
+}
+
 pub(crate) fn status_records_value(status: &Map<String, Value>) -> Value {
     status
         .get("records")

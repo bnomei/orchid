@@ -15,8 +15,8 @@ use crate::core::{
     OrchError, OrchResult,
 };
 use crate::gitstate::{
-    changed_paths_value, git_status_data, stage_plan_for_lease, status_records_value,
-    touched_for_lease,
+    apply_completed_changed_snapshot, changed_paths_value, git_status_data, stage_plan_for_lease,
+    status_records_value, touched_for_lease,
 };
 use crate::model::{
     validate_lease_id, ActiveLeaseRecordInput, LeaseId, LeaseMode, LeaseRecord, ReasoningEffort,
@@ -754,7 +754,7 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
             lease.set("commit_review", request.commit_review.clone());
         }
         let completed_status = git_status_data(root)?;
-        lease.set("completed_changed", changed_paths_value(&completed_status));
+        apply_completed_changed_snapshot(&mut lease, &completed_status);
         save_lease(root, &lease)?;
         let mut payload = json_ok();
         insert(&mut payload, "lease_id", request.lease.clone());
@@ -813,7 +813,7 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     };
     lease.set("status", "completed");
     lease.set("completed_at", completed_at);
-    lease.set("completed_changed", changed_paths_value(&completed_status));
+    apply_completed_changed_snapshot(&mut lease, &completed_status);
     if let Err(err) = save_lease(root, &lease) {
         let _ = write_task_frontmatter(&task, original_frontmatter);
         return Err(err);

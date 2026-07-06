@@ -3874,6 +3874,52 @@ fn complete_rolls_back_task_when_lease_save_fails() {
 }
 
 #[test]
+fn complete_git_false_window_omits_completed_changed_and_attributes_after_recovery() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_git_false",
+    ]);
+    fs::write(repo.root.join("src/feature/work.txt"), "work\n").unwrap();
+
+    let git_dir = repo.root.join(".git");
+    let git_bak = repo.root.join(".git.bak");
+    fs::rename(&git_dir, &git_bak).unwrap();
+
+    repo.run(&[
+        "complete",
+        "--lease",
+        "l_git_false",
+        "--verified-by",
+        "mayor",
+    ]);
+
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_git_false.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lease["status"], "completed");
+    assert!(lease.get("completed_changed").is_none());
+
+    fs::rename(&git_bak, &git_dir).unwrap();
+
+    let plan = repo.run(&["git-stage-plan", "--lease", "l_git_false"]);
+    assert_ne!(plan.get("git"), Some(&Value::Bool(false)));
+    assert_ne!(plan.get("safe_to_stage"), Some(&Value::Bool(false)));
+    assert!(plan["pathspecs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|pathspec| pathspec.as_str().unwrap().contains("src/feature/work.txt")));
+}
+
+#[test]
 fn complete_rolls_back_task_when_git_status_fails() {
     let repo = Repo::new();
     repo.init_git();
