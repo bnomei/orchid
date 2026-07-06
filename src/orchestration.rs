@@ -600,6 +600,7 @@ pub(crate) fn lease_attach_agent(
 }
 
 pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String, Value>> {
+    let _lock = runtime_lock(root)?;
     let stale_after = parse_duration(&request.older_than)?;
     let now = Utc::now();
     let (tasks, selected_specs) = select_tasks(root, specs_arg(&request.specs), request.all_open)?;

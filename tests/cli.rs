@@ -4629,6 +4629,17 @@ fn git_touched_and_stage_plan_respect_runtime_lock() {
 }
 
 #[test]
+fn next_respects_runtime_lock() {
+    let repo = Repo::new();
+    let lock_dir = repo.root.join(".orchid/locks");
+    fs::create_dir_all(&lock_dir).unwrap();
+    fs::write(lock_dir.join("state.lock"), "held\n").unwrap();
+
+    let payload = repo.run_fail(&["next", "--spec", "example"]);
+    assert_eq!(payload["code"], "runtime_lock_busy");
+}
+
+#[test]
 fn stage_plan_excludes_in_scope_edits_made_after_complete() {
     let repo = Repo::new();
     repo.init_git();
