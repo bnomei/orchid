@@ -88,6 +88,18 @@ pub(crate) fn validate_lease_id(value: &str) -> OrchResult<()> {
     LeaseId::parse(value).map(|_| ())
 }
 
+/// Returns an error message when lease JSON lacks a usable `status` field.
+pub(crate) fn lease_status_field_error(data: &Map<String, Value>) -> Option<String> {
+    match data.get("status") {
+        None => Some("lease file is missing required status field".to_string()),
+        Some(Value::String(raw)) if raw.is_empty() => {
+            Some("lease file has empty status field".to_string())
+        }
+        Some(Value::String(_)) => None,
+        Some(_) => Some("lease file has invalid status field".to_string()),
+    }
+}
+
 fn is_safe_lease_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -289,7 +301,9 @@ pub(crate) enum LeaseStatus {
 
 impl LeaseStatus {
     pub(crate) fn from_value(value: Option<&Value>) -> Self {
-        let raw = value.and_then(Value::as_str).unwrap_or("active");
+        let Some(raw) = value.and_then(Value::as_str).filter(|raw| !raw.is_empty()) else {
+            return Self::Other(String::new());
+        };
         match raw {
             "active" => Self::Active,
             "completed" => Self::Completed,

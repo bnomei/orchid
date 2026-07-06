@@ -2874,6 +2874,44 @@ fn write_lease_json(repo: &Repo, lease_id: &str, value: Value) {
 }
 
 #[test]
+fn lease_missing_status_is_corrupt() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_done",
+    ]);
+    repo.run(&["complete", "--lease", "l_done", "--verified-by", "mayor"]);
+
+    let lease_path = repo.root.join(".orchid/leases/l_done.json");
+    let mut lease: Value = serde_json::from_str(&fs::read_to_string(&lease_path).unwrap()).unwrap();
+    lease.as_object_mut().unwrap().remove("status");
+    fs::write(&lease_path, serde_json::to_string(&lease).unwrap()).unwrap();
+
+    let running = repo.run(&["running"]);
+    assert_eq!(running["leases"].as_array().unwrap().len(), 0);
+    let corrupt = running["corrupt_leases"].as_array().unwrap();
+    assert_eq!(corrupt.len(), 1);
+    assert_eq!(corrupt[0]["lease_id"], "l_done");
+    assert!(corrupt[0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("status"));
+
+    let heartbeat = repo.run_fail(&["heartbeat", "l_done"]);
+    assert_eq!(heartbeat["code"], "corrupt_lease_file");
+    assert_eq!(heartbeat["lease_id"], "l_done");
+
+    let cleanup = repo.run(&["cleanup", "--completed"]);
+    assert!(cleanup.get("closed").is_none());
+    assert_eq!(cleanup["corrupt_leases"][0]["lease_id"], "l_done");
+}
+
+#[test]
 fn corrupt_lease_file_fails_mutating_admission_closed() {
     let repo = Repo::new();
     repo.write_task_file("corrupt", "T001", "todo", "src/a/");

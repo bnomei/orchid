@@ -17,7 +17,10 @@ use crate::core::{
     elapsed_seconds, now_iso, parse_duration, parse_iso_datetime, utc_now, ErrorCode, OrchError,
     OrchResult, DEFAULT_STALE_AFTER,
 };
-use crate::model::{validate_lease_id, CompactLease, LeaseId, LeaseRecord, ReasoningEffort};
+use crate::model::{
+    lease_status_field_error, validate_lease_id, CompactLease, LeaseId, LeaseRecord,
+    ReasoningEffort,
+};
 use crate::paths::{
     atomic_write_json, buds_dir, leases_dir, locks_dir, orch_dir, packets_dir, path_to_string,
     relpath, repo_path, reports_dir, spec_research_root,
@@ -232,6 +235,14 @@ pub(crate) fn scan_leases(root: &Path) -> OrchResult<LeaseScan> {
             });
             continue;
         }
+        if let Some(error) = lease_status_field_error(&data) {
+            corrupt_leases.push(CorruptLeaseFile {
+                lease_id: expected_lease_id.to_string(),
+                path,
+                error,
+            });
+            continue;
+        }
         data.entry("_path".to_string())
             .or_insert_with(|| Value::String(path));
         leases.push(LeaseRecord::from_map(data));
@@ -260,6 +271,14 @@ pub(crate) fn load_lease(root: &Path, lease_id: &str) -> OrchResult<LeaseRecord>
         return Err(OrchError::new("invalid lease json").detail("lease_id", lease_id));
     };
     bind_lease_record_id(&mut data, lease_id)?;
+    if let Some(error) = lease_status_field_error(&data) {
+        return Err(CorruptLeaseFile {
+            lease_id: lease_id.to_string(),
+            path: relpath(&path, root),
+            error,
+        }
+        .to_error());
+    }
     data.entry("_path".to_string())
         .or_insert_with(|| Value::String(relpath(&path, root)));
     Ok(LeaseRecord::from_map(data))
