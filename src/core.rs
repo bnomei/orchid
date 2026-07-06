@@ -20,6 +20,7 @@ pub(crate) enum ErrorCode {
     CloseHasUnstagedChanges,
     CompleteRequiresActiveLease,
     CompleteUnsafeToStage,
+    CompleteVerificationStatusInvalid,
     CompleteVerifiedByRequired,
     CorruptLeaseFile,
     HumanCheckpoint,
@@ -69,6 +70,9 @@ impl ErrorCode {
             ErrorCode::CloseHasUnstagedChanges => "close_has_unstaged_changes",
             ErrorCode::CompleteRequiresActiveLease => "complete_requires_active_lease",
             ErrorCode::CompleteUnsafeToStage => "complete_unsafe_to_stage",
+            ErrorCode::CompleteVerificationStatusInvalid => {
+                "complete_verification_status_invalid"
+            }
             ErrorCode::CompleteVerifiedByRequired => "complete_verified_by_required",
             ErrorCode::CorruptLeaseFile => "corrupt_lease_file",
             ErrorCode::HumanCheckpoint => "human_checkpoint",

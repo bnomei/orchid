@@ -764,6 +764,23 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
             ErrorCode::CompleteVerifiedByRequired,
         ));
     }
+    let verification_status = match nonempty_trimmed(&request.verification_status) {
+        Some("passed") => "passed".to_string(),
+        Some(trimmed) => {
+            return Err(OrchError::coded(
+                "verification_status must be passed",
+                ErrorCode::CompleteVerificationStatusInvalid,
+            )
+            .detail("verification_status", trimmed.to_string()));
+        }
+        None => {
+            return Err(OrchError::coded(
+                "verification_status must be passed",
+                ErrorCode::CompleteVerificationStatusInvalid,
+            )
+            .detail("verification_status", request.verification_status.clone()));
+        }
+    };
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, &request.lease)?;
     if !lease.status().is_active() {
@@ -786,7 +803,7 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
         lease.set("completed_at", completed_at);
         lease.set("implemented_by", implemented_by);
         lease.set("verified_by", request.verified_by.clone());
-        lease.set("verification_status", request.verification_status.clone());
+        lease.set("verification_status", verification_status.clone());
         if !request.report.is_empty() {
             lease.set("report", request.report.clone());
         }
@@ -820,11 +837,7 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     let mut frontmatter = original_frontmatter.clone();
     let meta = frontmatter.raw_mut();
     insert(meta, "status", "done");
-    insert(
-        meta,
-        "verification_status",
-        request.verification_status.clone(),
-    );
+    insert(meta, "verification_status", verification_status.clone());
     insert(meta, "completed_at", now_iso());
     let implemented_by = if request.implemented_by.is_empty() {
         lease.get_str("owner").unwrap_or("").to_string()

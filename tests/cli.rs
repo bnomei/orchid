@@ -4427,6 +4427,81 @@ fn complete_rejects_empty_verified_by() {
 }
 
 #[test]
+fn complete_rejects_invalid_verification_status() {
+    let invalid_statuses = ["pending", "failed", "bogus", "   "];
+
+    let task_repo = Repo::new();
+    task_repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_invalid_verify_task",
+    ]);
+    let task_path = "specs/example/tasks/T001.md";
+    for status in invalid_statuses {
+        let failed = task_repo.run_fail(&[
+            "complete",
+            "--lease",
+            "l_invalid_verify_task",
+            "--verified-by",
+            "mayor",
+            "--verification-status",
+            status,
+        ]);
+        assert_eq!(
+            failed["code"], "complete_verification_status_invalid",
+            "task path should reject verification_status={status:?}"
+        );
+        assert_eq!(task_status(&task_repo.root, task_path), "todo");
+        let task_text = fs::read_to_string(task_repo.root.join(task_path)).unwrap();
+        assert!(
+            task_text.contains("verification_status = \"pending\""),
+            "task frontmatter should remain unchanged for status={status:?}"
+        );
+    }
+
+    let bud_repo = Repo::new();
+    let instructions = bud_repo.root.join("bud-instructions.md");
+    fs::write(&instructions, "Reject invalid verification_status.\n").unwrap();
+    bud_repo.run(&[
+        "bud",
+        "--title",
+        "Reject invalid verification_status",
+        "--scope",
+        "src/other/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_invalid_verify_bud",
+    ]);
+    for status in invalid_statuses {
+        let failed = bud_repo.run_fail(&[
+            "complete",
+            "--lease",
+            "l_invalid_verify_bud",
+            "--verified-by",
+            "mayor",
+            "--verification-status",
+            status,
+        ]);
+        assert_eq!(
+            failed["code"], "complete_verification_status_invalid",
+            "bud path should reject verification_status={status:?}"
+        );
+        let lease_json: Value = serde_json::from_str(
+            &fs::read_to_string(bud_repo.root.join(".orchid/leases/l_invalid_verify_bud.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(lease_json["status"], "active");
+        assert!(lease_json.get("verification_status").is_none());
+    }
+}
+
+#[test]
 fn complete_rejects_task_not_in_completable_status() {
     let repo = Repo::new();
     repo.run(&[
