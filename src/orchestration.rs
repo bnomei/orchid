@@ -1095,7 +1095,7 @@ pub(crate) fn close(root: &Path, request: &CloseRequest) -> OrchResult<Map<Strin
                 let meta = frontmatter.raw_mut();
                 insert(meta, "last_lease_id", request.lease.clone());
                 insert(meta, "force_closed_at", now_iso());
-                let _ = write_task_frontmatter(&task, frontmatter);
+                write_task_frontmatter(&task, frontmatter)?;
             }
         }
     }

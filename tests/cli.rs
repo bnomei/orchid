@@ -4156,6 +4156,44 @@ fn close_force_records_audit_trail_on_active_task() {
 }
 
 #[test]
+#[cfg(unix)]
+fn close_force_fails_when_task_frontmatter_write_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_1",
+    ]);
+    let task_path = repo.root.join("specs/example/tasks/T001.md");
+    let tasks_dir = task_path.parent().unwrap();
+    let task_original = fs::metadata(&task_path).unwrap().permissions();
+    let dir_original = fs::metadata(tasks_dir).unwrap().permissions();
+    fs::set_permissions(&task_path, fs::Permissions::from_mode(0o444)).unwrap();
+    fs::set_permissions(tasks_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let failed = repo.run_fail(&["close", "--lease", "l_1", "--force"]);
+    assert!(failed.get("error").is_some());
+
+    fs::set_permissions(tasks_dir, dir_original).unwrap();
+    fs::set_permissions(&task_path, task_original).unwrap();
+
+    let task = fs::read_to_string(&task_path).unwrap();
+    assert!(!task.contains("force_closed_at"));
+
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lease["status"], "active");
+}
+
+#[test]
 fn release_and_heartbeat_reject_completed_leases() {
     let repo = Repo::new();
     repo.run(&[
