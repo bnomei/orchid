@@ -161,6 +161,11 @@ fn normalize_path_for_scope(value: &str) -> String {
     }
 }
 
+/// True when a scope entry normalizes to an empty path prefix (repo-wide wildcard).
+pub(crate) fn scope_entry_is_blank(value: &str) -> bool {
+    normalize_scope_entry(value).is_empty()
+}
+
 /// True when a scope entry contains a `..` segment and must be rejected at lint.
 pub(crate) fn scope_entry_escapes_root(value: &str) -> bool {
     normalize_scope_entry(value)
@@ -778,6 +783,14 @@ mod tests {
         for value in [".", "/", "./", "", "././", "./."] {
             assert_eq!(normalize_scope_entry(value), "", "value: {value:?}");
         }
+    }
+
+    #[test]
+    fn scope_entry_is_blank_detects_wildcard_spellings() {
+        for value in [".", "/", "./", "", "   ", "././"] {
+            assert!(scope_entry_is_blank(value), "value: {value:?}");
+        }
+        assert!(!scope_entry_is_blank("src/feature"));
     }
 
     #[test]

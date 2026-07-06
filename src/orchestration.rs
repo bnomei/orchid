@@ -298,6 +298,17 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
     if let Some(bad_scope) = task
         .scope()
         .iter()
+        .find(|entry| crate::model::scope_entry_is_blank(entry))
+    {
+        return Err(
+            OrchError::coded("blank scope entry", ErrorCode::InvalidScope)
+                .detail("task", task_key(&task))
+                .detail("scope", bad_scope.to_string()),
+        );
+    }
+    if let Some(bad_scope) = task
+        .scope()
+        .iter()
         .find(|entry| crate::model::scope_entry_escapes_root(entry))
     {
         return Err(
@@ -428,6 +439,16 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
 pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, Value>> {
     let requested_lease_id = request.lease_id.clone().map(LeaseId::parse).transpose()?;
     let _lock = runtime_lock(root)?;
+    if let Some(bad) = request
+        .scope
+        .iter()
+        .find(|entry| crate::model::scope_entry_is_blank(entry))
+    {
+        return Err(
+            OrchError::coded("blank scope entry", ErrorCode::InvalidScope)
+                .detail("scope", bad.to_string()),
+        );
+    }
     let scope: Vec<String> = request
         .scope
         .iter()
@@ -1649,6 +1670,12 @@ pub(crate) fn lint(root: &Path) -> OrchResult<Map<String, Value>> {
         }
         if task.scope().is_empty() {
             errors.push(error_item(&key, "missing scope"));
+        } else if let Some(bad) = task
+            .scope()
+            .iter()
+            .find(|entry| crate::model::scope_entry_is_blank(entry))
+        {
+            errors.push(error_item(&key, &format!("blank scope entry:{bad}")));
         } else if task
             .scope()
             .iter()

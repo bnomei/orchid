@@ -2496,6 +2496,30 @@ fn bud_enforces_scope_and_parallel_guards() {
     ]);
     assert_eq!(escapes["code"], "invalid_scope");
 
+    let blank = repo.run_fail(&[
+        "bud",
+        "--title",
+        "Blank scope",
+        "--scope",
+        ".",
+        "--instructions",
+        instructions.to_str().unwrap(),
+    ]);
+    assert_eq!(blank["code"], "invalid_scope");
+    assert_eq!(blank["scope"], ".");
+
+    let whitespace = repo.run_fail(&[
+        "bud",
+        "--title",
+        "Whitespace scope",
+        "--scope",
+        "   ",
+        "--instructions",
+        instructions.to_str().unwrap(),
+    ]);
+    assert_eq!(whitespace["code"], "invalid_scope");
+    assert_eq!(whitespace["scope"], "   ");
+
     repo.run(&[
         "bud",
         "--title",
@@ -3469,6 +3493,70 @@ fn lint_rejects_parent_traversal_scope() {
     assert!(errors
         .iter()
         .any(|err| err["task"] == "escapespec/T001" && err["error"] == "scope escapes repo root"));
+}
+
+#[test]
+fn lint_rejects_blank_scope_entries() {
+    let repo = Repo::new();
+    let spec_dir = repo.root.join("specs/blankscope");
+    let task_dir = spec_dir.join("tasks");
+    fs::create_dir_all(&task_dir).unwrap();
+    fs::write(spec_dir.join("requirements.md"), "# Requirements\n").unwrap();
+    fs::write(spec_dir.join("design.md"), "# Design\n").unwrap();
+    for (task_id, scope) in [
+        ("T001", "scope = [\".\"]"),
+        ("T002", "scope = [\"src/\", \".\"]"),
+        ("T003", "scope = [\"   \"]"),
+    ] {
+        fs::write(
+            task_dir.join(format!("{task_id}.md")),
+            format!(
+                "+++\nid = \"{task_id}\"\ntitle = \"{task_id}\"\nstatus = \"todo\"\n{scope}\ndepends = []\ncovers = []\nverification_mode = \"mayor\"\nverification_status = \"pending\"\nworker_reasoning_effort = \"medium\"\nworker_model = \"\"\n+++\n\n## Context\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let lint = repo.run_fail(&["lint"]);
+    assert_eq!(lint["ok"], false);
+    let errors = lint["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|err| {
+        err["task"] == "blankscope/T001" && err["error"] == "blank scope entry:."
+    }));
+    assert!(errors.iter().any(|err| {
+        err["task"] == "blankscope/T002" && err["error"] == "blank scope entry:."
+    }));
+    assert!(errors.iter().any(|err| {
+        err["task"] == "blankscope/T003" && err["error"] == "blank scope entry:   "
+    }));
+}
+
+#[test]
+fn lease_rejects_blank_scope_entries() {
+    let repo = Repo::new();
+    let spec_dir = repo.root.join("specs/blanklease");
+    let task_dir = spec_dir.join("tasks");
+    fs::create_dir_all(&task_dir).unwrap();
+    fs::write(spec_dir.join("requirements.md"), "# Requirements\n").unwrap();
+    fs::write(spec_dir.join("design.md"), "# Design\n").unwrap();
+    fs::write(
+        task_dir.join("T001.md"),
+        "+++\nid = \"T001\"\ntitle = \"T001\"\nstatus = \"todo\"\nscope = [\".\"]\ndepends = []\ncovers = []\nverification_mode = \"mayor\"\nverification_status = \"pending\"\nworker_reasoning_effort = \"medium\"\nworker_model = \"\"\n+++\n\n## Context\n",
+    )
+    .unwrap();
+
+    let payload = repo.run_fail(&[
+        "lease",
+        "blanklease",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_blank_scope",
+    ]);
+    assert_eq!(payload["code"], "invalid_scope");
+    assert_eq!(payload["scope"], ".");
+    assert!(!repo.root.join(".orchid/leases/l_blank_scope.json").exists());
 }
 
 #[test]
