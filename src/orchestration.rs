@@ -985,6 +985,12 @@ pub(crate) fn stale(root: &Path, older_than: &str) -> OrchResult<Map<String, Val
             .unwrap_or_default();
         let heartbeat = parse_iso_datetime_str(&raw).unwrap_or(epoch);
         if heartbeat < cutoff {
+            if report_path_for_lease(root, &lease)
+                .map(|path| path.exists())
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let mut item = Map::new();
             item.insert("id".to_string(), lease.id_value());
             item.insert("task".to_string(), lease.task_value());

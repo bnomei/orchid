@@ -3760,6 +3760,39 @@ fn next_prefers_validate_over_recover_for_stale_lease_with_report() {
 }
 
 #[test]
+fn stale_omits_leases_with_reports() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_123",
+    ]);
+    fs::write(
+        repo.root.join(".orchid/reports/l_123.md"),
+        "+++\nlease_id = \"l_123\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
+    )
+    .unwrap();
+    let lease_path = repo.root.join(".orchid/leases/l_123.json");
+    let mut lease: Value = serde_json::from_str(&fs::read_to_string(&lease_path).unwrap()).unwrap();
+    lease["heartbeat_at"] = Value::String("2020-01-01T00:00:00Z".to_string());
+    lease["started_at"] = Value::String("2020-01-01T00:00:00Z".to_string());
+    fs::write(&lease_path, serde_json::to_string_pretty(&lease).unwrap()).unwrap();
+
+    let payload = repo.run(&["stale", "--older-than", "1m"]);
+    let stale_ids: Vec<&str> = payload["stale"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert!(!stale_ids.contains(&"l_123"));
+}
+
+#[test]
 fn next_dispatches_scope_disjoint_ready_tasks_with_parallel_flag() {
     let repo = Repo::new();
     repo.write_task_file("example", "T005", "todo", "src/feature/");
