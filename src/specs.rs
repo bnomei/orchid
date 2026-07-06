@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value};
 
 use crate::core::{ErrorCode, OrchError, OrchResult};
-use crate::model::{LeaseRecord, Scope, SpecId, SpecPolicy, VerificationMode};
+use crate::model::{
+    scope_entry_escapes_root, scope_entry_is_blank, LeaseRecord, Scope, SpecId, SpecPolicy,
+    VerificationMode,
+};
 use crate::paths::{read_text, relpath, repo_path};
 use crate::taskfile::{load_task, Task};
 
@@ -457,6 +460,18 @@ pub(crate) fn ready_tasks(
             reason = Some(format!("status:{}", task.status()));
         } else if !VerificationMode::parse(task.verification_mode()).is_dispatchable() {
             reason = Some("invalid verification_mode".to_string());
+        } else if let Some(bad_scope) = task
+            .scope()
+            .iter()
+            .find(|entry| scope_entry_is_blank(entry))
+        {
+            reason = Some(format!("blank scope entry:{bad_scope}"));
+        } else if task
+            .scope()
+            .iter()
+            .any(|entry| scope_entry_escapes_root(entry))
+        {
+            reason = Some("scope escapes repo root".to_string());
         } else if !task.worker_reasoning_effort_model().is_valid() {
             reason = Some("invalid worker_reasoning_effort".to_string());
         } else if !task.worker_model_is_valid() {

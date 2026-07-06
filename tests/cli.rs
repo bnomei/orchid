@@ -2921,10 +2921,7 @@ fn lease_missing_status_is_corrupt() {
     let corrupt = running["corrupt_leases"].as_array().unwrap();
     assert_eq!(corrupt.len(), 1);
     assert_eq!(corrupt[0]["lease_id"], "l_done");
-    assert!(corrupt[0]["error"]
-        .as_str()
-        .unwrap()
-        .contains("status"));
+    assert!(corrupt[0]["error"].as_str().unwrap().contains("status"));
 
     let heartbeat = repo.run_fail(&["heartbeat", "l_done"]);
     assert_eq!(heartbeat["code"], "corrupt_lease_file");
@@ -3520,12 +3517,12 @@ fn lint_rejects_blank_scope_entries() {
     let lint = repo.run_fail(&["lint"]);
     assert_eq!(lint["ok"], false);
     let errors = lint["errors"].as_array().unwrap();
-    assert!(errors.iter().any(|err| {
-        err["task"] == "blankscope/T001" && err["error"] == "blank scope entry:."
-    }));
-    assert!(errors.iter().any(|err| {
-        err["task"] == "blankscope/T002" && err["error"] == "blank scope entry:."
-    }));
+    assert!(errors
+        .iter()
+        .any(|err| { err["task"] == "blankscope/T001" && err["error"] == "blank scope entry:." }));
+    assert!(errors
+        .iter()
+        .any(|err| { err["task"] == "blankscope/T002" && err["error"] == "blank scope entry:." }));
     assert!(errors.iter().any(|err| {
         err["task"] == "blankscope/T003" && err["error"] == "blank scope entry:   "
     }));
@@ -3557,6 +3554,34 @@ fn lease_rejects_blank_scope_entries() {
     assert_eq!(payload["code"], "invalid_scope");
     assert_eq!(payload["scope"], ".");
     assert!(!repo.root.join(".orchid/leases/l_blank_scope.json").exists());
+}
+
+#[test]
+fn ready_and_next_block_blank_scope_entries_before_dispatch() {
+    let repo = Repo::new();
+    let spec_dir = repo.root.join("specs/blanknext");
+    let task_dir = spec_dir.join("tasks");
+    fs::create_dir_all(&task_dir).unwrap();
+    fs::write(spec_dir.join("requirements.md"), "# Requirements\n").unwrap();
+    fs::write(spec_dir.join("design.md"), "# Design\n").unwrap();
+    fs::write(
+        task_dir.join("T001.md"),
+        "+++\nid = \"T001\"\ntitle = \"T001\"\nstatus = \"todo\"\nscope = [\"src/\", \".\"]\ndepends = []\ncovers = []\nverification_mode = \"mayor\"\nverification_status = \"pending\"\nworker_reasoning_effort = \"medium\"\nworker_model = \"\"\n+++\n\n## Context\n",
+    )
+    .unwrap();
+
+    let ready = repo.run(&["ready", "--spec", "blanknext", "--explain"]);
+    assert!(ready["ready"].as_array().unwrap().is_empty());
+    assert_eq!(ready["blocked"][0]["task"], "blanknext/T001");
+    assert_eq!(ready["blocked"][0]["reason"], "blank scope entry:.");
+
+    let next = repo.run(&["next", "--spec", "blanknext", "--explain"]);
+    assert_eq!(next["phase"], "blocked");
+    assert!(next.get("cmd").is_none());
+    assert!(next.get("cmds").is_none());
+    assert!(next.get("ready").is_none());
+    assert_eq!(next["blocked"][0]["task"], "blanknext/T001");
+    assert_eq!(next["blocked"][0]["reason"], "blank scope entry:.");
 }
 
 #[test]
