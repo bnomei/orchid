@@ -5110,6 +5110,38 @@ fn stage_plan_marks_unsafe_when_git_unavailable() {
 }
 
 #[test]
+fn git_touched_rejects_released_lease() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_x",
+    ]);
+    fs::write(repo.root.join("src/feature/work.txt"), "work\n").unwrap();
+
+    let touched = repo.run(&["git-touched", "--lease", "l_x"]);
+    assert_eq!(
+        touched["stage"],
+        serde_json::json!(["src/feature/work.txt"])
+    );
+
+    repo.run(&["release", "l_x", "--reason", "abandoned"]);
+
+    let touched_fail = repo.run_fail(&["git-touched", "--lease", "l_x"]);
+    assert_eq!(touched_fail["code"], "lease_not_active");
+    assert_eq!(touched_fail["status"], "released");
+
+    let plan_fail = repo.run_fail(&["git-stage-plan", "--lease", "l_x"]);
+    assert_eq!(plan_fail["code"], "lease_not_active");
+    assert_eq!(plan_fail["status"], "released");
+}
+
+#[test]
 fn git_touched_and_stage_plan_respect_runtime_lock() {
     let repo = Repo::new();
     repo.run(&[

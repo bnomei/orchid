@@ -1670,10 +1670,23 @@ pub(crate) fn git_status(root: &Path) -> OrchResult<Map<String, Value>> {
     Ok(payload)
 }
 
+fn ensure_lease_for_git_attribution(lease: &LeaseRecord, lease_id: &str) -> OrchResult<()> {
+    if !lease.status().is_active() && !lease.status().is_completed() {
+        return Err(OrchError::coded(
+            "cannot attribute git changes for a lease that is not active or completed",
+            ErrorCode::LeaseNotActive,
+        )
+        .detail("lease_id", lease_id)
+        .detail("status", lease.get_str("status").unwrap_or("").to_string()));
+    }
+    Ok(())
+}
+
 pub(crate) fn git_touched(root: &Path, lease_id: &str) -> OrchResult<Map<String, Value>> {
     validate_lease_id(lease_id)?;
     let _lock = runtime_lock(root)?;
     let lease = load_lease(root, lease_id)?;
+    ensure_lease_for_git_attribution(&lease, lease_id)?;
     let data = touched_for_lease(root, &lease)?;
     let mut payload = json_ok();
     payload.extend(data);
@@ -1684,6 +1697,7 @@ pub(crate) fn git_stage_plan(root: &Path, lease_id: &str) -> OrchResult<Map<Stri
     validate_lease_id(lease_id)?;
     let _lock = runtime_lock(root)?;
     let lease = load_lease(root, lease_id)?;
+    ensure_lease_for_git_attribution(&lease, lease_id)?;
     let mut payload = json_ok();
     payload.extend(stage_plan_for_lease(root, &lease)?.to_payload());
     Ok(payload)
