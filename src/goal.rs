@@ -187,8 +187,17 @@ pub(crate) struct GoalContract {
 
 impl GoalContract {
     pub(crate) fn write(&self, root: &Path) -> OrchResult<()> {
+        self.write_artifacts(root)?;
+        self.write_current_pointer(root)
+    }
+
+    pub(crate) fn write_artifacts(&self, root: &Path) -> OrchResult<()> {
         let path = goal_artifact_path(root, &self.goal_id, GOAL_TOML, "goal_toml")?;
         atomic_write(&path, &self.to_toml())?;
+        Ok(())
+    }
+
+    pub(crate) fn write_current_pointer(&self, root: &Path) -> OrchResult<()> {
         let current_path = repo_path(root, goal_current_path(root), "goal_current_path")?;
         atomic_write(&current_path, &(self.goal_id.to_string() + "\n"))?;
         Ok(())
@@ -567,8 +576,9 @@ pub(crate) fn init_goal(root: &Path, request: GoalInitRequest) -> OrchResult<Str
         }
     }
     state.updated_at = now_iso();
-    contract.write(root)?;
+    contract.write_artifacts(root)?;
     state.write(root, &goal_id)?;
+    contract.write_current_pointer(root)?;
     render_goal_prompt(root, &contract, &state)
 }
 
@@ -1483,6 +1493,50 @@ next_hypothesis = "next"
         assert_eq!(next_cycle_id("C001").unwrap(), "C002");
         assert_eq!(next_cycle_id("C099").unwrap(), "C100");
         assert!(next_cycle_id("1").is_err());
+    }
+
+    #[test]
+    fn init_goal_defers_goal_current_until_state_persists() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".orchid")).unwrap();
+        let contract = contract();
+        let state = GoalState::initial(&contract);
+
+        contract.write_artifacts(tmp.path()).unwrap();
+        assert!(tmp
+            .path()
+            .join(".orchid/goals/search-ranking-proof/goal.toml")
+            .exists());
+        assert!(!tmp.path().join(".orchid/goal-current").exists());
+
+        state.write(tmp.path(), &contract.goal_id).unwrap();
+        assert!(!tmp.path().join(".orchid/goal-current").exists());
+
+        contract.write_current_pointer(tmp.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(".orchid/goal-current")).unwrap(),
+            "search-ranking-proof\n"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn init_goal_does_not_update_goal_current_when_state_write_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".orchid")).unwrap();
+        let contract = contract();
+        let state = GoalState::initial(&contract);
+
+        contract.write_artifacts(tmp.path()).unwrap();
+        let goal_root = tmp.path().join(".orchid/goals/search-ranking-proof");
+        let mut perms = std::fs::metadata(&goal_root).unwrap().permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(&goal_root, perms).unwrap();
+
+        assert!(state.write(tmp.path(), &contract.goal_id).is_err());
+        assert!(!tmp.path().join(".orchid/goal-current").exists());
     }
 
     #[test]
