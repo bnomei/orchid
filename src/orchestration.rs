@@ -1191,6 +1191,14 @@ pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<Str
     let _lock = runtime_lock(root)?;
     ensure_runtime_dirs(root)?;
     let mut lease = load_lease(root, &request.lease)?;
+    if !lease.status().is_active() {
+        return Err(OrchError::coded(
+            "cannot packet a lease that is not active",
+            ErrorCode::LeaseNotActive,
+        )
+        .detail("lease_id", request.lease.clone())
+        .detail("status", lease.get_str("status").unwrap_or("").to_string()));
+    }
     let packet = render_packet_for_lease(root, &mut lease, &request.lease, request.role)?;
     save_lease(root, &lease)?;
     let mut payload = json_ok();

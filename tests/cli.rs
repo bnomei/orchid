@@ -5300,6 +5300,47 @@ fn packet_close_cleanup_and_research_lifecycle() {
 }
 
 #[test]
+fn packet_rejects_completed_lease() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_done",
+    ]);
+    repo.run(&["packet", "--lease", "l_done", "--role", "worker"]);
+    let packet_path = repo.root.join(".orchid/packets/l_done-worker.md");
+    assert!(packet_path.exists());
+    let before = fs::read_to_string(&packet_path).unwrap();
+    fs::write(
+        repo.root.join(".orchid/reports/l_done.md"),
+        "+++\nlease_id = \"l_done\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
+    )
+    .unwrap();
+    repo.run(&["complete", "--lease", "l_done", "--verified-by", "validator:x"]);
+    let lease_before: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_done.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lease_before["status"], "completed");
+
+    let failed = repo.run_fail(&["packet", "--lease", "l_done", "--role", "worker"]);
+    assert_eq!(failed["code"], "lease_not_active");
+    assert_eq!(failed["status"], "completed");
+
+    let after = fs::read_to_string(&packet_path).unwrap();
+    assert_eq!(after, before);
+    let lease_after: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_done.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lease_after["packet_path"], lease_before["packet_path"]);
+}
+
+#[test]
 fn security_lock_and_help_contracts() {
     let repo = Repo::new();
     let payload = repo.run_fail(&["research-path", "../outside", "--create"]);
