@@ -3299,6 +3299,40 @@ fn active_serial_lease_blocks_later_parallel_lease() {
 }
 
 #[test]
+fn active_serial_task_lease_blocks_later_parallel_bud() {
+    let repo = Repo::new();
+    repo.write_task_file("sa", "T001", "todo", "src/a/");
+    let instructions = repo.root.join("instructions.md");
+    fs::write(&instructions, "do bud work").expect("write bud instructions");
+    repo.run(&[
+        "lease",
+        "sa",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_serial",
+        "--serial",
+    ]);
+
+    let failed = repo.run_fail(&[
+        "bud",
+        "--title",
+        "Parallel Bud",
+        "--scope",
+        "src/b/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_bud_parallel",
+        "--allow-parallel",
+    ]);
+
+    assert_eq!(failed["code"], "serial_blocked");
+    assert_eq!(failed["lease_id"], "l_serial");
+}
+
+#[test]
 fn lease_rejects_allow_parallel_for_serial_fanout_spec() {
     let repo = Repo::new();
     repo.write_task_file("serialspec", "T001", "todo", "src/a/");

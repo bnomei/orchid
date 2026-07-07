@@ -496,6 +496,16 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
                 .detail("scope", string_values(lease.scope())));
         }
     }
+    if let Some(serial_lease) = active
+        .iter()
+        .find(|lease| lease.mode() == LeaseMode::Serial.as_str())
+    {
+        return Err(OrchError::coded(
+            "an active serial lease blocks new leases",
+            ErrorCode::SerialBlocked,
+        )
+        .detail("lease_id", serial_lease.id_value()));
+    }
     if request.serial && !active.is_empty() {
         return Err(OrchError::coded(
             "serial lease blocked by active leases",
