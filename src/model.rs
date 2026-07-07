@@ -397,6 +397,7 @@ pub(crate) struct ActiveLeaseRecordInput {
     pub(crate) started_at: String,
     pub(crate) base_head: String,
     pub(crate) baseline_changed: Value,
+    pub(crate) baseline_fingerprints: Value,
     pub(crate) baseline_status: Value,
     pub(crate) report_path: String,
     pub(crate) worker_reasoning_effort: String,
@@ -425,6 +426,11 @@ impl LeaseRecord {
         insert(&mut data, "heartbeat_at", input.started_at);
         insert(&mut data, "base_head", input.base_head);
         insert(&mut data, "baseline_changed", input.baseline_changed);
+        insert(
+            &mut data,
+            "baseline_fingerprints",
+            input.baseline_fingerprints,
+        );
         insert(&mut data, "baseline_status", input.baseline_status);
         insert(&mut data, "packet_path", "");
         insert(&mut data, "report_path", input.report_path);
@@ -522,6 +528,10 @@ impl LeaseRecord {
 
     pub(crate) fn baseline_changed(&self) -> Vec<String> {
         string_list(self.get("baseline_changed"))
+    }
+
+    pub(crate) fn baseline_fingerprints(&self) -> Option<&Map<String, Value>> {
+        self.get("baseline_fingerprints").and_then(Value::as_object)
     }
 
     pub(crate) fn completed_changed(&self) -> Option<Vec<String>> {

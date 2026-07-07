@@ -512,6 +512,82 @@ pub(crate) fn changed_paths(status: &Map<String, Value>) -> Vec<String> {
     paths.into_iter().collect()
 }
 
+pub(crate) fn baseline_fingerprints_value(
+    root: &Path,
+    status: &Map<String, Value>,
+) -> OrchResult<Value> {
+    let mut fingerprints = Map::new();
+    if !status.get("git").and_then(Value::as_bool).unwrap_or(false) {
+        return Ok(Value::Object(fingerprints));
+    }
+
+    for path in changed_paths(status) {
+        let mut entry = Map::new();
+        if root.join(&path).is_file() {
+            if let Some(oid) = worktree_blob_oid(root, &path)? {
+                entry.insert("worktree_blob_oid".to_string(), Value::String(oid));
+            }
+        } else {
+            entry.insert("state".to_string(), Value::String("absent".to_string()));
+        }
+        fingerprints.insert(path, Value::Object(entry));
+    }
+    Ok(Value::Object(fingerprints))
+}
+
+fn worktree_blob_oid(root: &Path, path: &str) -> OrchResult<Option<String>> {
+    let args = vec![
+        "hash-object".to_string(),
+        "--".to_string(),
+        path.to_string(),
+    ];
+    let oid = String::from_utf8_lossy(&git_owned(root, &args, false)?)
+        .trim()
+        .to_string();
+    Ok((!oid.is_empty()).then_some(oid))
+}
+
+fn head_blob_oid(root: &Path, path: &str) -> OrchResult<Option<String>> {
+    let args = vec![
+        "ls-tree".to_string(),
+        "-z".to_string(),
+        "HEAD".to_string(),
+        "--".to_string(),
+        path.to_string(),
+    ];
+    let output = git_owned(root, &args, true)?;
+    let Some(entry) = split_z(&output).into_iter().next() else {
+        return Ok(None);
+    };
+    let Some((meta, tree_path)) = entry.split_once('\t') else {
+        return Ok(None);
+    };
+    if tree_path != path {
+        return Ok(None);
+    }
+    let parts: Vec<&str> = meta.split_whitespace().collect();
+    Ok((parts.len() >= 3 && parts[1] == "blob").then(|| parts[2].to_string()))
+}
+
+fn baseline_path_committed_at_head(
+    root: &Path,
+    lease: &LeaseRecord,
+    path: &str,
+) -> OrchResult<bool> {
+    let Some(fingerprints) = lease.baseline_fingerprints() else {
+        return Ok(false);
+    };
+    let Some(expected) = fingerprints
+        .get(path)
+        .and_then(Value::as_object)
+        .and_then(|entry| entry.get("worktree_blob_oid"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(false);
+    };
+    Ok(head_blob_oid(root, path)?.as_deref() == Some(expected))
+}
+
 fn git_status_records_from_status(status: &Map<String, Value>) -> Vec<GitStatusRecord> {
     status
         .get("records")
@@ -718,7 +794,16 @@ pub(crate) fn touched_for_lease(
             continue;
         }
 
-        if paths.iter().any(|path| baseline.contains(path)) {
+        let baseline_paths: Vec<String> = paths
+            .iter()
+            .filter(|path| baseline.contains(*path))
+            .cloned()
+            .collect();
+        if !baseline_paths.is_empty()
+            && !baseline_paths
+                .iter()
+                .all(|path| baseline_path_committed_at_head(root, lease, path).unwrap_or(false))
+        {
             for path in paths {
                 ambiguous.insert(path);
             }

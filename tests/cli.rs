@@ -5924,6 +5924,138 @@ fn git_touched_and_stage_plan_split_scope_and_baseline() {
 }
 
 #[test]
+fn stage_plan_allows_baseline_path_after_exact_dirty_content_is_committed() {
+    let repo = Repo::new();
+    fs::write(repo.root.join("src/feature/work.txt"), "base\n").unwrap();
+    repo.init_git();
+    fs::write(repo.root.join("src/feature/work.txt"), "baseline dirty\n").unwrap();
+
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_test",
+    ]);
+
+    let before_commit = repo.run(&["git-stage-plan", "--lease", "l_test"]);
+    assert_eq!(
+        before_commit["excluded"]["ambiguous"],
+        serde_json::json!(["src/feature/work.txt"])
+    );
+    assert!(before_commit.get("pathspecs").is_none());
+
+    git(&repo.root, &["add", "src/feature/work.txt"]);
+    git(&repo.root, &["commit", "-m", "commit baseline dirt"]);
+    fs::write(
+        repo.root.join("src/feature/work.txt"),
+        "baseline dirty\nworker edit\n",
+    )
+    .unwrap();
+
+    let plan = repo.run(&["git-stage-plan", "--lease", "l_test"]);
+    assert_eq!(
+        plan["pathspecs"],
+        serde_json::json!([":(literal)src/feature/work.txt"])
+    );
+    assert!(plan.get("safe_to_stage").is_none());
+}
+
+#[test]
+fn stage_plan_keeps_baseline_path_ambiguous_when_only_part_is_committed() {
+    let repo = Repo::new();
+    fs::write(
+        repo.root.join("src/feature/work.txt"),
+        "line 1 base\nline 2 base\n",
+    )
+    .unwrap();
+    repo.init_git();
+    fs::write(
+        repo.root.join("src/feature/work.txt"),
+        "line 1 baseline dirty\nline 2 baseline dirty\n",
+    )
+    .unwrap();
+
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_test",
+    ]);
+
+    fs::write(
+        repo.root.join("src/feature/work.txt"),
+        "line 1 baseline dirty\nline 2 base\n",
+    )
+    .unwrap();
+    git(&repo.root, &["add", "src/feature/work.txt"]);
+    git(
+        &repo.root,
+        &["commit", "-m", "commit partial baseline dirt"],
+    );
+    fs::write(
+        repo.root.join("src/feature/work.txt"),
+        "line 1 baseline dirty\nline 2 baseline dirty\nworker edit\n",
+    )
+    .unwrap();
+
+    let plan = repo.run(&["git-stage-plan", "--lease", "l_test"]);
+    assert_eq!(plan["safe_to_stage"], false);
+    assert_eq!(
+        plan["excluded"]["ambiguous"],
+        serde_json::json!(["src/feature/work.txt"])
+    );
+    assert!(plan.get("pathspecs").is_none());
+}
+
+#[test]
+fn stage_plan_keeps_old_baseline_lease_without_fingerprints_fail_closed() {
+    let repo = Repo::new();
+    fs::write(repo.root.join("src/feature/work.txt"), "base\n").unwrap();
+    repo.init_git();
+    fs::write(repo.root.join("src/feature/work.txt"), "baseline dirty\n").unwrap();
+
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_test",
+    ]);
+
+    let lease_path = repo.root.join(".orchid/leases/l_test.json");
+    let mut lease: Value = serde_json::from_str(&fs::read_to_string(&lease_path).unwrap()).unwrap();
+    lease
+        .as_object_mut()
+        .unwrap()
+        .remove("baseline_fingerprints");
+    fs::write(&lease_path, serde_json::to_string_pretty(&lease).unwrap()).unwrap();
+
+    git(&repo.root, &["add", "src/feature/work.txt"]);
+    git(&repo.root, &["commit", "-m", "commit baseline dirt"]);
+    fs::write(
+        repo.root.join("src/feature/work.txt"),
+        "baseline dirty\nworker edit\n",
+    )
+    .unwrap();
+
+    let plan = repo.run(&["git-stage-plan", "--lease", "l_test"]);
+    assert_eq!(plan["safe_to_stage"], false);
+    assert_eq!(
+        plan["excluded"]["ambiguous"],
+        serde_json::json!(["src/feature/work.txt"])
+    );
+    assert!(plan.get("pathspecs").is_none());
+}
+
+#[test]
 fn stage_plan_marks_unsafe_when_git_unavailable() {
     let repo = Repo::new();
     repo.run(&[

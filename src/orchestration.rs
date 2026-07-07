@@ -15,8 +15,8 @@ use crate::core::{
     OrchError, OrchResult,
 };
 use crate::gitstate::{
-    apply_completed_changed_snapshot, changed_paths_value, git_status_data, stage_plan_for_lease,
-    status_records_value, touched_for_lease,
+    apply_completed_changed_snapshot, baseline_fingerprints_value, changed_paths_value,
+    git_status_data, stage_plan_for_lease, status_records_value, touched_for_lease,
 };
 use crate::model::{
     validate_lease_id, ActiveLeaseRecordInput, LeaseId, LeaseMode, LeaseRecord, ReasoningEffort,
@@ -411,6 +411,7 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
             .unwrap_or("")
             .to_string(),
         baseline_changed: changed_paths_value(&git_state),
+        baseline_fingerprints: baseline_fingerprints_value(root, &git_state)?,
         baseline_status: status_records_value(&git_state),
         report_path: relpath(
             &reports_dir(root).join(format!("{}.md", lease_id.as_str())),
@@ -572,6 +573,7 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
             .unwrap_or("")
             .to_string(),
         baseline_changed: changed_paths_value(&git_state),
+        baseline_fingerprints: baseline_fingerprints_value(root, &git_state)?,
         baseline_status: status_records_value(&git_state),
         report_path: relpath(&reports_dir(root).join(format!("{lease_id_text}.md")), root),
         worker_reasoning_effort: worker_reasoning_effort.clone(),
