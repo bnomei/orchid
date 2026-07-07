@@ -385,6 +385,7 @@ pub(crate) fn task_by_ref<'a>(
     if reference.is_empty() || reference == "-" {
         return None;
     }
+    let reference = reference.strip_prefix("specs/").unwrap_or(reference);
     let (spec, task_id) = if let Some((spec, task_id)) = reference.split_once('/') {
         (spec, task_id)
     } else {

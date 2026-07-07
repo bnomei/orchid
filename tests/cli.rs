@@ -3600,6 +3600,25 @@ fn all_open_resolves_satisfied_cross_spec_dependency() {
 }
 
 #[test]
+fn specs_prefixed_dependency_is_ready_and_lint_clean() {
+    let repo = Repo::new();
+    repo.write_task_file("example", "T001", "done", "src/example/");
+    let active = repo.write_task_file("dependent", "T002", "todo", "src/dependent/");
+    let task = fs::read_to_string(&active).unwrap();
+    fs::write(
+        &active,
+        task.replace("depends = []", "depends = [\"specs/example/T001\"]"),
+    )
+    .unwrap();
+
+    let lint = repo.run(&["lint"]);
+    assert!(lint.get("errors").is_none() || lint["errors"].as_array().unwrap().is_empty());
+
+    let ready = repo.run(&["ready", "--spec", "dependent", "--explain"]);
+    assert_eq!(ready["ready"][0]["task"], "dependent/T002");
+}
+
+#[test]
 fn numeric_spec_selector_resolves_exact_directory() {
     let repo = Repo::new();
     repo.write_task_file("001", "T001", "todo", "src/numeric/");
