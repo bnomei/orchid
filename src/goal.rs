@@ -119,6 +119,10 @@ impl GoalInitRequest {
             return Err(OrchError::new("min-delta must be a finite number")
                 .detail("min_delta", minimum_delta.to_string()));
         }
+        if minimum_delta < 0.0 {
+            return Err(OrchError::new("min-delta must be non-negative")
+                .detail("min_delta", minimum_delta.to_string()));
+        }
         if max_iterations == 0 {
             return Err(OrchError::new("max-iterations must be at least 1")
                 .detail("max_iterations", max_iterations.to_string()));

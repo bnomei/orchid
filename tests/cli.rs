@@ -1147,6 +1147,45 @@ fn goal_init_rejects_non_finite_min_delta() {
 }
 
 #[test]
+fn goal_init_rejects_negative_min_delta() {
+    let repo = Repo::new();
+    let failed = repo.run_fail(&[
+        "goal",
+        "init",
+        "--id",
+        "negative-min-delta-goal",
+        "--goal",
+        "G",
+        "--evaluator",
+        "true",
+        "--metric",
+        "p95_ms",
+        "--direction",
+        "lower-is-better",
+        "--min-delta=-0.1",
+        "--hypothesis",
+        "h",
+        "--max-iterations",
+        "5",
+        "--max-duration",
+        "30m",
+    ]);
+    assert!(
+        failed["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("min-delta"),
+        "unexpected error: {failed}"
+    );
+    assert!(
+        !repo
+            .root
+            .join(".orchid/goals/negative-min-delta-goal/goal.toml")
+            .exists()
+    );
+}
+
+#[test]
 fn stale_rejects_out_of_range_duration_with_structured_error() {
     let repo = Repo::new();
     let failed = repo.run_fail(&["stale", "--older-than", "99999999999999d"]);
