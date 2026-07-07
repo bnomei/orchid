@@ -2725,6 +2725,34 @@ fn bud_enforces_scope_and_parallel_guards() {
 }
 
 #[test]
+fn block_rejects_active_bud_scope_overlap_without_changing_task_status() {
+    let repo = Repo::new();
+    let instructions = repo.root.join("bud-instructions.md");
+    fs::write(&instructions, "Work.\\n").unwrap();
+
+    repo.run(&[
+        "bud",
+        "--title",
+        "Feature bud",
+        "--scope",
+        "src/feature/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_bud_scope",
+    ]);
+
+    let blocked = repo.run_fail(&["block", "example", "T001", "--reason", "blocked"]);
+    assert_eq!(blocked["code"], "scope_conflict");
+    assert_eq!(blocked["lease_id"], "l_bud_scope");
+    assert_eq!(blocked["scope"], serde_json::json!(["src/feature/"]));
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+}
+
+#[test]
 fn next_moves_through_dispatch_wait_validate_and_recover() {
     let repo = Repo::new();
     let payload = repo.run(&["next", "--spec", "example"]);

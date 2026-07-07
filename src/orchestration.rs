@@ -950,6 +950,11 @@ pub(crate) fn block(root: &Path, request: &BlockRequest) -> OrchResult<Map<Strin
                     .detail("task", task_key(&task)),
             );
         }
+        if scopes_overlap(&task.scope(), &lease.scope()) {
+            return Err(OrchError::coded("scope conflict", ErrorCode::ScopeConflict)
+                .detail("lease_id", lease.id_value())
+                .detail("scope", string_values(lease.scope())));
+        }
     }
     let mut frontmatter = task.frontmatter().clone();
     let meta = frontmatter.raw_mut();
