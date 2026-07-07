@@ -2338,6 +2338,50 @@ fn attach_agent_refreshes_existing_worker_packet() {
 }
 
 #[test]
+fn attach_agent_refreshes_existing_validator_and_reviewer_packets() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:unassigned",
+        "--lease-id",
+        "l_roles",
+    ]);
+    let validator = repo.run(&["packet", "--lease", "l_roles", "--role", "validator"]);
+    let reviewer = repo.run(&["packet", "--lease", "l_roles", "--role", "reviewer"]);
+    let validator_path = repo.root.join(validator["packet"].as_str().unwrap());
+    let reviewer_path = repo.root.join(reviewer["packet"].as_str().unwrap());
+    let worker_path = repo.root.join(".orchid/packets/l_roles-worker.md");
+    let loop_runner_path = repo.root.join(".orchid/packets/l_roles-loop-runner.md");
+
+    let before_validator = fs::read_to_string(&validator_path).unwrap();
+    let before_reviewer = fs::read_to_string(&reviewer_path).unwrap();
+    assert!(before_validator.contains("worker:unassigned"));
+    assert!(before_reviewer.contains("worker:unassigned"));
+    assert!(!worker_path.exists());
+    assert!(!loop_runner_path.exists());
+
+    repo.run(&[
+        "lease-attach-agent",
+        "--lease",
+        "l_roles",
+        "--agent-id",
+        "agent_456",
+    ]);
+
+    let after_validator = fs::read_to_string(&validator_path).unwrap();
+    let after_reviewer = fs::read_to_string(&reviewer_path).unwrap();
+    assert!(after_validator.contains("agent_456"));
+    assert!(after_reviewer.contains("agent_456"));
+    assert!(!after_validator.contains("worker:unassigned"));
+    assert!(!after_reviewer.contains("worker:unassigned"));
+    assert!(!worker_path.exists());
+    assert!(!loop_runner_path.exists());
+}
+
+#[test]
 fn agent_id_is_reusable_after_lease_completes() {
     let repo = Repo::new();
     repo.run(&[

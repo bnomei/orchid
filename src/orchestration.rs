@@ -637,16 +637,13 @@ pub(crate) fn lease_attach_agent(
         .detail("status", lease.get_str("status").unwrap_or("").to_string()));
     }
     ensure_agent_id_available(root, Some(&request.agent_id), Some(&request.lease))?;
-    let worker_packet_exists = lease
-        .worker_packet_path()
-        .map(|rel| root.join(rel).exists())
-        .unwrap_or(false);
+    let existing_packet_roles = existing_packet_roles_for_lease(root, &request.lease);
     lease.set("agent_id", request.agent_id.clone());
     if lease.get_str("owner") == Some("worker:unassigned") {
         lease.set("owner", format!("worker:{}", request.agent_id));
     }
-    if worker_packet_exists {
-        render_packet_for_lease(root, &mut lease, &request.lease, PacketRoleKind::Worker)?;
+    for role in existing_packet_roles {
+        render_packet_for_lease(root, &mut lease, &request.lease, role)?;
     }
     save_lease(root, &lease)?;
     let mut payload = json_ok();
@@ -1311,6 +1308,22 @@ fn render_packet_for_lease(
         lease.set("worker_packet_path", packet_rel.clone());
     }
     Ok(packet_rel)
+}
+
+fn existing_packet_roles_for_lease(root: &Path, lease_id: &str) -> Vec<PacketRoleKind> {
+    [
+        PacketRoleKind::Validator,
+        PacketRoleKind::Reviewer,
+        PacketRoleKind::LoopRunner,
+        PacketRoleKind::Worker,
+    ]
+    .into_iter()
+    .filter(|role| {
+        packets_dir(root)
+            .join(format!("{}-{}.md", lease_id, role.as_str()))
+            .exists()
+    })
+    .collect()
 }
 
 fn render_task_packet(
