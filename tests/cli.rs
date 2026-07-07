@@ -2827,12 +2827,9 @@ fn bud_packet_complete_git_and_cleanup_lifecycle_work() {
     )
     .unwrap();
     let next = repo.run(&["next", "--spec", "example"]);
-    assert_eq!(next["phase"], "validate");
-    assert_eq!(
-        next["cmds"][0],
-        serde_json::json!(["report-check", ".orchid/reports/l_bud.md"])
-    );
-    assert_eq!(next["reports_ready"][0]["task"], "bud:l_bud");
+    assert_eq!(next["phase"], "wait");
+    assert!(next.get("reports_ready").is_none());
+    assert!(next.get("cmds").is_none());
     let next_all = repo.run(&["next", "--all-open"]);
     assert_eq!(next_all["phase"], "validate");
     assert_eq!(next_all["reports_ready"][0]["task"], "bud:l_bud");

@@ -679,8 +679,13 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
         .map(|lease| compact_lease(lease, Some(now), Some(stale_after)))
         .collect::<OrchResult<Vec<_>>>()?;
     let mut reports_ready = Vec::new();
+    let spec_scoped = specs_arg(&request.specs).is_some();
     for lease in &active {
-        if !lease.is_bud() && !lease_in_selected_specs(lease, &selected_specs) {
+        if lease.is_bud() {
+            if spec_scoped {
+                continue;
+            }
+        } else if !lease_in_selected_specs(lease, &selected_specs) {
             continue;
         }
         let report = report_path_for_lease(root, lease)?;
