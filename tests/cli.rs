@@ -1576,6 +1576,20 @@ fn all_open_selects_first_open_numerical_spec_and_skips_inactive() {
 }
 
 #[test]
+fn next_all_open_errors_when_no_open_spec_exists() {
+    let repo = Repo::new();
+    repo.write_task_file("example", "T001", "done", "src/example/");
+    repo.write_task_file("example", "T002", "done", "src/example/");
+    repo.write_task_file("00-done", "T001", "done", "src/done/");
+    repo.write_task_file("01-also-done", "T001", "done", "src/also-done/");
+
+    let payload = repo.run_fail(&["next", "--all-open"]);
+
+    assert_eq!(payload["error"], "no open spec found");
+    assert_eq!(payload["code"], "no_open_spec");
+}
+
+#[test]
 fn status_all_open_echoes_selected_and_skipped_specs() {
     let repo = Repo::new();
     repo.write_task_file("00-done", "T001", "done", "src/done/");

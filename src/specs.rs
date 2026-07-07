@@ -242,7 +242,10 @@ pub(crate) fn select_tasks(
     if all_open {
         let tasks = load_tasks(root, None)?;
         let Some(selected) = first_open_spec(&tasks) else {
-            return Ok((Vec::new(), Vec::new()));
+            return Err(OrchError::coded(
+                "no open spec found",
+                ErrorCode::NoOpenSpec,
+            ));
         };
         let selected_tasks = tasks
             .into_iter()
