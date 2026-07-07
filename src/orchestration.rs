@@ -15,8 +15,9 @@ use crate::core::{
     OrchError, OrchResult,
 };
 use crate::gitstate::{
-    apply_completed_changed_snapshot, baseline_fingerprints_value, changed_paths_value,
-    git_status_data, stage_plan_for_lease, status_records_value, touched_for_lease,
+    append_completed_changed_path, apply_completed_changed_snapshot, baseline_fingerprints_value,
+    changed_paths_value, git_status_data, stage_plan_for_lease, status_records_value,
+    touched_for_lease,
 };
 use crate::model::{
     validate_lease_id, ActiveLeaseRecordInput, LeaseId, LeaseMode, LeaseRecord, ReasoningEffort,
@@ -855,8 +856,8 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
         return Ok(payload);
     }
 
-    let task_path = lease.task_path();
-    let task = load_task(repo_path(root, task_path, "task_path")?, root)?;
+    let task_path = lease.task_path().to_string();
+    let task = load_task(repo_path(root, &task_path, "task_path")?, root)?;
     if !task.status_model().is_completable() {
         return Err(OrchError::coded(
             "task cannot be completed from its current status",
@@ -901,6 +902,7 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     lease.set("status", "completed");
     lease.set("completed_at", completed_at);
     apply_completed_changed_snapshot(&mut lease, &completed_status);
+    append_completed_changed_path(&mut lease, &task_path);
     save_lease(root, &lease)?;
     if let Err(err) = write_task_frontmatter(&task, frontmatter) {
         let _ = save_lease(root, &original_lease);
@@ -956,10 +958,11 @@ pub(crate) fn block(root: &Path, request: &BlockRequest) -> OrchResult<Map<Strin
                     .detail("task", task_key(&task)),
             );
         }
-        if scopes_overlap(&task.scope(), &lease.scope()) {
+        let lease_scope = effective_lease_scope(root, &lease)?;
+        if scopes_overlap(&task.scope(), &lease_scope) {
             return Err(OrchError::coded("scope conflict", ErrorCode::ScopeConflict)
                 .detail("lease_id", lease.id_value())
-                .detail("scope", string_values(lease.scope())));
+                .detail("scope", string_values(lease_scope)));
         }
     }
     let mut frontmatter = task.frontmatter().clone();
@@ -1198,7 +1201,7 @@ fn lease_completion_is_unsafe(touched: &Map<String, Value>) -> bool {
         return false;
     };
 
-    ["out_of_scope", "completion_snapshot_missing"]
+    ["out_of_scope", "ambiguous", "completion_snapshot_missing"]
         .iter()
         .any(|key| {
             blocked_by
@@ -1889,6 +1892,7 @@ fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value
     }
     let mut lease = active[0].clone();
     if let Some(lease_id) = lease.id().map(str::to_string) {
+        let _lock = runtime_lock(root)?;
         refresh_existing_packets_for_active_lease(root, &mut lease, &lease_id)?;
     }
     let mut payload = json_ok();

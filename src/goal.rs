@@ -899,7 +899,6 @@ fn evaluate_cycle_report(
     if matches!(persisted.status, GoalStatus::Stopped | GoalStatus::Done) {
         return Ok(persisted);
     }
-    next.write(root, &contract.goal_id)?;
     if evaluator.metric != contract.primary_metric {
         return Err(OrchError::new("evaluator metric mismatch")
             .detail("expected", contract.primary_metric.clone())
@@ -909,6 +908,7 @@ fn evaluate_cycle_report(
         evaluator.recommendation = EvaluatorRecommendation::Blocked;
         evaluator.reason = format!("evaluator status {}", evaluator.status);
     }
+    next.write(root, &contract.goal_id)?;
     evaluator.append_measurement(root, &contract.goal_id, &state.cycle)?;
 
     if evaluator.recommendation == EvaluatorRecommendation::Keep {

@@ -484,6 +484,19 @@ pub(crate) fn apply_completed_changed_snapshot(
     }
 }
 
+pub(crate) fn append_completed_changed_path(lease: &mut LeaseRecord, path: &str) {
+    let mut paths: BTreeSet<String> = lease
+        .completed_changed()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    paths.insert(path.to_string());
+    lease.set(
+        "completed_changed",
+        string_array(paths.into_iter().collect()),
+    );
+}
+
 pub(crate) fn status_records_value(status: &Map<String, Value>) -> Value {
     status
         .get("records")
@@ -799,11 +812,14 @@ pub(crate) fn touched_for_lease(
             .filter(|path| baseline.contains(*path))
             .cloned()
             .collect();
-        if !baseline_paths.is_empty()
-            && !baseline_paths
-                .iter()
-                .all(|path| baseline_path_committed_at_head(root, lease, path).unwrap_or(false))
-        {
+        let mut all_baseline_paths_committed = true;
+        for path in &baseline_paths {
+            if !baseline_path_committed_at_head(root, lease, path)? {
+                all_baseline_paths_committed = false;
+                break;
+            }
+        }
+        if !baseline_paths.is_empty() && !all_baseline_paths_committed {
             for path in paths {
                 ambiguous.insert(path);
             }
@@ -828,7 +844,13 @@ pub(crate) fn touched_for_lease(
         changed_records.push(record.clone());
         let disallowed: Vec<String> = paths
             .iter()
-            .filter(|path| !path_in_scope(path, &scope))
+            .filter(|path| {
+                let in_completed_window = completed_window
+                    .as_ref()
+                    .map(|window| window.contains(*path))
+                    .unwrap_or(false);
+                !in_completed_window && !path_in_scope(path, &scope)
+            })
             .cloned()
             .collect();
 

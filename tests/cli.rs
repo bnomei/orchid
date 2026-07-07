@@ -1442,6 +1442,38 @@ fn goal_non_pass_status_blocks_keep() {
 }
 
 #[test]
+fn goal_metric_mismatch_does_not_persist_evaluate_checkpoint() {
+    let repo = Repo::new();
+    repo.init_git();
+    init_ready_goal(
+        &repo,
+        "metric-mismatch-goal",
+        "if [ -z \"$ORCHID_GOAL_BASELINE_VALUE\" ]; then printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":120.0,\"delta\":0.0,\"reason\":\"baseline\"}'; else printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"wrong_metric\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"wrong metric\"}'; fi",
+        "10",
+    );
+    fs::write(repo.root.join("candidate.txt"), "candidate\n").unwrap();
+    write_goal_report(
+        &repo,
+        "metric-mismatch-goal",
+        "C001",
+        "ready_for_evaluation",
+        "next attempt",
+    );
+    let state_path = repo
+        .root
+        .join(".orchid/goals/metric-mismatch-goal/state.json");
+    let before = fs::read_to_string(&state_path).unwrap();
+
+    let failed = repo.run_fail(&["goal"]);
+
+    assert!(failed["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("evaluator metric mismatch"));
+    assert_eq!(fs::read_to_string(state_path).unwrap(), before);
+}
+
+#[test]
 fn goal_keep_below_min_delta_is_downgraded_to_discard() {
     let repo = Repo::new();
     repo.init_git();
@@ -2551,6 +2583,37 @@ fn agent_status_refreshes_existing_worker_packet_after_task_body_edit() {
 }
 
 #[test]
+fn agent_status_refresh_requires_runtime_lock() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--agent-id",
+        "agent_123",
+        "--lease-id",
+        "l_stale",
+    ]);
+    repo.run(&["packet", "--lease", "l_stale", "--role", "worker"]);
+    let task_path = repo.root.join("specs/example/tasks/T001.md");
+    let original_task = fs::read_to_string(&task_path).unwrap();
+    fs::write(
+        &task_path,
+        format!("{original_task}\nFresh task body from edited source.\n"),
+    )
+    .unwrap();
+    let lock_dir = repo.root.join(".orchid/locks");
+    fs::create_dir_all(&lock_dir).unwrap();
+    fs::write(lock_dir.join("state.lock"), "held\n").unwrap();
+
+    let status = repo.run_fail(&["status", "--agent-id", "agent_123"]);
+
+    assert_eq!(status["code"], "runtime_lock_busy");
+}
+
+#[test]
 fn attach_agent_refreshes_existing_validator_and_reviewer_packets() {
     let repo = Repo::new();
     repo.run(&[
@@ -3046,6 +3109,44 @@ fn block_rejects_active_bud_scope_overlap_without_changing_task_status() {
 }
 
 #[test]
+fn block_rejects_active_task_effective_scope_overlap() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_scope",
+    ]);
+    let task_path = repo.root.join("specs/example/tasks/T001.md");
+    let task = fs::read_to_string(&task_path).unwrap();
+    fs::write(
+        &task_path,
+        task.replace(
+            "scope = [\"src/feature/\"]",
+            "scope = [\"src/feature/\", \"src/other/\"]",
+        ),
+    )
+    .unwrap();
+    repo.write_task_file("example", "T005", "todo", "src/other/");
+
+    let blocked = repo.run_fail(&["block", "example", "T005", "--reason", "blocked"]);
+
+    assert_eq!(blocked["code"], "scope_conflict");
+    assert_eq!(blocked["lease_id"], "l_scope");
+    assert_eq!(
+        blocked["scope"],
+        serde_json::json!(["src/feature/", "src/other/"])
+    );
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T005.md"),
+        "todo"
+    );
+}
+
+#[test]
 fn next_moves_through_dispatch_wait_validate_and_recover() {
     let repo = Repo::new();
     let payload = repo.run(&["next", "--spec", "example"]);
@@ -3115,6 +3216,8 @@ fn bud_packet_complete_git_and_cleanup_lifecycle_work() {
     repo.init_git();
     let instructions = repo.root.join("bud-instructions.md");
     fs::write(&instructions, "Change feature work only.\n").unwrap();
+    git(&repo.root, &["add", "bud-instructions.md"]);
+    git(&repo.root, &["commit", "-m", "add bud instructions"]);
     let payload = repo.run(&[
         "bud",
         "--title",
@@ -4611,6 +4714,8 @@ fn cleanup_bypasses_stage_guard() {
     repo.init_git();
     let instructions = repo.root.join("bud-instructions.md");
     fs::write(&instructions, "Safe cleanup candidate.\n").unwrap();
+    git(&repo.root, &["add", "bud-instructions.md"]);
+    git(&repo.root, &["commit", "-m", "add bud instructions"]);
     repo.run(&[
         "bud",
         "--title",
@@ -6136,6 +6241,43 @@ fn git_touched_and_stage_plan_split_scope_and_baseline() {
 }
 
 #[test]
+fn complete_rejects_ambiguous_baseline_dirty_paths() {
+    let repo = Repo::new();
+    repo.init_git();
+    fs::write(
+        repo.root.join("src/feature/preexisting.txt"),
+        "dirty before lease\n",
+    )
+    .unwrap();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_test",
+    ]);
+
+    let failed = repo.run_fail(&["complete", "--lease", "l_test", "--verified-by", "mayor"]);
+
+    assert_eq!(failed["code"], "complete_unsafe_to_stage");
+    assert_eq!(
+        failed["blocked_by"]["ambiguous"],
+        serde_json::json!(["src/feature/preexisting.txt"])
+    );
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_test.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lease["status"], "active");
+}
+
+#[test]
 fn stage_plan_allows_baseline_path_after_exact_dirty_content_is_committed() {
     let repo = Repo::new();
     fs::write(repo.root.join("src/feature/work.txt"), "base\n").unwrap();
@@ -6395,6 +6537,8 @@ fn bud_stage_plan_excludes_in_scope_edits_made_after_complete() {
     repo.init_git();
     let instructions = repo.root.join("bud-instructions.md");
     fs::write(&instructions, "Change feature work only.\n").unwrap();
+    git(&repo.root, &["add", "bud-instructions.md"]);
+    git(&repo.root, &["commit", "-m", "add bud instructions"]);
     repo.run(&[
         "bud",
         "--title",
