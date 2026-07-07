@@ -5104,6 +5104,87 @@ fn complete_rejects_released_lease_after_release() {
 }
 
 #[test]
+fn lease_accepts_pending_status_after_release() {
+    for status in ["pending_validation", "pending_review"] {
+        let repo = Repo::new();
+        repo.run(&[
+            "lease",
+            "example",
+            "T001",
+            "--owner",
+            "worker:a",
+            "--lease-id",
+            "l_old",
+        ]);
+        repo.run(&["release", "l_old", "--reason", "paused"]);
+        rewrite_task_status(&repo.root, "specs/example/tasks/T001.md", "todo", status);
+
+        let leased = repo.run(&[
+            "lease",
+            "example",
+            "T001",
+            "--owner",
+            "worker:b",
+            "--lease-id",
+            "l_new",
+        ]);
+
+        assert_eq!(leased["lease_id"], "l_new", "status: {status}");
+        assert_eq!(
+            task_status(&repo.root, "specs/example/tasks/T001.md"),
+            status,
+            "lease should preserve pending task status"
+        );
+    }
+}
+
+#[test]
+fn lease_rejects_non_dispatchable_statuses() {
+    for status in ["blocked", "done", "custom"] {
+        let repo = Repo::new();
+        rewrite_task_status(&repo.root, "specs/example/tasks/T001.md", "todo", status);
+
+        let failed = repo.run_fail(&[
+            "lease",
+            "example",
+            "T001",
+            "--owner",
+            "worker:a",
+            "--lease-id",
+            "l_rejected",
+        ]);
+
+        assert_eq!(failed["code"], "task_not_todo", "status: {status}");
+        assert_eq!(failed["status"], status, "status: {status}");
+    }
+}
+
+#[test]
+fn ready_and_next_accept_pending_dispatchable_statuses() {
+    for status in ["pending_validation", "pending_review"] {
+        let repo = Repo::new();
+        rewrite_task_status(&repo.root, "specs/example/tasks/T001.md", "todo", status);
+
+        let ready = repo.run(&["ready", "--spec", "example", "--explain"]);
+        let ready_tasks: Vec<&str> = ready["ready"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|task| task["task"].as_str().unwrap())
+            .collect();
+        assert!(ready_tasks.contains(&"example/T001"), "status: {status}");
+
+        let next = repo.run(&["next", "--spec", "example", "--explain"]);
+        assert_eq!(next["phase"], "dispatch", "status: {status}");
+        assert_eq!(
+            next["cmd"],
+            serde_json::json!(["lease", "example", "T001", "--owner", "worker:<agent-id>"]),
+            "status: {status}"
+        );
+    }
+}
+
+#[test]
 fn report_check_accepts_terminal_leases() {
     let repo = Repo::new();
     repo.run(&[

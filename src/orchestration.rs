@@ -288,7 +288,7 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
     ensure_runtime_dirs(root)?;
     let task = resolve_task(root, &request.target, request.task_id.as_deref())?;
     ensure_spec_dispatchable(root, &task.spec_id)?;
-    if !task.status_model().is_todo() {
+    if !task.status_model().is_dispatchable() {
         return Err(OrchError::coded("task is not todo", ErrorCode::TaskNotTodo)
             .detail("task", task_key(&task))
             .detail("status", task.status()));

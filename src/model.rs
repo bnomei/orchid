@@ -210,8 +210,11 @@ impl TaskStatus {
         }
     }
 
-    pub(crate) fn is_todo(&self) -> bool {
-        matches!(self, TaskStatus::Todo)
+    pub(crate) fn is_dispatchable(&self) -> bool {
+        matches!(
+            self,
+            TaskStatus::Todo | TaskStatus::PendingValidation | TaskStatus::PendingReview
+        )
     }
 
     pub(crate) fn is_done(&self) -> bool {
@@ -809,9 +812,25 @@ mod tests {
         let raw = Value::String("strange".to_string());
         let status = TaskStatus::from_value(Some(&raw));
         assert_eq!(status.as_str(), "strange");
-        assert!(!status.is_todo());
+        assert!(!status.is_dispatchable());
 
         let mode = VerificationMode::parse(raw.as_str().unwrap());
         assert!(!mode.is_dispatchable());
+    }
+
+    #[test]
+    fn task_status_dispatchability_matches_lease_entry_states() {
+        for raw in ["todo", "pending_validation", "pending_review"] {
+            let status = TaskStatus::from_value(Some(&Value::String(raw.to_string())));
+            assert!(status.is_dispatchable(), "status should dispatch: {raw}");
+        }
+
+        for raw in ["blocked", "done", "custom"] {
+            let status = TaskStatus::from_value(Some(&Value::String(raw.to_string())));
+            assert!(
+                !status.is_dispatchable(),
+                "status should not dispatch: {raw}"
+            );
+        }
     }
 }

@@ -460,7 +460,7 @@ pub(crate) fn ready_tasks(
             reason = Some("spec manual".to_string());
         } else if policy.checkpoint_before_implementation() {
             reason = Some("human checkpoint:before-implementation".to_string());
-        } else if !task.status_model().is_todo() {
+        } else if !task.status_model().is_dispatchable() {
             reason = Some(format!("status:{}", task.status()));
         } else if !VerificationMode::parse(task.verification_mode()).is_dispatchable() {
             reason = Some("invalid verification_mode".to_string());
