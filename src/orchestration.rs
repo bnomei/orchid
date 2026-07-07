@@ -20,7 +20,7 @@ use crate::gitstate::{
 };
 use crate::model::{
     validate_lease_id, ActiveLeaseRecordInput, LeaseId, LeaseMode, LeaseRecord, ReasoningEffort,
-    ReportFrontmatter,
+    ReportFrontmatter, SpecPolicy,
 };
 use crate::paths::{
     atomic_write, buds_dir, ensure_runtime_dirs, leases_dir, packets_dir, path_to_string, relpath,
@@ -374,9 +374,8 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
         )
         .detail("active_leases", compact_leases(active)?));
     }
-    if request.allow_parallel
-        && crate::specs::load_spec_policy(root, &task.spec_id)?.fanout_is_serial()
-    {
+    let spec_policy = crate::specs::load_spec_policy(root, &task.spec_id)?;
+    if request.allow_parallel && spec_policy.fanout_is_serial() {
         return Err(OrchError::coded(
             "spec fanout_policy is serial; --allow-parallel is not permitted",
             ErrorCode::SerialFanoutPolicy,
@@ -417,6 +416,7 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
             &reports_dir(root).join(format!("{}.md", lease_id.as_str())),
             root,
         ),
+        spec_policy: Value::Object(spec_policy.into_map()),
         worker_reasoning_effort: worker_reasoning_effort.clone(),
         worker_model: worker_model.clone(),
     });
@@ -576,6 +576,7 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
         baseline_fingerprints: baseline_fingerprints_value(root, &git_state)?,
         baseline_status: status_records_value(&git_state),
         report_path: relpath(&reports_dir(root).join(format!("{lease_id_text}.md")), root),
+        spec_policy: Value::Object(Map::new()),
         worker_reasoning_effort: worker_reasoning_effort.clone(),
         worker_model: worker_model.clone(),
     });
@@ -1341,7 +1342,10 @@ fn render_task_packet(
     let task = load_task(&task_path, root)?;
     let task_source = crate::paths::read_text(&task_path)?;
     let spec_dir = task_path.parent().and_then(|p| p.parent()).unwrap_or(root);
-    let policy = load_spec_policy(root, &task.spec_id)?;
+    let policy = match lease.spec_policy() {
+        Some(policy) => policy.clone(),
+        None => load_spec_policy(root, &task.spec_id).map(SpecPolicy::into_map)?,
+    };
     let requirements = read_optional(&repo_path(
         root,
         spec_dir.join("requirements.md"),
@@ -1351,7 +1355,7 @@ fn render_task_packet(
     let policy_text = if policy.is_empty() {
         "{}".to_string()
     } else {
-        serde_json::to_string(&Value::Object(policy.into_map())).expect("json encoding")
+        serde_json::to_string(&Value::Object(policy)).expect("json encoding")
     };
     let scope = lease.scope().join(", ");
     let mut packet = vec![

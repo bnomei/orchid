@@ -3709,6 +3709,44 @@ fn next_waits_for_serial_fanout_ready_task_under_active_lease() {
 }
 
 #[test]
+fn task_packet_uses_lease_time_spec_policy_after_spec_policy_edit() {
+    let repo = Repo::new();
+    repo.write_task_file("policyspec", "T001", "todo", "src/policy/");
+    let spec_policy_path = repo.root.join("specs/policyspec/spec.toml");
+    fs::write(&spec_policy_path, "packet_policy = \"P0\"\n").unwrap();
+
+    repo.run(&[
+        "lease",
+        "policyspec",
+        "T001",
+        "--owner",
+        "worker:policy",
+        "--lease-id",
+        "l_policy",
+    ]);
+    let packet = repo.run(&["packet", "--lease", "l_policy", "--role", "worker"]);
+    let packet_path = repo.root.join(packet["packet"].as_str().unwrap());
+    let before = fs::read_to_string(&packet_path).unwrap();
+    assert!(before.contains(r#"- Spec policy: `{"packet_policy":"P0"}`"#));
+
+    let lease_record: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_policy.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        lease_record["spec_policy"],
+        serde_json::json!({"packet_policy": "P0"})
+    );
+
+    fs::write(&spec_policy_path, "packet_policy = \"P1\"\n").unwrap();
+
+    repo.run(&["packet", "--lease", "l_policy", "--role", "worker"]);
+    let after = fs::read_to_string(&packet_path).unwrap();
+    assert!(after.contains(r#"- Spec policy: `{"packet_policy":"P0"}`"#));
+    assert!(!after.contains("P1"));
+}
+
+#[test]
 fn active_lease_scope_snapshot_controls_ready_next_and_lease_after_task_scope_edit() {
     let repo = Repo::new();
     let t1 = repo.write_task_file("sx", "T001", "todo", "src/a/");

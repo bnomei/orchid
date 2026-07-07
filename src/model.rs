@@ -400,6 +400,7 @@ pub(crate) struct ActiveLeaseRecordInput {
     pub(crate) baseline_fingerprints: Value,
     pub(crate) baseline_status: Value,
     pub(crate) report_path: String,
+    pub(crate) spec_policy: Value,
     pub(crate) worker_reasoning_effort: String,
     pub(crate) worker_model: Option<String>,
 }
@@ -434,6 +435,7 @@ impl LeaseRecord {
         insert(&mut data, "baseline_status", input.baseline_status);
         insert(&mut data, "packet_path", "");
         insert(&mut data, "report_path", input.report_path);
+        insert(&mut data, "spec_policy", input.spec_policy);
         insert(
             &mut data,
             "worker_reasoning_effort",
@@ -541,6 +543,10 @@ impl LeaseRecord {
 
     pub(crate) fn report_path(&self) -> Option<&str> {
         self.get_str("report_path").filter(|path| !path.is_empty())
+    }
+
+    pub(crate) fn spec_policy(&self) -> Option<&Map<String, Value>> {
+        self.get("spec_policy").and_then(Value::as_object)
     }
 
     pub(crate) fn worker_reasoning_effort(&self) -> Option<&str> {
@@ -743,10 +749,6 @@ impl SpecPolicy {
 
     pub(crate) fn empty() -> Self {
         Self { data: Map::new() }
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.data.is_empty()
     }
 
     pub(crate) fn is_manual(&self) -> bool {
