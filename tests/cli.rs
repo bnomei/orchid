@@ -2487,6 +2487,40 @@ fn attach_agent_refreshes_existing_worker_packet() {
 }
 
 #[test]
+fn agent_status_refreshes_existing_worker_packet_after_task_body_edit() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--agent-id",
+        "agent_123",
+        "--lease-id",
+        "l_stale",
+    ]);
+    let packet = repo.run(&["packet", "--lease", "l_stale", "--role", "worker"]);
+    let packet_path = repo.root.join(packet["packet"].as_str().unwrap());
+    let before = fs::read_to_string(&packet_path).unwrap();
+    assert!(!before.contains("Fresh task body from edited source."));
+
+    let task_path = repo.root.join("specs/example/tasks/T001.md");
+    let original_task = fs::read_to_string(&task_path).unwrap();
+    fs::write(
+        &task_path,
+        format!("{original_task}\nFresh task body from edited source.\n"),
+    )
+    .unwrap();
+
+    let status = repo.run(&["status", "--agent-id", "agent_123"]);
+    assert_eq!(status["packet"], packet["packet"]);
+
+    let after = fs::read_to_string(&packet_path).unwrap();
+    assert!(after.contains("Fresh task body from edited source."));
+}
+
+#[test]
 fn attach_agent_refreshes_existing_validator_and_reviewer_packets() {
     let repo = Repo::new();
     repo.run(&[
