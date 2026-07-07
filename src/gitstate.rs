@@ -274,20 +274,52 @@ fn parse_porcelain_v2_z(data: &[u8]) -> Vec<GitStatusRecord> {
 }
 
 fn porcelain_record_text(chunk: &str) -> Option<&str> {
-    if is_porcelain_record_start(chunk) {
+    if is_structural_porcelain_record(chunk) {
         return Some(chunk);
     }
 
     chunk
         .split('\n')
         .map(|line| line.trim_start_matches('\r'))
-        .find(|line| is_porcelain_record_start(line))
+        .find(|line| is_structural_porcelain_record(line))
 }
 
-fn is_porcelain_record_start(value: &str) -> bool {
+fn is_structural_porcelain_record(value: &str) -> bool {
+    match value.as_bytes().first().copied() {
+        Some(b'1') => {
+            let parts: Vec<&str> = value.splitn(9, ' ').collect();
+            parts.len() == 9 && is_valid_xy(parts[1])
+        }
+        Some(b'2') => {
+            let parts: Vec<&str> = value.splitn(10, ' ').collect();
+            parts.len() == 10
+                && is_valid_xy(parts[1])
+                && matches!(parts[8].as_bytes().first().copied(), Some(b'R' | b'C'))
+        }
+        Some(b'u') => {
+            let parts: Vec<&str> = value.splitn(11, ' ').collect();
+            parts.len() == 11 && is_valid_xy(parts[1])
+        }
+        Some(b'?') | Some(b'!') => value.as_bytes().get(1).copied() == Some(b' '),
+        _ => false,
+    }
+}
+
+fn is_valid_xy(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(index) = chars.next() else {
+        return false;
+    };
+    let Some(worktree) = chars.next() else {
+        return false;
+    };
+    chars.next().is_none() && is_valid_status_code(index) && is_valid_status_code(worktree)
+}
+
+fn is_valid_status_code(value: char) -> bool {
     matches!(
-        value.as_bytes(),
-        [b'1' | b'2' | b'u' | b'?' | b'!' | b'#', b' ', ..]
+        value,
+        '.' | 'M' | 'A' | 'D' | 'R' | 'C' | 'T' | 'U' | '?' | '!'
     )
 }
 
@@ -877,5 +909,29 @@ mod tests {
         assert_eq!(records[0]["kind"], "deleted");
         assert_eq!(records[0]["index"], "D");
         assert_eq!(records[0]["staged"], true);
+    }
+
+    #[test]
+    fn parser_recovers_record_after_comment_like_glued_diagnostic() {
+        let data = b"# pre-status hook ran\n1 .M N... 100644 100644 100644 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb src/real.rs\0";
+        let records = record_values(data);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["path"], "src/real.rs");
+        assert_eq!(records[0]["kind"], "modified");
+        assert_eq!(records[0]["worktree"], "M");
+        assert_eq!(records[0]["unstaged"], true);
+    }
+
+    #[test]
+    fn parser_recovers_record_after_ordinary_like_glued_diagnostic() {
+        let data = b"1 files changed\n1 .M N... 100644 100644 100644 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb src/real.rs\0";
+        let records = record_values(data);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["path"], "src/real.rs");
+        assert_eq!(records[0]["kind"], "modified");
+        assert_eq!(records[0]["worktree"], "M");
+        assert_eq!(records[0]["unstaged"], true);
     }
 }
