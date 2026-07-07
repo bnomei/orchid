@@ -543,6 +543,9 @@ pub(crate) fn next_cycle_id(cycle: &str) -> OrchResult<String> {
     let number: u32 = raw
         .parse()
         .map_err(|_| OrchError::new("invalid goal cycle").detail("cycle", cycle))?;
+    if number >= 999 {
+        return Err(OrchError::new("goal cycle limit reached").detail("cycle", cycle));
+    }
     Ok(format!("C{:03}", number + 1))
 }
 
@@ -1492,6 +1495,8 @@ next_hypothesis = "next"
         assert_eq!(first_cycle_id(), "C001");
         assert_eq!(next_cycle_id("C001").unwrap(), "C002");
         assert_eq!(next_cycle_id("C099").unwrap(), "C100");
+        assert_eq!(next_cycle_id("C998").unwrap(), "C999");
+        assert!(next_cycle_id("C999").is_err());
         assert!(next_cycle_id("1").is_err());
     }
 
