@@ -3,6 +3,9 @@
   "lease_mode": "single",
   "task": "example/T001",
   "task_path": "specs/example/tasks/T001.md",
+  "scope": [
+    "src/feature/"
+  ],
   "report": ".orchid/reports/l_contract.md",
   "worker_reasoning_effort": "medium"
 }

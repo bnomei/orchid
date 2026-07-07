@@ -426,6 +426,7 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
     insert(&mut payload, "lease_mode", lease_mode.as_str());
     insert(&mut payload, "task", task_key(&task));
     insert(&mut payload, "task_path", relpath(&task.path, root));
+    insert(&mut payload, "scope", string_values(task.scope()));
     insert(
         &mut payload,
         "report",
