@@ -7,7 +7,7 @@
 
 use std::fmt;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -559,13 +559,14 @@ impl EvaluatorResult {
         goal_id: &GoalId,
         cycle: &str,
     ) -> OrchResult<()> {
+        let path = goal_artifact_path(root, goal_id, MEASUREMENTS_JSONL, "goal_measurements")?;
+        if jsonl_has_cycle(&path, cycle)? {
+            return Ok(());
+        }
         let mut row = self.raw.clone();
         row.entry("cycle".to_string())
             .or_insert_with(|| Value::String(cycle.to_string()));
-        append_jsonl(
-            &goal_artifact_path(root, goal_id, MEASUREMENTS_JSONL, "goal_measurements")?,
-            &row,
-        )
+        append_jsonl(&path, &row)
     }
 }
 
@@ -574,10 +575,13 @@ pub(crate) fn append_result(
     goal_id: &GoalId,
     result: &Map<String, Value>,
 ) -> OrchResult<()> {
-    append_jsonl(
-        &goal_artifact_path(root, goal_id, RESULTS_JSONL, "goal_results")?,
-        result,
-    )
+    let path = goal_artifact_path(root, goal_id, RESULTS_JSONL, "goal_results")?;
+    if let Some(cycle) = result.get("cycle").and_then(Value::as_str) {
+        if jsonl_has_cycle(&path, cycle)? {
+            return Ok(());
+        }
+    }
+    append_jsonl(&path, result)
 }
 
 pub(crate) fn next_cycle_id(cycle: &str) -> OrchResult<String> {
@@ -842,6 +846,10 @@ fn evaluate_cycle_report(
     next.next_hypothesis = report.next_hypothesis.clone();
     next.updated_at = now_iso();
 
+    if let Some(recorded) = recorded_cycle_result(root, &contract.goal_id, &state.cycle)? {
+        return replay_recorded_cycle_result(root, contract, &next, &recorded);
+    }
+
     if report.status == GoalReportStatus::Blocked {
         next.status = GoalStatus::Blocked;
         next.budget_exhausted_reason = Some("report blocked".to_string());
@@ -891,6 +899,7 @@ fn evaluate_cycle_report(
     if matches!(persisted.status, GoalStatus::Stopped | GoalStatus::Done) {
         return Ok(persisted);
     }
+    next.write(root, &contract.goal_id)?;
     if evaluator.metric != contract.primary_metric {
         return Err(OrchError::new("evaluator metric mismatch")
             .detail("expected", contract.primary_metric.clone())
@@ -1214,6 +1223,113 @@ fn append_cycle_result(
     append_result(root, &contract.goal_id, &row)
 }
 
+fn recorded_cycle_result(
+    root: &Path,
+    goal_id: &GoalId,
+    cycle: &str,
+) -> OrchResult<Option<Map<String, Value>>> {
+    let path = goal_artifact_path(root, goal_id, RESULTS_JSONL, "goal_results")?;
+    read_jsonl_rows(&path).map(|rows| {
+        rows.into_iter().find(|row| {
+            row.get("cycle")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == cycle)
+        })
+    })
+}
+
+fn replay_recorded_cycle_result(
+    root: &Path,
+    contract: &GoalContract,
+    state: &GoalState,
+    row: &Map<String, Value>,
+) -> OrchResult<GoalState> {
+    let decision = row
+        .get("decision")
+        .and_then(Value::as_str)
+        .ok_or_else(|| OrchError::new("recorded goal result missing decision"))?;
+    let mut next = state.clone();
+    next.last_decision = Some(EvaluatorRecommendation::parse(decision)?);
+    next.status = match next.last_decision {
+        Some(EvaluatorRecommendation::Keep) => GoalStatus::Keep,
+        Some(EvaluatorRecommendation::Discard) => GoalStatus::Discard,
+        Some(EvaluatorRecommendation::Blocked) => GoalStatus::Blocked,
+        Some(EvaluatorRecommendation::Done) => GoalStatus::Done,
+        None => GoalStatus::Evaluate,
+    };
+    next.updated_at = now_iso();
+
+    match next.last_decision {
+        Some(EvaluatorRecommendation::Keep) => {
+            let commit = row_string(row, "candidate_commit")
+                .ok_or_else(|| OrchError::new("recorded keep result missing candidate_commit"))?;
+            let candidate = row_f64(row, "candidate")
+                .ok_or_else(|| OrchError::new("recorded keep result missing candidate"))?;
+            next.baseline_commit = Some(commit.clone());
+            next.baseline_value = Some(candidate);
+            next.best_commit = Some(commit);
+            next.best_value = Some(candidate);
+            next.iterations_completed = next.iterations_completed.saturating_add(1);
+            next.cycle = next_cycle_id(&next.cycle)?;
+        }
+        Some(EvaluatorRecommendation::Discard | EvaluatorRecommendation::Done) => {
+            let evaluator = evaluator_from_result_row(row)?;
+            close_cycle(root, contract, &mut next, &evaluator)?;
+        }
+        Some(EvaluatorRecommendation::Blocked) => {
+            next.status = GoalStatus::Blocked;
+            next.budget_exhausted_reason = row_string(row, "reason");
+        }
+        None => {}
+    }
+
+    let budget = next.budget_decision(contract, crate::core::utc_now())?;
+    if budget.exhausted && next.status != GoalStatus::Blocked {
+        next.status = GoalStatus::Done;
+        next.budget_exhausted = true;
+        next.budget_exhausted_reason = budget.reason;
+    } else if matches!(next.status, GoalStatus::Keep | GoalStatus::Discard) {
+        next.status = GoalStatus::Ready;
+    }
+    next.write(root, &contract.goal_id)?;
+    Ok(next)
+}
+
+fn evaluator_from_result_row(row: &Map<String, Value>) -> OrchResult<EvaluatorResult> {
+    let recommendation = EvaluatorRecommendation::parse(
+        row.get("decision")
+            .and_then(Value::as_str)
+            .ok_or_else(|| OrchError::new("recorded goal result missing decision"))?,
+    )?;
+    Ok(EvaluatorResult {
+        status: "pass".to_string(),
+        recommendation,
+        metric: row
+            .get("metric")
+            .and_then(Value::as_str)
+            .ok_or_else(|| OrchError::new("recorded goal result missing metric"))?
+            .to_string(),
+        baseline: row_f64(row, "baseline")
+            .ok_or_else(|| OrchError::new("recorded goal result missing baseline"))?,
+        candidate: row_f64(row, "candidate")
+            .ok_or_else(|| OrchError::new("recorded goal result missing candidate"))?,
+        delta: row_f64(row, "delta")
+            .ok_or_else(|| OrchError::new("recorded goal result missing delta"))?,
+        reason: row_string(row, "reason").unwrap_or_default(),
+        raw: row.clone(),
+    })
+}
+
+fn row_string(row: &Map<String, Value>, key: &str) -> Option<String> {
+    row.get(key)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn row_f64(row: &Map<String, Value>, key: &str) -> Option<f64> {
+    row.get(key).and_then(Value::as_f64)
+}
+
 fn json_number(value: f64) -> OrchResult<Value> {
     serde_json::Number::from_f64(value)
         .map(Value::Number)
@@ -1406,6 +1522,35 @@ fn append_jsonl(path: &Path, data: &Map<String, Value>) -> OrchResult<()> {
     file.write_all(&line)?;
     file.sync_all()?;
     Ok(())
+}
+
+fn jsonl_has_cycle(path: &Path, cycle: &str) -> OrchResult<bool> {
+    read_jsonl_rows(path).map(|rows| {
+        rows.iter().any(|row| {
+            row.get("cycle")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value == cycle)
+        })
+    })
+}
+
+fn read_jsonl_rows(path: &Path) -> OrchResult<Vec<Map<String, Value>>> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err.into()),
+    };
+    let mut rows = Vec::new();
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(Value::Object(row)) = serde_json::from_str::<Value>(&line) {
+            rows.push(row);
+        }
+    }
+    Ok(rows)
 }
 
 fn required_string(map: &Map<String, Value>, key: &str) -> OrchResult<String> {

@@ -208,6 +208,12 @@ fn goal_state(repo: &Repo, goal_id: &str) -> Value {
     .expect("goal state json")
 }
 
+fn jsonl_row_count(path: &Path) -> usize {
+    fs::read_to_string(path)
+        .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count())
+        .unwrap_or(0)
+}
+
 fn init_ready_goal(repo: &Repo, goal_id: &str, evaluator: &str, max_iterations: &str) {
     repo.run_stdout(&[
         "goal",
@@ -1193,12 +1199,36 @@ fn goal_keep_retry_after_crash_does_not_wedge() {
         "precompute static rank weights",
     );
     let state_path = repo.root.join(".orchid/goals/crash-goal/state.json");
+    let measurements_path = repo
+        .root
+        .join(".orchid/goals/crash-goal/measurements.jsonl");
+    let results_path = repo.root.join(".orchid/goals/crash-goal/results.jsonl");
     let pre_state = fs::read_to_string(&state_path).unwrap();
     repo.run_stdout(&["goal"]);
+    let first_head = git_stdout(&repo.root, &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    let first_commit_count = git_stdout(&repo.root, &["rev-list", "--count", "HEAD"])
+        .trim()
+        .to_string();
+    let first_measurements = jsonl_row_count(&measurements_path);
+    let first_results = jsonl_row_count(&results_path);
+    assert_eq!(first_measurements, 1);
+    assert_eq!(first_results, 1);
 
     fs::write(&state_path, &pre_state).unwrap();
     let stdout = repo.run_stdout(&["goal"]);
     assert!(stdout.starts_with("# Goal Ready"));
+    assert_eq!(
+        git_stdout(&repo.root, &["rev-parse", "HEAD"]).trim(),
+        first_head
+    );
+    assert_eq!(
+        git_stdout(&repo.root, &["rev-list", "--count", "HEAD"]).trim(),
+        first_commit_count
+    );
+    assert_eq!(jsonl_row_count(&measurements_path), first_measurements);
+    assert_eq!(jsonl_row_count(&results_path), first_results);
     let state = goal_state(&repo, "crash-goal");
     assert_eq!(state["cycle"], "C002");
     assert_eq!(state["last_decision"], "keep");
