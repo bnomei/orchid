@@ -581,7 +581,10 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
     lease.set("title", request.title.clone());
     lease.set("instructions_path", relpath(&instructions_path, root));
     let packet = render_packet_for_lease(root, &mut lease, &lease_id_text, PacketRoleKind::Worker)?;
-    save_lease(root, &lease)?;
+    if let Err(err) = save_lease(root, &lease) {
+        rollback_bud_artifacts(root, &instructions_path, &packet);
+        return Err(err);
+    }
 
     let mut payload = json_ok();
     insert(&mut payload, "lease_id", lease_id_text);
@@ -611,6 +614,11 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
     );
     insert(&mut payload, "status", "active");
     Ok(payload)
+}
+
+fn rollback_bud_artifacts(root: &Path, instructions_path: &Path, packet_path: &str) {
+    let _ = fs::remove_file(instructions_path);
+    let _ = fs::remove_file(root.join(packet_path));
 }
 
 pub(crate) fn lease_attach_agent(

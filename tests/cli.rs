@@ -2611,6 +2611,42 @@ fn bud_creates_runtime_packet_without_report_stub() {
 }
 
 #[test]
+#[cfg(unix)]
+fn bud_removes_instruction_and_packet_when_lease_save_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    let instructions = repo.root.join("bud-instructions.md");
+    fs::write(&instructions, "Work.\n").unwrap();
+    let leases_dir = repo.root.join(".orchid/leases");
+    let buds_dir = repo.root.join(".orchid/buds");
+    let packet_path = repo.root.join(".orchid/packets/l_bud_rollback-worker.md");
+    let instruction_snapshot = buds_dir.join("l_bud_rollback.md");
+    fs::create_dir_all(&leases_dir).unwrap();
+    let original = fs::metadata(&leases_dir).unwrap().permissions();
+    fs::set_permissions(&leases_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let failed = repo.run_fail(&[
+        "bud",
+        "--title",
+        "Rollback bud",
+        "--scope",
+        "src/rollback/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_bud_rollback",
+    ]);
+    assert!(failed.get("error").is_some());
+
+    fs::set_permissions(&leases_dir, original).unwrap();
+
+    assert!(!leases_dir.join("l_bud_rollback.json").exists());
+    assert!(!instruction_snapshot.exists());
+    assert!(!packet_path.exists());
+}
+
+#[test]
 fn bud_enforces_scope_and_parallel_guards() {
     let repo = Repo::new();
     let instructions = repo.root.join("bud-instructions.md");
