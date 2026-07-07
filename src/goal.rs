@@ -370,6 +370,34 @@ pub(crate) enum GoalStatus {
 }
 
 impl GoalStatus {
+    pub(crate) fn blocks_reinit(self) -> bool {
+        matches!(
+            self,
+            Self::Setup
+                | Self::Baseline
+                | Self::Ready
+                | Self::Running
+                | Self::Evaluate
+                | Self::Keep
+                | Self::Discard
+        )
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Setup => "setup",
+            Self::Baseline => "baseline",
+            Self::Ready => "ready",
+            Self::Running => "running",
+            Self::Evaluate => "evaluate",
+            Self::Keep => "keep",
+            Self::Discard => "discard",
+            Self::Blocked => "blocked",
+            Self::Done => "done",
+            Self::Stopped => "stopped",
+        }
+    }
+
     pub(crate) fn parse(value: &str) -> OrchResult<Self> {
         match value {
             "setup" => Ok(Self::Setup),
@@ -582,6 +610,17 @@ pub(crate) fn report_path(root: &Path, goal_id: &GoalId, cycle: &str) -> OrchRes
 pub(crate) fn init_goal(root: &Path, request: GoalInitRequest) -> OrchResult<String> {
     let _lock = runtime_lock(root)?;
     let goal_id = request.goal_id.clone();
+    let state_path = goal_artifact_path(root, &goal_id, STATE_JSON, "goal_state")?;
+    if state_path.exists() {
+        let existing = GoalState::read(root, &goal_id)?;
+        if existing.status.blocks_reinit() {
+            return Err(
+                OrchError::with_code("goal already active", "goal_already_active")
+                    .detail("goal_id", goal_id.as_str().to_string())
+                    .detail("status", existing.status.as_str()),
+            );
+        }
+    }
     let (contract, mut state) = request.into_contract_and_state(now_iso());
     match baseline_evaluator(root, &contract) {
         Ok((commit, value)) => {

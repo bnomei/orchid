@@ -441,6 +441,61 @@ fn goal_init_without_evaluator_creates_files_and_setup_state() {
 }
 
 #[test]
+fn goal_init_rejects_same_id_active_goal_without_clobbering_state_or_traces() {
+    let repo = Repo::new();
+    repo.init_git();
+    init_ready_goal(
+        &repo,
+        "search-ranking-proof",
+        "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":118.5,\"delta\":1.5,\"reason\":\"baseline\"}'",
+        "10",
+    );
+    repo.run_stdout(&["goal"]);
+
+    let goal_root = repo.root.join(".orchid/goals/search-ranking-proof");
+    let results_path = goal_root.join("results.jsonl");
+    fs::write(
+        &results_path,
+        "{\"cycle\":\"C001\",\"status\":\"pass\",\"reason\":\"existing\"}\n",
+    )
+    .unwrap();
+    let state_before = fs::read_to_string(goal_root.join("state.json")).unwrap();
+    let results_before = fs::read_to_string(&results_path).unwrap();
+
+    let failed = repo.run_fail(&[
+        "goal",
+        "init",
+        "--id",
+        "search-ranking-proof",
+        "--goal",
+        "Replace active goal",
+        "--metric",
+        "throughput",
+        "--direction",
+        "higher-is-better",
+        "--min-delta",
+        "1",
+        "--hypothesis",
+        "new hypothesis",
+        "--max-iterations",
+        "3",
+        "--max-duration",
+        "1h",
+        "--scope",
+        ".",
+    ]);
+
+    assert_eq!(failed["code"], "goal_already_active");
+    assert_eq!(failed["goal_id"], "search-ranking-proof");
+    assert_eq!(failed["status"], "running");
+    assert_eq!(
+        fs::read_to_string(goal_root.join("state.json")).unwrap(),
+        state_before
+    );
+    assert_eq!(fs::read_to_string(results_path).unwrap(), results_before);
+}
+
+#[test]
 fn goal_init_defaults_id_from_sanitized_branch_leaf() {
     let repo = Repo::new();
     repo.init_git();
