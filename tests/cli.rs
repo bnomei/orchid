@@ -3496,15 +3496,24 @@ fn active_lease_scope_snapshot_controls_bud_and_git_touched_after_task_scope_edi
     )
     .unwrap();
     let touched = repo.run(&["git-touched", "--lease", "l_1"]);
-    assert_eq!(
-        touched["stage"],
-        serde_json::json!(["specs/sx/tasks/T001.md", "src/a/work.txt"])
-    );
+    assert_eq!(touched["stage"], serde_json::json!(["src/a/work.txt"]));
     assert_eq!(
         touched["blocked_by"]["out_of_scope"],
-        serde_json::json!(["src/b/work.txt"])
+        serde_json::json!(["specs/sx/tasks/T001.md", "src/b/work.txt"])
     );
     assert_eq!(touched["safe_to_stage"], false);
+
+    let failed = repo.run_fail(&["complete", "--lease", "l_1", "--verified-by", "mayor"]);
+    assert_eq!(failed["code"], "complete_unsafe_to_stage");
+    assert_eq!(
+        failed["blocked_by"]["out_of_scope"],
+        serde_json::json!(["specs/sx/tasks/T001.md", "src/b/work.txt"])
+    );
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lease["status"], "active");
 }
 
 #[test]

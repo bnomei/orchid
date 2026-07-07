@@ -702,8 +702,6 @@ pub(crate) fn touched_for_lease(
     let completed_snapshot_missing = lease.status().is_completed() && completed_window.is_none();
     let records = git_status_records_from_status(&status);
     let scope = lease.scope();
-    let task_path = lease.task_path();
-
     let mut stage_paths = BTreeSet::new();
     let mut out_of_scope = BTreeSet::new();
     let mut ambiguous = BTreeSet::new();
@@ -745,7 +743,7 @@ pub(crate) fn touched_for_lease(
         changed_records.push(record.clone());
         let disallowed: Vec<String> = paths
             .iter()
-            .filter(|path| !path_in_scope(path, &scope) && path.as_str() != task_path)
+            .filter(|path| !path_in_scope(path, &scope))
             .cloned()
             .collect();
 
