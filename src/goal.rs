@@ -209,11 +209,22 @@ impl GoalContract {
 
     pub(crate) fn read(root: &Path, goal_id: &GoalId) -> OrchResult<Self> {
         let path = goal_artifact_path(root, goal_id, GOAL_TOML, "goal_toml")?;
-        toml::from_str(&read_text(&path)?).map_err(|err| {
+        let contract: Self = toml::from_str(&read_text(&path)?).map_err(|err| {
             OrchError::new("invalid goal.toml")
                 .detail("path", path_to_string(&path))
                 .detail("message", err.to_string())
-        })
+        })?;
+        contract.validate_budget()?;
+        Ok(contract)
+    }
+
+    fn validate_budget(&self) -> OrchResult<()> {
+        if self.max_iterations == 0 {
+            return Err(OrchError::new("max-iterations must be at least 1")
+                .detail("max_iterations", self.max_iterations.to_string()));
+        }
+        parse_duration(&self.max_duration)?;
+        Ok(())
     }
 
     fn to_toml(&self) -> String {

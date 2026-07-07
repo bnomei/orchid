@@ -1110,6 +1110,51 @@ fn goal_init_rejects_zero_budgets() {
 }
 
 #[test]
+fn goal_read_rejects_persisted_zero_budgets() {
+    for (from, to, expected_code) in [
+        (
+            "max_iterations = 10",
+            "max_iterations = 0",
+            "max_iterations_must_be_at_least_1",
+        ),
+        (
+            "max_duration = \"10h\"",
+            "max_duration = \"0m\"",
+            "invalid_duration",
+        ),
+    ] {
+        let repo = Repo::new();
+        repo.init_git();
+        init_ready_goal(
+            &repo,
+            "persisted-zero-budget",
+            "printf '%s\n' '{\"status\":\"pass\",\"recommendation\":\"keep\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":110.0,\"delta\":10.0,\"reason\":\"done\"}'",
+            "10",
+        );
+        let contract_path = repo
+            .root
+            .join(".orchid/goals/persisted-zero-budget/goal.toml");
+        let contract = fs::read_to_string(&contract_path).unwrap();
+        fs::write(&contract_path, contract.replace(from, to)).unwrap();
+        write_goal_report(
+            &repo,
+            "persisted-zero-budget",
+            "C001",
+            "ready_for_evaluation",
+            "next attempt",
+        );
+
+        let failed = repo.run_fail(&["goal"]);
+
+        assert_eq!(failed["code"], expected_code);
+        let state = goal_state(&repo, "persisted-zero-budget");
+        assert_eq!(state["status"], "ready");
+        assert_eq!(state["budget_exhausted"], false);
+        assert_eq!(state["budget_exhausted_reason"], Value::Null);
+    }
+}
+
+#[test]
 fn goal_init_rejects_non_finite_min_delta() {
     let repo = Repo::new();
     for bad in ["nan", "inf"] {
@@ -1177,12 +1222,10 @@ fn goal_init_rejects_negative_min_delta() {
             .contains("min-delta"),
         "unexpected error: {failed}"
     );
-    assert!(
-        !repo
-            .root
-            .join(".orchid/goals/negative-min-delta-goal/goal.toml")
-            .exists()
-    );
+    assert!(!repo
+        .root
+        .join(".orchid/goals/negative-min-delta-goal/goal.toml")
+        .exists());
 }
 
 #[test]
