@@ -3777,7 +3777,7 @@ fn task_packet_uses_lease_time_spec_policy_after_spec_policy_edit() {
 }
 
 #[test]
-fn active_lease_scope_snapshot_controls_ready_next_and_lease_after_task_scope_edit() {
+fn active_lease_effective_scope_controls_ready_next_and_lease_after_task_scope_edit() {
     let repo = Repo::new();
     let t1 = repo.write_task_file("sx", "T001", "todo", "src/a/");
     repo.write_task_file("sx", "T002", "todo", "src/b/");
@@ -3826,7 +3826,7 @@ fn active_lease_scope_snapshot_controls_ready_next_and_lease_after_task_scope_ed
         ])
     );
 
-    let lease = repo.run(&[
+    let lease = repo.run_fail(&[
         "lease",
         "sx",
         "T002",
@@ -3836,12 +3836,13 @@ fn active_lease_scope_snapshot_controls_ready_next_and_lease_after_task_scope_ed
         "l_2",
         "--allow-parallel",
     ]);
-    assert_eq!(lease["lease_id"], "l_2");
-    assert_eq!(lease["task"], "sx/T002");
+    assert_eq!(lease["code"], "scope_conflict");
+    assert_eq!(lease["lease_id"], "l_1");
+    assert_eq!(lease["scope"], serde_json::json!(["src/a/", "src/b/"]));
 }
 
 #[test]
-fn active_lease_scope_snapshot_controls_bud_and_git_touched_after_task_scope_edit() {
+fn active_task_lease_effective_scope_blocks_bud_after_task_scope_edit() {
     let repo = Repo::new();
     fs::create_dir_all(repo.root.join("src/a")).unwrap();
     fs::create_dir_all(repo.root.join("src/b")).unwrap();
@@ -3867,7 +3868,7 @@ fn active_lease_scope_snapshot_controls_bud_and_git_touched_after_task_scope_edi
     )
     .unwrap();
 
-    let bud = repo.run(&[
+    let bud = repo.run_fail(&[
         "bud",
         "--title",
         "Bud on edited task scope",
@@ -3879,8 +3880,9 @@ fn active_lease_scope_snapshot_controls_bud_and_git_touched_after_task_scope_edi
         "l_bud_scope_snapshot",
         "--allow-parallel",
     ]);
-    assert_eq!(bud["lease_id"], "l_bud_scope_snapshot");
-    assert_eq!(bud["scope"], serde_json::json!(["src/b/"]));
+    assert_eq!(bud["code"], "scope_conflict");
+    assert_eq!(bud["lease_id"], "l_1");
+    assert_eq!(bud["scope"], serde_json::json!(["src/a/", "src/b/"]));
 
     fs::write(repo.root.join("src/a/work.txt"), "in stored scope\n").unwrap();
     fs::write(

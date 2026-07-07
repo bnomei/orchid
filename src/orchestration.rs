@@ -342,12 +342,11 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
     ensure_task_path_not_already_leased(root, &task_rel, &task_key(&task))?;
     let active = active_leases(root)?;
     for lease in &active {
-        // Active lease ownership is the immutable scope snapshot stored on the
-        // lease record; mid-lease task frontmatter edits do not mutate it.
-        if scopes_overlap(&task.scope(), &lease.scope()) {
+        let lease_scope = effective_lease_scope(root, lease)?;
+        if scopes_overlap(&task.scope(), &lease_scope) {
             return Err(OrchError::coded("scope conflict", ErrorCode::ScopeConflict)
                 .detail("lease_id", lease.id_value())
-                .detail("scope", string_values(lease.scope())));
+                .detail("scope", string_values(lease_scope)));
         }
     }
     if let Some(serial_lease) = active
@@ -491,10 +490,11 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
 
     let active = active_leases(root)?;
     for lease in &active {
-        if scopes_overlap(&scope, &lease.scope()) {
+        let lease_scope = effective_lease_scope(root, lease)?;
+        if scopes_overlap(&scope, &lease_scope) {
             return Err(OrchError::coded("scope conflict", ErrorCode::ScopeConflict)
                 .detail("lease_id", lease.id_value())
-                .detail("scope", string_values(lease.scope())));
+                .detail("scope", string_values(lease_scope)));
         }
     }
     if let Some(serial_lease) = active
@@ -1235,6 +1235,22 @@ fn cleanup_lease_needs_stage_guard(lease: &LeaseRecord) -> bool {
         && !lease.is_bud()
         && !lease.task_path().is_empty()
         && !lease.scope().is_empty()
+}
+
+fn effective_lease_scope(root: &Path, lease: &LeaseRecord) -> OrchResult<Vec<String>> {
+    let mut scope = lease.scope();
+    if lease.is_bud() || lease.task_path().is_empty() {
+        return Ok(scope);
+    }
+
+    let task_path = repo_path(root, lease.task_path(), "task_path")?;
+    let task = load_task(task_path, root)?;
+    for entry in task.scope() {
+        if !scope.contains(&entry) {
+            scope.push(entry);
+        }
+    }
+    Ok(scope)
 }
 
 fn fail_on_corrupt_lease_identity_for_cleanup(
