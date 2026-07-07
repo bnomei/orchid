@@ -202,7 +202,7 @@ pub(crate) fn split_frontmatter(
             .detail("path", path_to_string(path))
             .detail("message", err.to_string())
     })?;
-    let Value::Object(meta) = toml_to_json(parsed) else {
+    let Value::Object(meta) = toml_to_json(parsed, path)? else {
         return Err(OrchError::new("invalid TOML frontmatter").detail("path", path_to_string(path)));
     };
     Ok((meta, body))
@@ -399,22 +399,28 @@ pub(crate) fn read_optional(path: &Path) -> OrchResult<String> {
     }
 }
 
-fn toml_to_json(value: toml::Value) -> Value {
+fn toml_to_json(value: toml::Value, path: &Path) -> OrchResult<Value> {
     match value {
-        toml::Value::String(raw) => Value::String(raw),
-        toml::Value::Integer(raw) => Value::Number(Number::from(raw)),
-        toml::Value::Float(raw) => Number::from_f64(raw)
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
-        toml::Value::Boolean(raw) => Value::Bool(raw),
-        toml::Value::Datetime(raw) => Value::String(raw.to_string()),
-        toml::Value::Array(items) => Value::Array(items.into_iter().map(toml_to_json).collect()),
+        toml::Value::String(raw) => Ok(Value::String(raw)),
+        toml::Value::Integer(raw) => Ok(Value::Number(Number::from(raw))),
+        toml::Value::Float(raw) => Number::from_f64(raw).map(Value::Number).ok_or_else(|| {
+            OrchError::new("invalid TOML frontmatter")
+                .detail("path", path_to_string(path))
+                .detail("message", "non-finite float values are not supported")
+        }),
+        toml::Value::Boolean(raw) => Ok(Value::Bool(raw)),
+        toml::Value::Datetime(raw) => Ok(Value::String(raw.to_string())),
+        toml::Value::Array(items) => items
+            .into_iter()
+            .map(|item| toml_to_json(item, path))
+            .collect::<OrchResult<Vec<_>>>()
+            .map(Value::Array),
         toml::Value::Table(table) => {
             let mut map = Map::new();
             for (key, value) in table {
-                map.insert(key, toml_to_json(value));
+                map.insert(key, toml_to_json(value, path)?);
             }
-            Value::Object(map)
+            Ok(Value::Object(map))
         }
     }
 }

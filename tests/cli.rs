@@ -4412,6 +4412,25 @@ fn block_rewrites_task_with_nested_table_frontmatter() {
 }
 
 #[test]
+fn block_rejects_non_finite_float_frontmatter_without_rewriting_task() {
+    for literal in ["inf", "nan"] {
+        let repo = Repo::new();
+        let path = repo.write_task_file("metaspec", "T001", "todo", "src/meta/");
+        let task = fs::read_to_string(&path).unwrap();
+        let task = task.replace(
+            "+++\n\n## Context\n",
+            &format!("custom_weight = {literal}\n+++\n\n## Context\n"),
+        );
+        fs::write(&path, &task).unwrap();
+
+        let block = repo.run_fail(&["block", "metaspec", "T001", "--reason", "waiting"]);
+
+        assert_eq!(block["code"], "invalid_toml_frontmatter");
+        assert_eq!(fs::read_to_string(&path).unwrap(), task);
+    }
+}
+
+#[test]
 fn complete_clears_block_metadata() {
     let repo = Repo::new();
     repo.run(&["block", "example", "T001", "--reason", "waiting on API"]);
