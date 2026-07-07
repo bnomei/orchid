@@ -3616,6 +3616,37 @@ fn specs_prefixed_dependency_is_ready_and_lint_clean() {
 }
 
 #[test]
+fn inactive_spec_dependency_resolves_for_ready_lint_and_lease() {
+    let repo = Repo::new();
+    repo.write_task_file("DONE-auth", "T001", "done", "src/auth/");
+    let active = repo.write_task_file("001-app", "T005", "todo", "src/app/");
+    let task = fs::read_to_string(&active).unwrap();
+    fs::write(
+        &active,
+        task.replace("depends = []", "depends = [\"DONE-auth/T001\"]"),
+    )
+    .unwrap();
+
+    let ready = repo.run(&["ready", "--spec", "001-app", "--explain"]);
+    assert_eq!(ready["ready"][0]["task"], "001-app/T005");
+    assert!(ready.get("blocked").is_none());
+
+    let lint = repo.run(&["lint"]);
+    assert!(lint.get("errors").is_none() || lint["errors"].as_array().unwrap().is_empty());
+
+    let lease = repo.run(&[
+        "lease",
+        "001-app",
+        "T005",
+        "--owner",
+        "worker:agent_archived_dep",
+        "--lease-id",
+        "l_archived",
+    ]);
+    assert_eq!(lease["task"], "001-app/T005");
+}
+
+#[test]
 fn numeric_spec_selector_resolves_exact_directory() {
     let repo = Repo::new();
     repo.write_task_file("001", "T001", "todo", "src/numeric/");

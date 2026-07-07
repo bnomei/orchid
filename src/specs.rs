@@ -207,6 +207,44 @@ pub(crate) fn load_tasks(root: &Path, spec_names: Option<&[String]>) -> OrchResu
     Ok(tasks)
 }
 
+fn all_spec_dirs(root: &Path) -> OrchResult<Vec<PathBuf>> {
+    let specs = repo_path(root, root.join("specs"), "specs_dir")?;
+    if !specs.exists() {
+        return Ok(Vec::new());
+    }
+    let mut dirs: Vec<PathBuf> = fs::read_dir(specs)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .map(|path| repo_path(root, path, "spec_dir"))
+        .collect::<OrchResult<Vec<_>>>()?;
+    dirs.sort_by_key(|path| {
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        numerical_spec_key(name)
+    });
+    Ok(dirs)
+}
+
+pub(crate) fn load_all_tasks(root: &Path) -> OrchResult<Vec<Task>> {
+    let mut tasks = Vec::new();
+    for spec_dir in all_spec_dirs(root)? {
+        let task_dir = repo_path(root, spec_dir.join("tasks"), "task_dir")?;
+        if task_dir.exists() {
+            let mut task_files: Vec<PathBuf> = fs::read_dir(task_dir)?
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("md"))
+                .map(|path| repo_path(root, path, "task_path"))
+                .collect::<OrchResult<Vec<_>>>()?;
+            task_files.sort();
+            for path in task_files {
+                tasks.push(load_task(path, root)?);
+            }
+        }
+    }
+    Ok(tasks)
+}
+
 fn first_open_spec(tasks: &[Task]) -> Option<String> {
     let mut by_spec: BTreeMap<String, Vec<&Task>> = BTreeMap::new();
     for task in tasks {
@@ -448,7 +486,7 @@ pub(crate) fn ready_tasks(
     active: Option<&[LeaseRecord]>,
 ) -> OrchResult<ReadyTasksResult> {
     let (tasks, selected_specs) = select_tasks(root, spec_names, all_open)?;
-    let all_tasks = load_tasks(root, None)?;
+    let all_tasks = load_all_tasks(root)?;
     let active = active.unwrap_or(&[]);
     let mut ready = Vec::new();
     let mut blocked = Vec::new();

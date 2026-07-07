@@ -36,9 +36,9 @@ use crate::runtime::{
     scan_leases, spec_research_dir, CorruptLeaseFile,
 };
 use crate::specs::{
-    dependency_block, ensure_spec_dispatchable, inactive_spec_names, load_spec_policy, load_tasks,
-    ready_tasks, resolve_task, scopes_overlap, select_tasks, selected_task_counts, status_set,
-    task_by_ref, task_key,
+    dependency_block, ensure_spec_dispatchable, inactive_spec_names, load_all_tasks,
+    load_spec_policy, load_tasks, ready_tasks, resolve_task, scopes_overlap, select_tasks,
+    selected_task_counts, status_set, task_by_ref, task_key,
 };
 use crate::taskfile::{
     load_task, quote_toml_string, read_optional, split_frontmatter, write_task_frontmatter,
@@ -327,7 +327,7 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
                 .detail("scope", bad_scope.to_string()),
         );
     }
-    if let Some(block) = dependency_block(&task, &load_tasks(root, None)?) {
+    if let Some(block) = dependency_block(&task, &load_all_tasks(root)?) {
         return Err(OrchError::coded(block.reason(), block.error_code())
             .detail("task", task_key(&task))
             .detail("dependency", block.reference().to_string()));
@@ -1726,6 +1726,7 @@ pub(crate) fn git_stage_plan(root: &Path, lease_id: &str) -> OrchResult<Map<Stri
 
 pub(crate) fn lint(root: &Path) -> OrchResult<Map<String, Value>> {
     let tasks = load_tasks(root, None)?;
+    let all_tasks = load_all_tasks(root)?;
     let mut seen = std::collections::BTreeSet::new();
     let mut errors = Vec::new();
     let statuses = status_set();
@@ -1772,7 +1773,7 @@ pub(crate) fn lint(root: &Path) -> OrchResult<Map<String, Value>> {
             errors.push(error_item(&key, "invalid worker_model"));
         }
         for dep in task.depends() {
-            if dep != "-" && task_by_ref(&tasks, &task.spec_id, &dep).is_none() {
+            if dep != "-" && task_by_ref(&all_tasks, &task.spec_id, &dep).is_none() {
                 errors.push(error_item(&key, &format!("missing dependency:{dep}")));
             }
         }
