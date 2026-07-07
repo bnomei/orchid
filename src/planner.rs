@@ -237,30 +237,6 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
             details,
         };
     }
-    let active_has_serial = active
-        .iter()
-        .any(|lease| lease.mode == LeaseMode::Serial.as_str());
-    let parallel_ready = ready.iter().find(|task| !task.fanout_is_serial);
-    if !active.is_empty() && !active_has_serial {
-        let Some(first) = parallel_ready else {
-            return wait_for_active(active, ready, visible_blocked);
-        };
-        let mut command = lease_command(first);
-        command.push("--allow-parallel".to_string());
-        let mut details = Map::new();
-        details.insert("active".to_string(), compact_array(active));
-        details.insert("ready".to_string(), ready_array(ready));
-        insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
-        return NextDecision {
-            phase: Phase::Dispatch,
-            commands: vec![command],
-            details,
-        };
-    }
-    if !active.is_empty() {
-        return wait_for_active(active, ready, visible_blocked);
-    }
-
     let stage_candidates: Vec<StagePlan> = stage
         .into_iter()
         .filter(|item| !item.pathspecs.is_empty() || !item.safe_to_stage)
@@ -288,6 +264,30 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
             details,
         };
     }
+    let active_has_serial = active
+        .iter()
+        .any(|lease| lease.mode == LeaseMode::Serial.as_str());
+    let parallel_ready = ready.iter().find(|task| !task.fanout_is_serial);
+    if !active.is_empty() && !active_has_serial {
+        let Some(first) = parallel_ready else {
+            return wait_for_active(active, ready, visible_blocked);
+        };
+        let mut command = lease_command(first);
+        command.push("--allow-parallel".to_string());
+        let mut details = Map::new();
+        details.insert("active".to_string(), compact_array(active));
+        details.insert("ready".to_string(), ready_array(ready));
+        insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
+        return NextDecision {
+            phase: Phase::Dispatch,
+            commands: vec![command],
+            details,
+        };
+    }
+    if !active.is_empty() {
+        return wait_for_active(active, ready, visible_blocked);
+    }
+
     if !cleanup.is_empty() {
         let lease_id = cleanup[0].lease_id.clone();
         let mut details = Map::new();
@@ -558,10 +558,36 @@ mod tests {
                 }),
             ),
             (
+                "active-stage/stage",
+                Phase::Stage,
+                Box::new(|input| {
+                    input.active = vec![compact_lease("l_active")];
+                    input.stage = vec![stage_plan(true, vec!["src/planner.rs"])];
+                    input.cleanup = vec![cleanup_candidate()];
+                    input.ready = vec![ready_task()];
+                    input.blocked = vec![blocked_task()];
+                    input.counts = done_counts();
+                }),
+            ),
+            (
                 "active-ready/dispatch-parallel",
                 Phase::Dispatch,
                 Box::new(|input| {
                     input.active = vec![compact_lease("l_active")];
+                    input.cleanup = vec![cleanup_candidate()];
+                    input.ready = vec![ready_task()];
+                    input.blocked = vec![blocked_task()];
+                    input.counts = done_counts();
+                }),
+            ),
+            (
+                "serial-active-stage/stage",
+                Phase::Stage,
+                Box::new(|input| {
+                    input.active = vec![compact_lease_with_mode(
+                        "l_serial",
+                        LeaseMode::Serial.as_str(),
+                    )];
                     input.stage = vec![stage_plan(true, vec!["src/planner.rs"])];
                     input.cleanup = vec![cleanup_candidate()];
                     input.ready = vec![ready_task()];
@@ -577,7 +603,6 @@ mod tests {
                         "l_serial",
                         LeaseMode::Serial.as_str(),
                     )];
-                    input.stage = vec![stage_plan(true, vec!["src/planner.rs"])];
                     input.cleanup = vec![cleanup_candidate()];
                     input.ready = vec![ready_task()];
                     input.blocked = vec![blocked_task()];
@@ -660,6 +685,27 @@ mod tests {
 
             assert_eq!(decision.phase, expected_phase, "{name}");
         }
+    }
+
+    #[test]
+    fn stage_candidate_surfaces_despite_unrelated_active_lease() {
+        let mut input = input();
+        input.active = vec![compact_lease("l_active")];
+        input.stage = vec![stage_plan(true, vec!["src/spec_b/work.txt"])];
+        input.cleanup = vec![cleanup_candidate()];
+        input.counts = done_counts();
+
+        let decision = decide_next(input);
+
+        assert_eq!(decision.phase, Phase::Stage);
+        assert_eq!(
+            decision.commands,
+            vec![vec![
+                "git-stage-plan".to_string(),
+                "--lease".to_string(),
+                "l_stage".to_string(),
+            ]]
+        );
     }
 
     #[test]
