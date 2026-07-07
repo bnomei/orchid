@@ -3622,6 +3622,21 @@ fn depends_dash_sentinel_is_ready_and_lint_clean() {
 }
 
 #[test]
+fn lint_rejects_task_id_that_does_not_match_filename() {
+    let repo = Repo::new();
+    let path = repo.write_task_file("driftspec", "T001", "todo", "src/drift/");
+    let task = fs::read_to_string(&path).unwrap();
+    fs::write(&path, task.replace("id = \"T001\"", "id = \"T002\"")).unwrap();
+
+    let lint = repo.run_fail(&["lint"]);
+    assert_eq!(lint["ok"], false);
+    let errors = lint["errors"].as_array().unwrap();
+    assert!(errors.iter().any(|err| {
+        err["task"] == "driftspec/T002" && err["error"] == "task id does not match filename:T001"
+    }));
+}
+
+#[test]
 fn lint_rejects_parent_traversal_scope() {
     let repo = Repo::new();
     repo.write_task_file("escapespec", "T001", "todo", "..");

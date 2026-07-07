@@ -1729,6 +1729,13 @@ pub(crate) fn lint(root: &Path) -> OrchResult<Map<String, Value>> {
         if !seen.insert(key.clone()) {
             errors.push(error_item(&key, "duplicate task id"));
         }
+        let filename_stem = task.filename_stem();
+        if task.id() != filename_stem {
+            errors.push(error_item(
+                &key,
+                &format!("task id does not match filename:{filename_stem}"),
+            ));
+        }
         if !statuses.contains(task.status().as_str()) {
             errors.push(error_item(
                 &key,

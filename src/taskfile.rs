@@ -147,6 +147,14 @@ impl Task {
         self.frontmatter.id(&self.path)
     }
 
+    pub(crate) fn filename_stem(&self) -> String {
+        self.path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
     pub(crate) fn status(&self) -> String {
         self.frontmatter.status()
     }
