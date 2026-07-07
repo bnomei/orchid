@@ -1061,6 +1061,7 @@ pub(crate) fn research_path(
     let path = repo_path(root, spec_research_dir(root, &spec_id)?, "research_path")?;
     let mut created = false;
     if request.create {
+        let _lock = runtime_lock(root)?;
         fs::create_dir_all(&path)?;
         repo_path(root, &path, "research_path")?;
         created = true;

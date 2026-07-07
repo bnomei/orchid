@@ -3732,6 +3732,18 @@ fn research_commands_resolve_numeric_spec_prefix() {
 }
 
 #[test]
+fn research_path_create_respects_runtime_lock() {
+    let repo = Repo::new();
+    let lock_dir = repo.root.join(".orchid/locks");
+    fs::create_dir_all(&lock_dir).unwrap();
+    fs::write(lock_dir.join("state.lock"), "held\n").unwrap();
+
+    let payload = repo.run_fail(&["research-path", "example", "--create"]);
+    assert_eq!(payload["code"], "runtime_lock_busy");
+    assert!(!repo.root.join(".orchid/spec-research/example").exists());
+}
+
+#[test]
 fn all_open_resolves_satisfied_cross_spec_dependency() {
     let repo = Repo::new();
     repo.write_task_file("002-done", "T010", "done", "src/done/");
