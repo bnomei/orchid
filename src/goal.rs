@@ -1256,16 +1256,13 @@ fn goal_result_counts(root: &Path, goal_id: &GoalId) -> OrchResult<GoalResultCou
         return Ok(GoalResultCounts::default());
     }
     let mut counts = GoalResultCounts::default();
-    for (index, line) in read_text(&path)?.lines().enumerate() {
+    for line in read_text(&path)?.lines() {
         if line.trim().is_empty() {
             continue;
         }
-        let value: Value = serde_json::from_str(line).map_err(|err| {
-            OrchError::new("invalid goal result trace")
-                .detail("path", path_to_string(&path))
-                .detail("line", (index + 1).to_string())
-                .detail("message", err.to_string())
-        })?;
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         match value.get("decision").and_then(Value::as_str) {
             Some("keep") => counts.kept += 1,
             Some("discard") => counts.discarded += 1,
@@ -1323,9 +1320,10 @@ fn append_jsonl(path: &Path, data: &Map<String, Value>) -> OrchResult<()> {
         std::fs::create_dir_all(parent)?;
     }
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut file, data)
+    let mut line = serde_json::to_vec(data)
         .map_err(|err| OrchError::new("invalid JSON").detail("message", err.to_string()))?;
-    file.write_all(b"\n")?;
+    line.push(b'\n');
+    file.write_all(&line)?;
     file.sync_all()?;
     Ok(())
 }
@@ -1609,6 +1607,31 @@ next_hypothesis = "next"
         assert!(std::fs::read_to_string(goal_root.join(RESULTS_JSONL))
             .unwrap()
             .contains("\"decision\":\"keep\""));
+    }
+
+    #[test]
+    fn goal_result_counts_skips_malformed_jsonl_and_counts_valid_decisions() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".orchid")).unwrap();
+        let contract = contract();
+        contract.write_artifacts(tmp.path()).unwrap();
+        let results_path = tmp
+            .path()
+            .join(".orchid/goals/search-ranking-proof/results.jsonl");
+        std::fs::write(
+            &results_path,
+            concat!(
+                "{\"cycle\":\"C001\",\"decision\":\"keep\"}\n",
+                "{\"cycle\":\"C002\",\"decision\":\"keep\"}{\"cycle\":\"C003\",\"decision\":\"discard\"}\n",
+                "{\"cycle\":\"C004\",\"decision\":\"discard\"}\n",
+            ),
+        )
+        .unwrap();
+
+        let counts = goal_result_counts(tmp.path(), &contract.goal_id).unwrap();
+
+        assert_eq!(counts.kept, 1);
+        assert_eq!(counts.discarded, 1);
     }
 
     #[test]
