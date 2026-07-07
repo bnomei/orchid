@@ -975,6 +975,39 @@ fn goal_evaluates_discard_recommendation_with_git_reset_and_clean() {
 }
 
 #[test]
+fn goal_evaluation_requires_runtime_lock() {
+    let repo = Repo::new();
+    repo.init_git();
+    init_ready_goal(
+        &repo,
+        "locked-goal",
+        "printf '%s\\n' '{\"status\":\"pass\",\"recommendation\":\"discard\",\"metric\":\"p95_ms\",\"baseline\":120.0,\"candidate\":130.0,\"delta\":-10.0,\"reason\":\"regressed\"}'",
+        "10",
+    );
+    write_goal_report(
+        &repo,
+        "locked-goal",
+        "C001",
+        "ready_for_evaluation",
+        "try a smaller change",
+    );
+    let lock_dir = repo.root.join(".orchid/locks");
+    fs::create_dir_all(&lock_dir).unwrap();
+    fs::write(lock_dir.join("state.lock"), "held\n").unwrap();
+
+    let failed = repo.run_fail(&["goal"]);
+
+    assert_eq!(failed["code"], "runtime_lock_busy");
+    let state = goal_state(&repo, "locked-goal");
+    assert_eq!(state["cycle"], "C001");
+    assert_eq!(state["status"], "ready");
+    assert!(!repo
+        .root
+        .join(".orchid/goals/locked-goal/results.jsonl")
+        .exists());
+}
+
+#[test]
 fn goal_baseline_ref_expression_is_rejected_before_discard_reset() {
     let repo = Repo::new();
     repo.init_git();

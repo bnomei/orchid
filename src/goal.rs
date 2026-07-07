@@ -21,6 +21,7 @@ use crate::paths::{
     atomic_write, atomic_write_json, goal_current_path, goal_dir, path_to_string, read_text,
     repo_path,
 };
+use crate::runtime::runtime_lock;
 use crate::taskfile::{quote_toml_string, split_frontmatter};
 
 const GOAL_TOML: &str = "goal.toml";
@@ -579,6 +580,7 @@ pub(crate) fn report_path(root: &Path, goal_id: &GoalId, cycle: &str) -> OrchRes
 }
 
 pub(crate) fn init_goal(root: &Path, request: GoalInitRequest) -> OrchResult<String> {
+    let _lock = runtime_lock(root)?;
     let goal_id = request.goal_id.clone();
     let (contract, mut state) = request.into_contract_and_state(now_iso());
     match baseline_evaluator(root, &contract) {
@@ -631,9 +633,11 @@ pub(crate) fn render_goal_prompt(
 pub(crate) fn render_goal_prompt_and_advance(
     root: &Path,
     contract: &GoalContract,
-    state: &GoalState,
+    _state: &GoalState,
 ) -> OrchResult<String> {
-    let prompt = render_goal_prompt(root, contract, state)?;
+    let _lock = runtime_lock(root)?;
+    let (contract, state) = refresh_goal_for_mutation(root, contract)?;
+    let prompt = render_goal_prompt(root, &contract, &state)?;
     if state.status == GoalStatus::Ready
         && !report_path(root, &contract.goal_id, &state.cycle)?.exists()
     {
@@ -673,15 +677,26 @@ pub(crate) fn render_goal_status(
 pub(crate) fn finish_goal(
     root: &Path,
     contract: &GoalContract,
-    state: &GoalState,
+    _state: &GoalState,
 ) -> OrchResult<String> {
+    let _lock = runtime_lock(root)?;
+    let (contract, state) = refresh_goal_for_mutation(root, contract)?;
     let mut next = state.clone();
     if !matches!(next.status, GoalStatus::Done) {
         next.status = GoalStatus::Stopped;
     }
     next.updated_at = now_iso();
     next.write(root, &contract.goal_id)?;
-    render_goal_finish(root, contract, &next)
+    render_goal_finish(root, &contract, &next)
+}
+
+fn refresh_goal_for_mutation(
+    root: &Path,
+    contract: &GoalContract,
+) -> OrchResult<(GoalContract, GoalState)> {
+    let latest_contract = GoalContract::read(root, &contract.goal_id)?;
+    let latest_state = GoalState::read(root, &contract.goal_id)?;
+    Ok((latest_contract, latest_state))
 }
 
 pub(crate) fn render_goal_finish(
