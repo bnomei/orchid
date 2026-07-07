@@ -3810,21 +3810,21 @@ fn active_lease_effective_scope_controls_ready_next_and_lease_after_task_scope_e
         .iter()
         .map(|task| task["task"].as_str().unwrap())
         .collect();
-    assert!(ready_tasks.contains(&"sx/T002"));
+    assert!(!ready_tasks.contains(&"sx/T002"));
+    assert!(ready["blocked"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|task| { task["task"] == "sx/T002" && task["reason"] == "scope conflict:l_1" }));
 
     let next = repo.run(&["next", "--spec", "sx", "--explain"]);
-    assert_eq!(next["phase"], "dispatch");
-    assert_eq!(
-        next["cmd"],
-        serde_json::json!([
-            "lease",
-            "sx",
-            "T002",
-            "--owner",
-            "worker:<agent-id>",
-            "--allow-parallel"
-        ])
-    );
+    assert_ne!(next["phase"], "dispatch");
+    assert!(next.get("cmd").is_none());
+    assert!(next["blocked"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|task| { task["task"] == "sx/T002" && task["reason"] == "scope conflict:l_1" }));
 
     let lease = repo.run_fail(&[
         "lease",

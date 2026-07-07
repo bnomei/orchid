@@ -38,6 +38,22 @@ pub(crate) fn scopes_overlap(a: &[String], b: &[String]) -> bool {
     Scope::from_entries(a.to_vec()).overlaps(&Scope::from_entries(b.to_vec()))
 }
 
+pub(crate) fn effective_lease_scope(root: &Path, lease: &LeaseRecord) -> OrchResult<Vec<String>> {
+    let mut scope = lease.scope();
+    if lease.is_bud() || lease.task_path().is_empty() {
+        return Ok(scope);
+    }
+
+    let task_path = repo_path(root, lease.task_path(), "task_path")?;
+    let task = load_task(task_path, root)?;
+    for entry in task.scope() {
+        if !scope.contains(&entry) {
+            scope.push(entry);
+        }
+    }
+    Ok(scope)
+}
+
 pub(crate) fn spec_is_inactive(name: &str) -> bool {
     name.starts_with('_')
         || INACTIVE_SPEC_NAMES.contains(&name)
@@ -528,7 +544,8 @@ pub(crate) fn ready_tasks(
                     reason = Some("already leased".to_string());
                     break;
                 }
-                if scopes_overlap(&task.scope(), &lease.scope()) {
+                let lease_scope = effective_lease_scope(root, lease)?;
+                if scopes_overlap(&task.scope(), &lease_scope) {
                     let lease_id = lease.id().unwrap_or("");
                     reason = Some(format!("scope conflict:{lease_id}"));
                     break;

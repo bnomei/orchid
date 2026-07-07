@@ -36,9 +36,9 @@ use crate::runtime::{
     scan_leases, spec_research_dir, CorruptLeaseFile,
 };
 use crate::specs::{
-    dependency_block, ensure_spec_dispatchable, inactive_spec_names, load_all_tasks,
-    load_spec_policy, load_tasks, ready_tasks, resolve_task, scopes_overlap, select_tasks,
-    selected_task_counts, status_set, task_by_ref, task_key,
+    dependency_block, effective_lease_scope, ensure_spec_dispatchable, inactive_spec_names,
+    load_all_tasks, load_spec_policy, load_tasks, ready_tasks, resolve_task, scopes_overlap,
+    select_tasks, selected_task_counts, status_set, task_by_ref, task_key,
 };
 use crate::taskfile::{
     load_task, quote_toml_string, read_optional, split_frontmatter, write_task_frontmatter,
@@ -1235,22 +1235,6 @@ fn cleanup_lease_needs_stage_guard(lease: &LeaseRecord) -> bool {
         && !lease.is_bud()
         && !lease.task_path().is_empty()
         && !lease.scope().is_empty()
-}
-
-fn effective_lease_scope(root: &Path, lease: &LeaseRecord) -> OrchResult<Vec<String>> {
-    let mut scope = lease.scope();
-    if lease.is_bud() || lease.task_path().is_empty() {
-        return Ok(scope);
-    }
-
-    let task_path = repo_path(root, lease.task_path(), "task_path")?;
-    let task = load_task(task_path, root)?;
-    for entry in task.scope() {
-        if !scope.contains(&entry) {
-            scope.push(entry);
-        }
-    }
-    Ok(scope)
 }
 
 fn fail_on_corrupt_lease_identity_for_cleanup(
