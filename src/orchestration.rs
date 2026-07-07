@@ -892,20 +892,18 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     if !request.commit_review.is_empty() {
         insert(meta, "commit_review", request.commit_review.clone());
     }
-    let completed_at = meta.get("completed_at").cloned().unwrap_or(Value::Null);
-    write_task_frontmatter(&task, frontmatter)?;
     let completed_status = match git_status_data(root) {
         Ok(status) => status,
-        Err(err) => {
-            let _ = write_task_frontmatter(&task, original_frontmatter.clone());
-            return Err(err);
-        }
+        Err(err) => return Err(err),
     };
+    let completed_at = meta.get("completed_at").cloned().unwrap_or(Value::Null);
+    let original_lease = lease.clone();
     lease.set("status", "completed");
     lease.set("completed_at", completed_at);
     apply_completed_changed_snapshot(&mut lease, &completed_status);
-    if let Err(err) = save_lease(root, &lease) {
-        let _ = write_task_frontmatter(&task, original_frontmatter);
+    save_lease(root, &lease)?;
+    if let Err(err) = write_task_frontmatter(&task, frontmatter) {
+        let _ = save_lease(root, &original_lease);
         return Err(err);
     }
     let mut payload = json_ok();

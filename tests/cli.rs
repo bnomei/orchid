@@ -5119,6 +5119,53 @@ fn complete_rolls_back_task_when_lease_save_fails() {
 }
 
 #[test]
+#[cfg(unix)]
+fn complete_rolls_back_lease_when_task_write_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_task_write",
+    ]);
+    let task_path = repo.root.join("specs/example/tasks/T001.md");
+    let tasks_dir = task_path.parent().unwrap();
+    let task_original = fs::metadata(&task_path).unwrap().permissions();
+    let dir_original = fs::metadata(tasks_dir).unwrap().permissions();
+    fs::set_permissions(&task_path, fs::Permissions::from_mode(0o444)).unwrap();
+    fs::set_permissions(tasks_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let failed = repo.run_fail(&[
+        "complete",
+        "--lease",
+        "l_task_write",
+        "--verified-by",
+        "mayor",
+    ]);
+    assert!(failed.get("error").is_some());
+
+    fs::set_permissions(&task_path, task_original).unwrap();
+    fs::set_permissions(tasks_dir, dir_original).unwrap();
+
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_task_write.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lease["status"], "active");
+    assert!(lease.get("completed_at").is_none());
+    assert!(lease.get("completed_changed").is_none());
+}
+
+#[test]
 fn complete_rejects_when_git_unavailable() {
     let repo = Repo::new();
     repo.init_git();
