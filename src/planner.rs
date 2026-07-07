@@ -245,22 +245,15 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
         let Some(first) = parallel_ready else {
             return wait_for_active(active, ready, visible_blocked);
         };
-        let spec = first.spec.clone();
-        let id = first.id.clone();
+        let mut command = lease_command(first);
+        command.push("--allow-parallel".to_string());
         let mut details = Map::new();
         details.insert("active".to_string(), compact_array(active));
         details.insert("ready".to_string(), ready_array(ready));
         insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
         return NextDecision {
             phase: Phase::Dispatch,
-            commands: vec![vec![
-                "lease".to_string(),
-                spec,
-                id,
-                "--owner".to_string(),
-                "worker:<agent-id>".to_string(),
-                "--allow-parallel".to_string(),
-            ]],
+            commands: vec![command],
             details,
         };
     }
@@ -308,13 +301,7 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
     }
     if !ready.is_empty() {
         let first = &ready[0];
-        let mut command = vec![
-            "lease".to_string(),
-            first.spec.clone(),
-            first.id.clone(),
-            "--owner".to_string(),
-            "worker:<agent-id>".to_string(),
-        ];
+        let mut command = lease_command(first);
         if first.fanout_is_serial {
             command.push("--serial".to_string());
         }
@@ -345,6 +332,29 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
         commands: Vec::new(),
         details,
     }
+}
+
+fn lease_command(task: &ReadyTask) -> Vec<String> {
+    let mut command = vec![
+        "lease".to_string(),
+        task.spec.clone(),
+        task.id.clone(),
+        "--owner".to_string(),
+        "worker:<agent-id>".to_string(),
+    ];
+    if let Some(worker_model) = task
+        .worker_model
+        .as_ref()
+        .filter(|worker_model| !worker_model.trim().is_empty())
+    {
+        command.push("--worker-model".to_string());
+        command.push(worker_model.clone());
+    }
+    if !task.worker_reasoning_effort.trim().is_empty() && task.worker_reasoning_effort != "medium" {
+        command.push("--worker-reasoning-effort".to_string());
+        command.push(task.worker_reasoning_effort.clone());
+    }
+    command
 }
 
 fn wait_for_active(
@@ -650,5 +660,51 @@ mod tests {
 
             assert_eq!(decision.phase, expected_phase, "{name}");
         }
+    }
+
+    #[test]
+    fn dispatch_command_preserves_non_default_worker_metadata() {
+        let mut ready = ready_task();
+        ready.worker_model = Some("special-model".to_string());
+        ready.worker_reasoning_effort = "high".to_string();
+
+        let mut input = input();
+        input.ready = vec![ready];
+
+        let decision = decide_next(input);
+
+        assert_eq!(
+            decision.commands,
+            vec![vec![
+                "lease".to_string(),
+                "example".to_string(),
+                "T001".to_string(),
+                "--owner".to_string(),
+                "worker:<agent-id>".to_string(),
+                "--worker-model".to_string(),
+                "special-model".to_string(),
+                "--worker-reasoning-effort".to_string(),
+                "high".to_string(),
+            ]]
+        );
+    }
+
+    #[test]
+    fn dispatch_command_omits_default_worker_metadata() {
+        let mut input = input();
+        input.ready = vec![ready_task()];
+
+        let decision = decide_next(input);
+
+        assert_eq!(
+            decision.commands,
+            vec![vec![
+                "lease".to_string(),
+                "example".to_string(),
+                "T001".to_string(),
+                "--owner".to_string(),
+                "worker:<agent-id>".to_string(),
+            ]]
+        );
     }
 }
