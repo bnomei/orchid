@@ -27,7 +27,6 @@ use crate::paths::{
 };
 use crate::specs::safe_spec_id;
 
-/// RAII guard for the repo-wide runtime lock; released on drop.
 pub(crate) struct RuntimeLock {
     path: PathBuf,
 }
@@ -310,6 +309,7 @@ pub(crate) fn load_lease(root: &Path, lease_id: &str) -> OrchResult<LeaseRecord>
     Ok(LeaseRecord::from_map(data))
 }
 
+/// Filename is authoritative: fill missing JSON `lease_id`, reject mismatches as corrupt.
 fn bind_lease_record_id(
     data: &mut serde_json::Map<String, Value>,
     expected: &str,

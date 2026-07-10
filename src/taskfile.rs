@@ -40,7 +40,7 @@ const TASK_FIELD_ORDER: &[&str] = &[
     "report",
 ];
 
-/// Parsed TOML frontmatter for a task file, including per-field array style metadata.
+/// Frontmatter plus per-field array style so write-back preserves hand-authored formatting.
 #[derive(Debug, Clone)]
 pub(crate) struct TaskFrontmatter {
     raw: Map<String, Value>,
@@ -130,7 +130,6 @@ enum ArrayStyle {
 }
 
 #[derive(Debug, Clone)]
-/// Loaded task file with parsed frontmatter and on-disk path under `specs/<id>/tasks/`.
 pub(crate) struct Task {
     pub(crate) path: PathBuf,
     pub(crate) spec_id: String,

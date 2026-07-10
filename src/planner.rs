@@ -134,7 +134,6 @@ impl Phase {
     }
 }
 
-/// Snapshot of leases, ready tasks, and stage/cleanup candidates fed into planning.
 pub(crate) struct NextInput {
     pub(crate) stale: Vec<CompactLease>,
     pub(crate) reports_ready: Vec<ReportReady>,
@@ -148,7 +147,6 @@ pub(crate) struct NextInput {
     pub(crate) explain: bool,
 }
 
-/// Planned coordinator phase plus suggested CLI command(s) and explanatory details.
 pub(crate) struct NextDecision {
     pub(crate) phase: Phase,
     pub(crate) commands: Vec<Vec<String>>,
@@ -191,7 +189,6 @@ impl NextDecision {
     }
 }
 
-/// Choose the highest-priority orchestration phase and command sequence for `next`.
 pub(crate) fn decide_next(input: NextInput) -> NextDecision {
     let NextInput {
         stale,

@@ -29,7 +29,6 @@ const STATE_JSON: &str = "state.json";
 const RESULTS_JSONL: &str = "results.jsonl";
 const MEASUREMENTS_JSONL: &str = "measurements.jsonl";
 
-/// Sanitized identifier for a goal directory under `.orchid/goals/`.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct GoalId(String);
@@ -174,8 +173,8 @@ impl GoalInitRequest {
     }
 }
 
+/// Durable goal configuration (`goal.toml` under `.orchid/goals/<id>/`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-/// Durable goal configuration persisted as `goal.toml` under `.orchid/goals/<id>/`.
 pub(crate) struct GoalContract {
     pub(crate) goal_id: GoalId,
     pub(crate) goal: String,
@@ -256,8 +255,8 @@ impl GoalContract {
     }
 }
 
+/// Cycle pointer and budget counters (`state.json` under the goal dir).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-/// Per-goal cycle pointer and budget counters persisted as `state.json`.
 pub(crate) struct GoalState {
     pub(crate) status: GoalStatus,
     pub(crate) cycle: String,
@@ -1046,11 +1045,10 @@ fn run_evaluator(
     EvaluatorResult::parse_json(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// Builds `sh -c` for `contract.evaluator`. The command is trusted project code and
+/// inherits the coordinator environment—run goal loops only in trusted worktrees.
 fn evaluator_command(root: &Path, contract: &GoalContract) -> OrchResult<Command> {
     let goal_dir = safe_goal_dir(root, &contract.goal_id)?;
-    // Goal evaluators are trusted project commands. They may execute repo-defined
-    // code such as `just goal-eval` and inherit the coordinator environment.
-    // Run goal loops only in trusted worktrees.
     let mut command = Command::new("sh");
     command
         .arg("-c")
@@ -1402,6 +1400,7 @@ fn render_goal_decision(contract: &GoalContract, state: &GoalState) -> String {
     )
 }
 
+/// Fence cycle-report hypothesis text so agents do not treat it as Orchid instructions.
 fn untrusted_goal_hypothesis_block(content: &str) -> String {
     let body = if content.trim_end().is_empty() {
         "(none)"
@@ -1414,6 +1413,7 @@ fn untrusted_goal_hypothesis_block(content: &str) -> String {
     )
 }
 
+/// Fence longer than any run of backticks in `content` so nested fences stay closed.
 fn markdown_fence_for(content: &str) -> String {
     let mut longest = 0usize;
     let mut current = 0usize;

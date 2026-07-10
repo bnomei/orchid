@@ -749,6 +749,7 @@ pub(crate) fn reset_hard(root: &Path, commit: &str) -> OrchResult<()> {
     Ok(())
 }
 
+/// Accept only a full hex object id that exists as a commit—never a partial ref for `reset --hard`.
 fn validate_full_commit_oid<'a>(root: &Path, commit: &'a str) -> OrchResult<&'a str> {
     if !is_full_hex_object_id(commit) {
         return Err(invalid_goal_baseline_commit(commit));
@@ -772,12 +773,12 @@ fn invalid_goal_baseline_commit(commit: &str) -> OrchError {
     .detail("baseline_commit", commit.to_string())
 }
 
+/// Discard-cycle cleanup: untracked files only; always exclude `.orchid/` runtime state.
 pub(crate) fn clean_goal_candidates(root: &Path) -> OrchResult<()> {
     git(root, &["clean", "-fd", "-e", ".orchid/"], true)?;
     Ok(())
 }
 
-/// List repo-relative paths changed during an active or completed lease scope.
 pub(crate) fn touched_for_lease(
     root: &Path,
     lease: &LeaseRecord,
@@ -927,7 +928,6 @@ pub(crate) fn touched_for_lease(
     Ok(map)
 }
 
-/// Build a [`StagePlan`] attributing in-scope edits inside the lease window.
 pub(crate) fn stage_plan_for_lease(root: &Path, lease: &LeaseRecord) -> OrchResult<StagePlan> {
     let data = touched_for_lease(root, lease)?;
     let pathspecs: BTreeSet<String> = string_list(data.get("stage"))

@@ -83,12 +83,10 @@ impl LeaseId {
     }
 }
 
-/// Validate a lease id before any runtime file access under `.orchid/leases/`.
 pub(crate) fn validate_lease_id(value: &str) -> OrchResult<()> {
     LeaseId::parse(value).map(|_| ())
 }
 
-/// Returns an error message when lease JSON lacks a usable `status` field.
 pub(crate) fn lease_status_field_error(data: &Map<String, Value>) -> Option<String> {
     match data.get("status") {
         None => Some("lease file is missing required status field".to_string()),
@@ -579,7 +577,6 @@ impl LeaseStatus {
     }
 }
 
-/// Trimmed lease summary embedded in `status` and `next` coordinator payloads.
 #[derive(Debug, Clone)]
 pub(crate) struct CompactLease {
     pub(crate) id: Value,

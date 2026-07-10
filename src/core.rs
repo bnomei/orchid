@@ -158,7 +158,6 @@ impl From<std::io::Error> for OrchError {
     }
 }
 
-/// Result alias used by every command handler and filesystem helper.
 pub(crate) type OrchResult<T> = Result<T, OrchError>;
 
 pub(crate) fn error_code(message: &str) -> String {

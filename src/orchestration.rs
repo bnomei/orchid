@@ -1521,6 +1521,7 @@ fn render_bud_packet(
     Ok(packet.join("\n"))
 }
 
+/// Fence agent/file text in packets so it is not read as Orchid instructions.
 fn untrusted_markdown_block(label: &str, source_label: &str, content: &str) -> Vec<String> {
     let body = if content.trim_end().is_empty() {
         "(none)"
@@ -1558,6 +1559,7 @@ fn packet_inline_text(value: &str) -> String {
         .collect()
 }
 
+/// Fence longer than any run of backticks in `content` so nested fences stay closed.
 fn markdown_fence_for(content: &str) -> String {
     let mut longest = 0usize;
     let mut current = 0usize;

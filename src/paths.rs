@@ -60,7 +60,6 @@ fn clean_path(path: &Path) -> PathBuf {
     out
 }
 
-/// Walk ancestors from `path` until a `.orchid` marker directory is found.
 pub(crate) fn discover_orchid_root(path: &Path) -> Option<PathBuf> {
     let start = if path.is_file() {
         path.parent().unwrap_or(path)

@@ -494,7 +494,6 @@ pub(crate) fn dependency_block(task: &Task, all_tasks: &[Task]) -> Option<Depend
     None
 }
 
-/// Return dispatchable tasks plus blocked entries and lint messages for `ready`.
 pub(crate) fn ready_tasks(
     root: &Path,
     spec_names: Option<&[String]>,
