@@ -220,7 +220,7 @@ ignoring the damaged record.
 
 Choose the workflow by the durability and decision model you need:
 
-| Workflow | Use it for | Durable input | Git behavior |
+| Workflow | Use it for | Work definition | Git behavior |
 | --- | --- | --- | --- |
 | Spec task | Planned work with dependencies, validation, and review gates | `specs/<id>/tasks/*.md` | Coordinator stages and commits returned pathspecs. |
 | Bud | One scoped delegation without a task file | Instruction snapshot under `.orchid/buds/` | Coordinator stages and commits returned pathspecs. |
@@ -530,8 +530,8 @@ Orchid creates runtime files on demand:
 ```
 
 Do not hand-edit these files during routine orchestration. Mutating commands use
-a repository-local lock, confine managed paths to the repository, and reject
-symlinked runtime directories.
+a repository-local lock and confine managed paths to the repository. Orchid
+explicitly rejects symlinked lease, packet, bud, and report directories.
 
 ## CLI reference
 
