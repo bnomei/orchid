@@ -1,14 +1,19 @@
-# orchid
+# Orchid
 
 [![Crates.io Version](https://img.shields.io/crates/v/orchid-cli)](https://crates.io/crates/orchid-cli)
 [![Crates.io Downloads](https://img.shields.io/crates/d/orchid-cli)](https://crates.io/crates/orchid-cli)
 [![License](https://img.shields.io/crates/l/orchid-cli)](https://crates.io/crates/orchid-cli)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange)](https://www.rust-lang.org)
 
-Orchid is a Rust CLI for coordinating scoped agent work from repo-local task
-files. It keeps durable work definitions in `specs/`, writes disposable runtime
-state under `.orchid/`, and emits JSON ACKs that a coordinator can follow
-without scraping prose.
+Orchid is a Rust CLI for coordinating scoped coding-agent work in a shared Git
+repository. It turns Markdown task files into exclusive write-scope leases,
+generates role-specific handoff packets, validates worker report contracts and
+Git attribution, and tells a coordinator which phase comes next.
+
+Durable work definitions live in `specs/`. Disposable leases, packets, reports,
+research notes, and goal-loop state live under `.orchid/`. Most commands emit
+JSON acknowledgements (ACKs), so agent harnesses can follow structured output
+instead of scraping prose or Git porcelain.
 
 Use Orchid when you want to:
 
@@ -17,10 +22,15 @@ Use Orchid when you want to:
 - Generate worker, validator, reviewer, or loop-runner packets.
 - Validate worker reports and compare touched files against the lease scope.
 - Stage only the paths that belong to a completed lease.
+- Recover or release workers whose lease heartbeats became stale.
+- Keep exploratory research separate from durable specifications.
 - Run a branch-local metric improvement loop with `orchid goal`.
 
-Orchid is intentionally small: one CLI, Markdown plus TOML files, JSON ACKs, no
-daemon, no database, and no built-in pull request workflow.
+Orchid is intentionally local and inspectable: one CLI, Markdown plus TOML
+planning files, JSON runtime records, no daemon, no database, and no built-in
+pull request workflow. Your coordinator still owns agent creation, project
+validation, spec/bud commits, reviews, and final handoff. Orchid creates commits
+only when a goal-loop cycle is kept.
 
 ## Install
 
@@ -32,6 +42,9 @@ already part of your toolchain.
 Download an archive from
 [GitHub Releases](https://github.com/bnomei/orchid/releases), extract it, and
 put the `orchid` binary on your `PATH`.
+
+Release archives target x86-64 GNU/Linux, x86-64 and Apple Silicon macOS, and
+x86-64 Windows with MSVC.
 
 ### Crates.io
 
@@ -70,10 +83,21 @@ Keep runtime files out of version control:
 Commit durable planning files such as `specs/`, copied `skills/`, and any
 project-specific validation scripts.
 
+Orchid resolves the repository root in this order:
+
+1. The path passed with `--root`.
+2. The nearest ancestor containing `.orchid/`.
+3. The Git worktree root.
+4. The current directory.
+
+This lets you run Orchid from a subdirectory after the repository has runtime
+state. Pass `--root <PATH>` when a harness should not depend on discovery.
+
 ## Quickstart
 
 This quickstart creates one dispatchable task, leases it, and generates a worker
-packet. Run it from a Git repository where `orchid` is on `PATH`.
+packet. Run it from a Git repository where `orchid` is on `PATH`. The repository
+must have at least one commit for full Git attribution.
 
 1. Create a minimal task file:
 
@@ -147,12 +171,60 @@ packet. Run it from a Git repository where `orchid` is on `PATH`.
    orchid git-touched --lease <LEASE_ID>
    orchid complete --lease <LEASE_ID> --verified-by validator:agent_456
    orchid git-stage-plan --lease <LEASE_ID>
+   ```
+
+   Stage only the pathspecs returned by `git-stage-plan`, then create the
+   repository's commit and review record.
+
+5. After the handoff is durable, remove the lease runtime files:
+
+   ```sh
    orchid close --lease <LEASE_ID>
    ```
 
-   Stage only the pathspecs returned by `git-stage-plan`.
+## How Orchid works
+
+The coordinator loop is:
+
+```text
+observe -> select -> lease -> dispatch -> report -> validate
+        -> complete -> stage -> commit/review -> close
+```
+
+`orchid next` observes task state, leases, reports, Git state, and stale
+heartbeats, then returns one phase plus the next command or commands. Its
+decision order prevents new dispatch from skipping recovery, validation, or
+safe staging work:
+
+| Phase | Coordinator action |
+| --- | --- |
+| `recover` | Inspect a stale lease before dispatching more work. |
+| `validate` | Check a worker report and compare touched paths with the lease. |
+| `stage` | Request the safe pathspec plan for completed work. |
+| `dispatch` | Lease the returned ready task; parallel dispatch includes `--allow-parallel`. |
+| `wait` | Leave active work alone and observe again later. |
+| `cleanup` | Close terminal lease artifacts after durable handoff. |
+| `blocked` | Resolve the reported task or policy blocker. |
+| `done` | Stop; no dispatchable work remains in the selected queue. |
+
+The task file is the durable work record. A lease is a runtime snapshot of the
+task scope, worker settings, spec policy, and Git baseline. Editing a task or
+`spec.toml` after leasing does not retroactively weaken the active lease's
+conflict and attribution guards.
+
+Unreadable or identity-mismatched lease files fail closed for lease-sensitive
+orchestration. Inspection ACKs surface recovery details instead of silently
+ignoring the damaged record.
 
 ## Main workflows
+
+Choose the workflow by the durability and decision model you need:
+
+| Workflow | Use it for | Durable input | Git behavior |
+| --- | --- | --- | --- |
+| Spec task | Planned work with dependencies, validation, and review gates | `specs/<id>/tasks/*.md` | Coordinator stages and commits returned pathspecs. |
+| Bud | One scoped delegation without a task file | Instruction snapshot under `.orchid/buds/` | Coordinator stages and commits returned pathspecs. |
+| Goal loop | Repeated measurable experiments on a dedicated branch | Goal contract under `.orchid/goals/` | Orchid commits keeps and hard-resets discards. |
 
 ### Spec task orchestration
 
@@ -169,6 +241,12 @@ orchid report-check .orchid/reports/<LEASE_ID>.md
 orchid git-touched --lease <LEASE_ID>
 orchid complete --lease <LEASE_ID> --verified-by validator:agent_456
 orchid git-stage-plan --lease <LEASE_ID>
+```
+
+Stage and commit only the returned pathspecs. After commit and review state is
+durable, clean up the runtime artifacts:
+
+```sh
 orchid close --lease <LEASE_ID>
 orchid cleanup --completed
 ```
@@ -176,6 +254,42 @@ orchid cleanup --completed
 `next` returns the recommended phase: `dispatch`, `wait`, `validate`, `stage`,
 `cleanup`, `recover`, `blocked`, or `done`. Detailed `next` and `ready` output
 is the default. Use `--brief` only for compact polling.
+
+Use repeatable `--spec` flags to select explicit specs. Use `--all-open` to
+select the first active spec with unfinished work by numerical prefix; it does
+not select every open spec or broaden the user's authorized scope.
+
+### Parallel work and recovery
+
+Orchid defaults to one active lease unless the coordinator chooses a mode:
+
+- `--serial` requires that no other lease is active.
+- `--allow-parallel` permits another active lease only when effective write
+  scopes do not overlap and the spec does not set `fanout_policy = "serial"`.
+
+Scope disjointness only protects paths. The coordinator must still account for
+shared services, generated state, migrations, fixtures, and other behavioral
+conflicts before enabling parallel work.
+
+Attach a runtime agent ID after dispatch when it was not known at lease time:
+
+```sh
+orchid lease-attach-agent --lease <LEASE_ID> --agent-id agent_123
+orchid status --agent-id agent_123
+```
+
+Agent IDs are discovery metadata; operational commands remain lease-based.
+Workers can refresh liveness with `orchid heartbeat <LEASE_ID>`. Coordinators
+can inspect stale work and release an abandoned lease:
+
+```sh
+orchid stale --older-than 30m
+orchid release <LEASE_ID> --reason "worker exited before handoff"
+```
+
+`orchid next --older-than <DURATION>` uses the same duration syntax (`10m`,
+`2h`, or `1d`). A stale lease that already has a report is routed to validation
+instead of recovery.
 
 ### Bud delegation
 
@@ -196,10 +310,26 @@ orchid bud \
 generates a worker packet, and returns the packet and report paths. It does not
 pre-create the report file.
 
+### Spec research workspaces
+
+Use a research workspace for raw investigation that should inform a spec but
+should not become durable requirements yet:
+
+```sh
+orchid research-path 001-example --create
+orchid research-clean 001-example
+```
+
+The first command creates `.orchid/spec-research/<resolved-spec-id>/`. The
+second deletes that workspace. `orchid complete --clean-spec-research` can
+remove the matching workspace when the task completes.
+
 ### Goal loop
 
-Use `orchid goal` for one branch-local improvement target where an evaluator
-decides whether each attempt is kept, discarded, blocked, or finished.
+Use `orchid goal` for one branch-local improvement target. A trusted evaluator
+reports measurements and a recommendation; Orchid applies metric, protected
+surface, scope, and budget policy before it keeps, discards, blocks, or finishes
+the cycle.
 
 ```sh
 orchid goal init \
@@ -209,13 +339,30 @@ orchid goal init \
   --min-delta 5 \
   --hypothesis "cache normalized query features before ranking" \
   --max-iterations 10 \
-  --max-duration 10h
+  --max-duration 10h \
+  --scope src/search \
+  --protected-surface benches/ranking.rs
 ```
 
 The default evaluator is `just goal-eval`. Override it with `--evaluator` when
 your repository uses a different command. The evaluator must run from the repo
 root and print one JSON object with `status`, `recommendation`, `metric`,
 `baseline`, `candidate`, `delta`, and `reason`.
+
+Orchid passes `ORCHID_GOAL_ID`, `ORCHID_GOAL_DIR`, `ORCHID_GOAL_CYCLE`,
+`ORCHID_GOAL_BASELINE_COMMIT`, and `ORCHID_GOAL_BASELINE_VALUE` to the evaluator.
+Candidate evaluations also receive `ORCHID_GOAL_DIRECTION` and
+`ORCHID_GOAL_MIN_DELTA`.
+
+At least one `--scope` is required. Repeat it to define every path Orchid may
+stage for an automatic keep. Orchid rejects a keep when paths are already staged
+outside that scope. Repeat `--protected-surface` for evaluator, fixture, policy,
+or correctness-sensitive paths. Existing protected changes block evaluation;
+changes introduced while the evaluator runs are checked again before a keep.
+
+Evaluator recommendations are `keep`, `discard`, `blocked`, or `done`. A
+non-`pass` evaluator status becomes `blocked`, and an improvement smaller than
+`--min-delta` becomes `discard` for higher- or lower-is-better metrics.
 
 Run the loop:
 
@@ -241,10 +388,13 @@ next_hypothesis = "next idea to try"
 What changed and what evidence was collected.
 ```
 
-Goal keeps commit candidate changes as `goal(<goal-id>): keep <cycle>`. Goal
-discards restore the baseline with Git while preserving `.orchid/`, so run goal
-loops only on branches where candidate changes may be automatically kept or
-discarded.
+For a keep, Orchid stages in-scope candidate changes and commits them as
+`goal(<goal-id>): keep <cycle>`. A discard runs `git reset --hard` to the cycle
+baseline and `git clean -fd -e .orchid/` from the repository root.
+
+> **Warning:** Run goal loops only on a dedicated branch with no unrelated
+> tracked edits or untracked non-ignored files. A discard can remove changes
+> outside the declared goal scope. `.orchid/` is preserved.
 
 ## Spec layout
 
@@ -312,6 +462,15 @@ Important fields:
 `orchid complete` writes completion metadata back to the task frontmatter.
 `orchid block` writes the blocked state and reason.
 
+Dependencies can use a task ID from the same spec (`T001`), a cross-spec
+reference (`002-other/T001` or `specs/002-other/T001`), or `-` as a placeholder.
+Only a dependency with `status = "done"` is satisfied.
+
+Task routing metadata does not spawn an agent. `worker_reasoning_effort` and the
+opaque `worker_model` string flow through `ready`, `next`, the lease, generated
+packets, and report checks so the coordinator can choose the worker. Explicit
+`lease` or `bud` flags override task metadata.
+
 ### Spec policy
 
 `spec.toml` is optional. Orchid directly enforces these policy keys:
@@ -325,10 +484,63 @@ Important fields:
 Other policy keys are preserved and copied into generated packets for agents to
 read.
 
-## Command reference
+### Worker report contract
 
-Most commands return JSON. `orchid goal`, `orchid goal init`,
-`orchid goal status`, and `orchid goal finish` return Markdown.
+Generated packets provide the canonical report path and this frontmatter shape:
+
+```md
++++
+lease_id = "<LEASE_ID>"
+status = "ready_for_validation"
+commands_run = []
+result = ""
++++
+
+## Summary
+
+What changed.
+
+## Evidence
+
+What proves it.
+
+## Notes
+
+Anything the coordinator must know.
+```
+
+Valid report statuses are `ready_for_validation`, `needs_fix`, `blocked`, and
+`done`. `orchid report-check` validates the frontmatter, lease ID, and canonical
+report path before the coordinator accepts the report.
+
+## Runtime layout
+
+Orchid creates runtime files on demand:
+
+```text
+.orchid/
+  locks/           # repository-wide mutation lock
+  leases/          # JSON lease records and Git baselines
+  packets/         # generated role-specific Markdown packets
+  reports/         # worker report contract paths
+  buds/            # snapshotted runtime-only instructions
+  spec-research/   # disposable pre-spec investigation
+  goals/           # goal contracts, cycle state, traces, and reports
+  goal-current     # active goal ID pointer
+```
+
+Do not hand-edit these files during routine orchestration. Mutating commands use
+a repository-local lock, confine managed paths to the repository, and reject
+symlinked runtime directories.
+
+## CLI reference
+
+Most commands return compact JSON. Add the global `--pretty` flag before or
+after the subcommand for human-readable JSON. `orchid goal`, `orchid goal init`,
+`orchid goal status`, and `orchid goal finish` return Markdown prompts instead.
+
+Successful commands exit with status `0`. Structured failures include an
+`error` message and, where defined, a stable `code`, then exit with status `1`.
 
 | Command | Purpose |
 | --- | --- |
@@ -354,15 +566,18 @@ Most commands return JSON. `orchid goal`, `orchid goal init`,
 | `orchid lint` | Validate task-file structure. |
 | `orchid research-path` | Print or create `.orchid/spec-research/<spec-id>`. |
 | `orchid research-clean` | Delete a spec research workspace. |
-| `orchid goal` | Run or inspect a branch-local metric loop. |
+| `orchid goal` | Advance the current metric loop and render its agent prompt. |
+| `orchid goal init` | Create the goal contract, baseline, budgets, and first hypothesis. |
+| `orchid goal status` | Read current goal state without advancing it. |
+| `orchid goal finish` | Stop the current goal without creating a pull request. |
 
-Use `--pretty` with any JSON command when humans need formatted output.
+Run `orchid <COMMAND> --help` for the complete argument reference.
 
 ## Agent contract
 
-Workers receive generated packets. Coordinators should follow JSON ACKs from
-`ready`, `next`, `lease`, `bud`, `packet`, `report-check`, `git-touched`, and
-`git-stage-plan`.
+Workers receive generated packets. Coordinators should follow JSON ACKs instead
+of parsing those packets. Goal commands are the deliberate exception: their
+Markdown is the agent-facing state-machine prompt.
 
 Workers should:
 
@@ -384,9 +599,50 @@ Coordinators should:
 - Close or clean completed runtime files after commit or review state is
   durable.
 
+## Troubleshooting
+
+### `goal scope must include at least one --scope path`
+
+Add one or more repeatable scope flags to `orchid goal init`:
+
+```sh
+orchid goal init <OTHER_FLAGS> --scope src/search --scope benches/search.rs
+```
+
+### `next` returns `recover`
+
+Inspect the returned stale lease IDs, then either resume the worker and refresh
+its heartbeat or release the lease:
+
+```sh
+orchid stale --older-than 30m
+orchid heartbeat <LEASE_ID>
+# or
+orchid release <LEASE_ID> --reason "abandoned worker"
+```
+
+### A lease cannot run in parallel
+
+Run `orchid running --pretty` and compare the reported lease scopes with current
+task scopes. Use `--serial` when work shares paths or behavior. `spec.toml` with
+`fanout_policy = "serial"` always rejects `--allow-parallel`.
+
+### Completion or staging is unsafe
+
+Inspect both contracts before changing task state:
+
+```sh
+orchid report-check .orchid/reports/<LEASE_ID>.md
+orchid git-touched --lease <LEASE_ID> --pretty
+orchid git-status --pretty
+```
+
+Resolve out-of-scope, conflicted, or unrelated changes first. Do not bypass the
+returned staging plan with `git add .`.
+
 ## Included skills
 
-This repository includes agent skill stubs that wrap the CLI:
+This repository includes agent skills that wrap the CLI:
 
 - [`skills/make-specs`](skills/make-specs/SKILL.md): creates `requirements.md`,
   `design.md`, optional `spec.toml`, and scoped task files.
@@ -396,33 +652,42 @@ This repository includes agent skill stubs that wrap the CLI:
 Copy or install the skills into your agent setup, then adapt their validation,
 review, and commit conventions to your repository.
 
-For a longer prompt that asks another agent to research and customize the skill
-stubs, see
+For a longer prompt that asks another agent to research and customize these
+skills, see
 [`skills/skill-enrichment-prompt.md`](skills/skill-enrichment-prompt.md).
 
 ## Develop
 
-Run the test suite:
+Run the local checks used by CI:
 
 ```sh
-cargo test
-```
-
-Run the source hygiene check:
-
-```sh
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all-targets
 scripts/check-source-hygiene.sh
+cargo package --locked
 ```
 
 Source anchors for README claims:
 
 - [`Cargo.toml`](Cargo.toml) defines the crate metadata and Rust baseline.
 - [`src/cli.rs`](src/cli.rs) defines the CLI surface and command output mode.
+- [`src/paths.rs`](src/paths.rs) defines repository discovery and confined
+  runtime paths.
 - [`src/orchestration.rs`](src/orchestration.rs) implements leases, packets,
   reports, Git checks, policy enforcement, linting, and cleanup.
+- [`src/planner.rs`](src/planner.rs) defines the `next` phase decision order.
+- [`src/gitstate.rs`](src/gitstate.rs) implements Git baselines, attribution,
+  staging plans, and goal keep/discard operations.
+- [`src/runtime.rs`](src/runtime.rs) defines locks, lease persistence, stale
+  detection, and runtime cleanup.
+- [`src/model.rs`](src/model.rs) defines task, lease, report, policy, and routing
+  metadata contracts.
 - [`src/specs.rs`](src/specs.rs) implements spec selection, inactive spec
   filtering, readiness, and dependencies.
 - [`src/taskfile.rs`](src/taskfile.rs) implements task frontmatter parsing and
   round-trip updates.
 - [`src/goal.rs`](src/goal.rs) implements the goal loop.
 - [`tests/cli.rs`](tests/cli.rs) exercises the end-to-end CLI contracts.
+- [`.github/workflows/release.yml`](.github/workflows/release.yml) defines the
+  published archive targets.
