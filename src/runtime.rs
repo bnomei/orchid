@@ -298,17 +298,24 @@ fn bind_lease_record_id(
     data: &mut serde_json::Map<String, Value>,
     expected: &str,
 ) -> OrchResult<()> {
-    match data.get("lease_id").and_then(Value::as_str) {
-        Some(actual) if actual == expected => Ok(()),
-        Some(actual) => Err(
-            OrchError::coded("invalid lease id", ErrorCode::InvalidLeaseId)
-                .detail("lease_id", actual)
-                .detail("expected_lease_id", expected),
-        ),
-        None => {
+    match data.get("lease_id") {
+        Some(Value::String(actual)) if actual == expected => Ok(()),
+        Some(Value::String(actual)) => Err(OrchError::coded(
+            "invalid lease id",
+            ErrorCode::InvalidLeaseId,
+        )
+        .detail("lease_id", actual.clone())
+        .detail("expected_lease_id", expected)),
+        Some(_) => Err(OrchError::coded(
+            "lease file has invalid lease_id field",
+            ErrorCode::CorruptLeaseFile,
+        )
+        .detail("expected_lease_id", expected)),
+        None if !data.contains_key("schema_version") => {
             data.insert("lease_id".to_string(), Value::String(expected.to_string()));
             Ok(())
         }
+        None => Ok(()),
     }
 }
 

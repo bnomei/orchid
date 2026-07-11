@@ -3607,6 +3607,55 @@ fn unsupported_lease_schema_fails_closed_and_survives_cleanup() {
 }
 
 #[test]
+fn versioned_lease_ids_are_never_synthesized_from_filenames() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_source",
+    ]);
+    let source_path = repo.root.join(".orchid/leases/l_source.json");
+    let source: Value = serde_json::from_str(&fs::read_to_string(&source_path).unwrap()).unwrap();
+    fs::remove_file(source_path).unwrap();
+
+    for (lease_id, invalid_id) in [
+        ("l_missing", None),
+        ("l_null", Some(Value::Null)),
+        ("l_numeric", Some(Value::from(7))),
+    ] {
+        let mut lease = source.clone();
+        match invalid_id {
+            Some(value) => lease["lease_id"] = value,
+            None => {
+                lease.as_object_mut().unwrap().remove("lease_id");
+            }
+        }
+        write_lease_json(&repo, lease_id, lease);
+    }
+
+    let running = repo.run(&["running"]);
+    let corrupt_ids: Vec<&str> = running["corrupt_leases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["lease_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(corrupt_ids, ["l_missing", "l_null", "l_numeric"]);
+    for lease_id in corrupt_ids {
+        let heartbeat = repo.run_fail(&["heartbeat", lease_id]);
+        assert_eq!(heartbeat["code"], "corrupt_lease_file");
+        assert!(repo
+            .root
+            .join(format!(".orchid/leases/{lease_id}.json"))
+            .exists());
+    }
+}
+
+#[test]
 fn corrupt_lease_file_fails_mutating_admission_closed() {
     let repo = Repo::new();
     repo.write_task_file("corrupt", "T001", "todo", "src/a/");
