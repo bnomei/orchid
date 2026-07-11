@@ -3807,8 +3807,8 @@ fn corrupt_lease_file_warns_but_keeps_aggregate_status_online() {
     ]);
     let lease_path = repo.root.join(".orchid/leases/l_real.json");
     let mut lease: Value = serde_json::from_str(&fs::read_to_string(&lease_path).unwrap()).unwrap();
-    lease["started_at"] = Value::String("2020-01-01T00:00:00Z".to_string());
-    lease["heartbeat_at"] = Value::String("2020-01-01T00:00:00Z".to_string());
+    lease["started_at"] = Value::String("2020-01-01T00:00:00.900Z".to_string());
+    lease["heartbeat_at"] = Value::String("2020-01-01T00:00:00.900Z".to_string());
     fs::write(&lease_path, serde_json::to_string(&lease).unwrap()).unwrap();
     write_corrupt_lease(&repo, "l_ghost");
 
@@ -3818,10 +3818,13 @@ fn corrupt_lease_file_warns_but_keeps_aggregate_status_online() {
         running["leases"][0]["scope"],
         serde_json::json!(["src/feature/"])
     );
-    assert_eq!(running["leases"][0]["heartbeat_at"], "2020-01-01T00:00:00Z");
+    assert_eq!(
+        running["leases"][0]["heartbeat_at"],
+        "2020-01-01T00:00:00.900Z"
+    );
     let running_snapshot =
         chrono::DateTime::parse_from_rfc3339(running["snapshot_at"].as_str().unwrap()).unwrap();
-    let heartbeat = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z").unwrap();
+    let heartbeat = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00.900Z").unwrap();
     assert_eq!(
         running["leases"][0]["age"],
         (running_snapshot - heartbeat).num_seconds()

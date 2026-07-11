@@ -1875,7 +1875,7 @@ fn compact_leases_at(leases: &[LeaseRecord], now: DateTime<Utc>) -> OrchResult<V
 }
 
 fn snapshot_timestamp(now: DateTime<Utc>) -> String {
-    now.to_rfc3339_opts(SecondsFormat::Secs, false)
+    now.to_rfc3339_opts(SecondsFormat::Nanos, false)
 }
 
 fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value>> {
