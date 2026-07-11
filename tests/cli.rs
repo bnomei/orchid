@@ -6041,6 +6041,51 @@ fn complete_rolls_back_lease_when_task_write_fails() {
 }
 
 #[test]
+#[cfg(unix)]
+fn doctor_recommends_but_does_not_promise_completion_recovery() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_recover_conflict",
+    ]);
+    let task_path = repo.root.join("specs/example/tasks/T001.md");
+    let tasks_dir = task_path.parent().unwrap();
+    let task_original = fs::metadata(&task_path).unwrap().permissions();
+    let dir_original = fs::metadata(tasks_dir).unwrap().permissions();
+    fs::set_permissions(&task_path, fs::Permissions::from_mode(0o444)).unwrap();
+    fs::set_permissions(tasks_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    repo.run_fail(&[
+        "complete",
+        "--lease",
+        "l_recover_conflict",
+        "--verified-by",
+        "mayor",
+    ]);
+
+    fs::set_permissions(&task_path, task_original).unwrap();
+    fs::set_permissions(tasks_dir, dir_original).unwrap();
+    let task_before = fs::read_to_string(&task_path).unwrap();
+    fs::write(&task_path, format!("{task_before}\nExternal change.\n")).unwrap();
+
+    let doctor = repo.run(&["doctor"]);
+    assert_eq!(doctor["recovery"][0]["lease_id"], "l_recover_conflict");
+    let failed = repo.run_fail(&["completion-recover", "--lease", "l_recover_conflict"]);
+    assert_eq!(failed["code"], "completion_intent_conflict");
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "todo"
+    );
+}
+
+#[test]
 fn doctor_and_inspect_are_read_only_runtime_observability() {
     let repo = Repo::new();
     let healthy = repo.run(&["doctor"]);

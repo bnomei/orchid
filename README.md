@@ -627,8 +627,8 @@ orchid release <LEASE_ID> --reason "abandoned worker"
 ### Runtime state needs attention
 
 Start with a bounded read-only health check. It reports stale leases, corrupt
-runtime files, and a `completion-recover` command only when Orchid has a
-durable completion intent it can safely finish:
+runtime files, and a `completion-recover` command when Orchid has a durable
+completion intent it can safely attempt to reconcile:
 
 ```sh
 orchid doctor --pretty
