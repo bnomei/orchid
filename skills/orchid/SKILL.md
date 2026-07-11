@@ -41,6 +41,19 @@ Phase guide:
 - `cleanup`: close completed leases after durable commit/review state exists.
 - `recover`: inspect stale leases, release or continue them, or report the blocker.
 
+When runtime state itself is unclear, use the read-only health surfaces before
+choosing a mutation:
+
+```sh
+orchid doctor
+orchid inspect --lease LEASE_ID
+```
+
+Treat a `completion-recover` recommendation as an attempt to reconcile a
+durable intent, not a guarantee that Orchid can override later task edits. Do
+not invent a resource-claim protocol: Orchid leases are the coordination
+primitive.
+
 ## Command Flow
 
 Inspect before spawning. `next`/`ready` surface the candidate task's
@@ -108,6 +121,12 @@ Treat worker reports as claims until validation passes. If touched files are
 outside scope, classify before proceeding: fix an obviously missing narrow
 scope only when authorized; otherwise pause and report. If validation fails,
 fix inside scope or return the task to the worker before completion.
+
+Use a role-specific packet when delegating validation or review. Pass a
+canonical worker report with `--source-report` when the role needs that claim;
+do not fabricate a validator handoff from a reviewer or loop-runner report.
+Packets and reports are bound to the lease's frozen context revision, so do not
+replace them with a newly edited task file during an active lease.
 
 After green validation, complete the lease and ask for the staging plan:
 

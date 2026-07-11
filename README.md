@@ -484,13 +484,22 @@ packets, and report checks so the coordinator can choose the worker. Explicit
 Other policy keys are preserved and copied into generated packets for agents to
 read.
 
-### Worker report contract
+### Role report contracts
 
-Generated packets provide the canonical report path and this frontmatter shape:
+Generated packets provide the canonical report path and a small role-specific
+frontmatter template. Worker reports use `.orchid/reports/<LEASE_ID>.md`.
+Validator, reviewer, and loop-runner reports use the same name with their role
+suffix, for example `.orchid/reports/<LEASE_ID>-validator.md`.
+
+Every generated template binds its report to the lease instance and frozen
+context revision:
 
 ```md
 +++
 lease_id = "<LEASE_ID>"
+lease_started_at = "<LEASE_START_TIME>"
+context_revision = "<CONTEXT_REVISION>"
+kind = "worker"
 status = "ready_for_validation"
 commands_run = []
 result = ""
@@ -509,9 +518,21 @@ What proves it.
 Anything the coordinator must know.
 ```
 
-Valid report statuses are `ready_for_validation`, `needs_fix`, `blocked`, and
-`done`. `orchid report-check` validates the frontmatter, lease ID, and canonical
-report path before the coordinator accepts the report.
+Valid statuses are `ready_for_validation`, `needs_fix`, `blocked`, and `done`.
+Validator reports also set `verdict = "passed"`, `"failed"`, or `"blocked"`;
+their status must respectively be `done`, `needs_fix`, or `blocked`.
+
+Non-worker packets can include a canonical worker report with
+`--source-report`. Orchid records that explicit source so later packet refreshes
+keep the same handoff. `orchid report-check` validates the role, lease instance,
+and canonical report path, and verifies a supplied context revision. It warns
+when a legacy local report omits its lease-instance or context-revision binding.
+It returns evidence diagnostics; it does not replace project-specific validation
+or authorize task completion.
+
+The lease freezes task context and policy at dispatch. Packet generation and
+report validation use that revision, rather than silently treating later edits
+to a task or spec as the worker's original instructions.
 
 ## Runtime layout
 
@@ -532,6 +553,8 @@ Orchid creates runtime files on demand:
 Do not hand-edit these files during routine orchestration. Mutating commands use
 a repository-local lock and confine managed paths to the repository. Orchid
 explicitly rejects symlinked lease, packet, bud, and report directories.
+Leases are the only coordination claim Orchid makes; it has no separate
+resource-claim protocol.
 
 ## CLI reference
 
