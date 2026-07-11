@@ -988,7 +988,9 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     }
 
     let task_path = lease.task_path().to_string();
-    let task = load_task(repo_path(root, &task_path, "task_path")?, root)?;
+    let task_path_abs = repo_path(root, &task_path, "task_path")?;
+    let task_before = crate::paths::read_text(&task_path_abs)?;
+    let task = load_task(&task_path_abs, root)?;
     if !task.status_model().is_completable() {
         return Err(OrchError::coded(
             "task cannot be completed from its current status",
@@ -1026,8 +1028,15 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     }
     let completed_status = git_status_data(root)?;
     let completed_at = meta.get("completed_at").cloned().unwrap_or(Value::Null);
-    let task_before = crate::paths::read_text(&task.path)?;
     let task_after = render_task_frontmatter(&task, &frontmatter)?;
+    if crate::paths::read_text(&task_path_abs)? != task_before {
+        return Err(OrchError::coded(
+            "task changed while preparing completion",
+            ErrorCode::CompletionIntentConflict,
+        )
+        .detail("lease_id", request.lease.clone())
+        .detail("task_path", task_path));
+    }
     let mut intent = Map::new();
     insert(
         &mut intent,
@@ -1067,33 +1076,7 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     append_completed_changed_path(&mut lease, &task_path);
     lease.set("completion_intent", Value::Object(intent));
     save_lease(root, &lease)?;
-    resume_completion_intent(root, &mut lease, &request.lease)?;
-    let mut payload = json_ok();
-    insert(&mut payload, "lease_id", request.lease.clone());
-    insert(&mut payload, "task", task_key(&task));
-    if request.clean_spec_research {
-        match clean_spec_research(root, &task.spec_id) {
-            Ok((deleted, pruned)) => {
-                insert_non_empty(
-                    &mut payload,
-                    "spec_research_deleted",
-                    string_values(deleted),
-                );
-                insert_non_empty(&mut payload, "pruned", string_values(pruned));
-            }
-            Err(err) => {
-                let mut detail = Map::new();
-                insert(&mut detail, "message", err.message.clone());
-                insert(&mut detail, "code", err.code.clone());
-                insert(
-                    &mut payload,
-                    "spec_research_clean_error",
-                    Value::Object(detail),
-                );
-            }
-        }
-    }
-    Ok(payload)
+    resume_completion_intent(root, &mut lease, &request.lease)
 }
 
 pub(crate) fn completion_recover(root: &Path, lease_id: &str) -> OrchResult<Map<String, Value>> {
@@ -1128,6 +1111,7 @@ fn resume_completion_intent(
         insert(&mut payload, "lease_id", lease_id);
         insert(&mut payload, "task", lease.task_value());
         insert(&mut payload, "already_completed", true);
+        append_completion_research_cleanup(root, lease, &intent, &mut payload);
         return Ok(payload);
     }
     let task_path = intent
@@ -1180,10 +1164,41 @@ fn resume_completion_intent(
     );
     lease.set("completion_intent", Value::Object(committed));
     save_lease(root, lease)?;
+    let intent = lease.completion_intent().cloned().unwrap_or_default();
     let mut payload = json_ok();
     insert(&mut payload, "lease_id", lease_id);
     insert(&mut payload, "task", lease.task_value());
+    append_completion_research_cleanup(root, lease, &intent, &mut payload);
     Ok(payload)
+}
+
+fn append_completion_research_cleanup(
+    root: &Path,
+    lease: &LeaseRecord,
+    intent: &Map<String, Value>,
+    payload: &mut Map<String, Value>,
+) {
+    if intent.get("clean_spec_research").and_then(Value::as_bool) != Some(true) {
+        return;
+    }
+    let spec_id = Path::new(lease.task_path())
+        .parent()
+        .and_then(|path| path.parent())
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    match clean_spec_research(root, spec_id) {
+        Ok((deleted, pruned)) => {
+            insert_non_empty(payload, "spec_research_deleted", string_values(deleted));
+            insert_non_empty(payload, "pruned", string_values(pruned));
+        }
+        Err(err) => {
+            let mut detail = Map::new();
+            insert(&mut detail, "message", err.message);
+            insert(&mut detail, "code", err.code);
+            insert(payload, "spec_research_clean_error", Value::Object(detail));
+        }
+    }
 }
 
 pub(crate) fn block(root: &Path, request: &BlockRequest) -> OrchResult<Map<String, Value>> {

@@ -6163,6 +6163,14 @@ fn complete_clean_spec_research_failure_keeps_completion() {
     )
     .unwrap();
     assert_eq!(lease["status"], "completed");
+
+    let recovered = repo.run(&["completion-recover", "--lease", "l_123"]);
+    assert_eq!(recovered["already_completed"], true);
+    assert_eq!(
+        recovered["spec_research_deleted"],
+        serde_json::json!([".orchid/spec-research/example"])
+    );
+    assert!(!research_dir.exists());
 }
 
 #[test]
