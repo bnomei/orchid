@@ -707,7 +707,14 @@ pub(crate) fn lease_attach_agent(
         lease.set("owner", format!("worker:{}", request.agent_id));
     }
     for role in existing_packet_roles {
-        render_packet_for_lease(root, &mut lease, &request.lease, role, None)?;
+        let source_report = resolve_packet_source_report(root, &lease, role, None)?;
+        render_packet_for_lease(
+            root,
+            &mut lease,
+            &request.lease,
+            role,
+            source_report.as_deref(),
+        )?;
     }
     save_lease(root, &lease)?;
     let mut payload = json_ok();
@@ -1371,7 +1378,7 @@ pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<Str
         request.role,
         source_report.as_deref(),
     )?;
-    if request.role.has_source_report() {
+    if request.role.has_source_report() && request.source_report.is_some() {
         if let Some(source_report) = source_report.as_deref() {
             lease.set("source_report_path", source_report);
         }
@@ -1425,6 +1432,11 @@ fn resolve_packet_source_report(
         }
         return Ok(None);
     }
+    let source_report = source_report.or_else(|| {
+        lease
+            .get_str("source_report_path")
+            .filter(|path| !path.is_empty())
+    });
     let Some(source_report) = source_report else {
         return Ok(Some(relpath(&report_path_for_lease(root, lease)?, root)));
     };
