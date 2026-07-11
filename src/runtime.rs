@@ -1,15 +1,15 @@
 //! `.orchid/` runtime persistence: leases, packets, reports, and the command lock.
 //!
-//! Mutating commands acquire a short-lived [`RuntimeLock`]; stale locks from dead
-//! owners are reclaimed so a crash cannot wedge every later command. The file
-//! lock is an accepted best-effort tradeoff: commands are expected to finish
-//! before the stale timeout, not survive concurrent stale-lock succession.
+//! Mutating commands acquire a short-lived [`RuntimeLock`] backed by an operating-system
+//! advisory lock. The open file descriptor owns the lock, so process exit releases it
+//! without timestamp-based lock stealing.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, TimeDelta, Utc};
+use fs2::FileExt;
 use serde_json::{Map, Value};
 use sha1::{Digest, Sha1};
 
@@ -28,21 +28,16 @@ use crate::paths::{
 use crate::specs::safe_spec_id;
 
 pub(crate) struct RuntimeLock {
-    path: PathBuf,
+    file: File,
 }
 
 impl Drop for RuntimeLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-        if let Some(parent) = self.path.parent() {
-            let _ = fs::remove_dir(parent);
-        }
+        let _ = FileExt::unlock(&self.file);
     }
 }
 
-const LOCK_STALE_AFTER_SECONDS: i64 = 300;
-
-/// Acquire the repo-wide runtime lock, reclaiming a stale lock when the owner is gone.
+/// Acquire the repo-wide runtime lock for the lifetime of the returned file descriptor.
 pub(crate) fn runtime_lock(root: &Path) -> OrchResult<RuntimeLock> {
     let lock_dir = repo_path(root, locks_dir(root), "lock_dir")?;
     fs::create_dir_all(&lock_dir)?;
@@ -55,68 +50,44 @@ pub(crate) fn runtime_lock(root: &Path) -> OrchResult<RuntimeLock> {
         );
     }
     let path = lock_dir.join("state.lock");
-    match try_acquire_lock(&path, root) {
-        Ok(lock) => Ok(lock),
-        Err(err) if err.code == ErrorCode::RuntimeLockBusy.as_str() => {
-            if lock_is_stale(&path) && reclaim_stale_lock(&path) {
-                return try_acquire_lock(&path, root);
-            }
-            Err(err)
-        }
-        Err(err) => Err(err),
-    }
+    try_acquire_lock(&path, root)
 }
 
 fn try_acquire_lock(path: &Path, root: &Path) -> OrchResult<RuntimeLock> {
     let mut file = OpenOptions::new()
-        .create_new(true)
+        .create(true)
+        .truncate(false)
+        .read(true)
         .write(true)
         .open(path)
-        .map_err(|err| {
-            if err.kind() == std::io::ErrorKind::AlreadyExists {
-                OrchError::coded("runtime lock busy", ErrorCode::RuntimeLockBusy)
-                    .detail("lock", relpath(path, root))
-            } else {
-                OrchError::from(err)
+        .map_err(OrchError::from)?;
+    if let Err(error) = FileExt::try_lock_exclusive(&file) {
+        let mut failure = OrchError::coded("runtime lock busy", ErrorCode::RuntimeLockBusy)
+            .detail("lock", relpath(path, root))
+            .detail("message", error.to_string());
+        if let Ok(Value::Object(metadata)) = serde_json::from_reader::<_, Value>(&file) {
+            if let Some(pid) = metadata.get("pid") {
+                failure = failure.detail("owner_pid", pid.clone());
             }
-        })?;
-    if let Err(err) = writeln!(
+            if let Some(created_at) = metadata.get("created_at") {
+                failure = failure.detail("created_at", created_at.clone());
+                if let Some(stamp) = parse_iso_datetime(Some(created_at)) {
+                    failure =
+                        failure.detail("age_seconds", (utc_now() - stamp).num_seconds().max(0));
+                }
+            }
+        }
+        return Err(failure);
+    }
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    writeln!(
         file,
         "{}",
         serde_json::json!({"pid": std::process::id(), "created_at": now_iso()})
-    ) {
-        let _ = fs::remove_file(path);
-        return Err(OrchError::from(err));
-    }
-    Ok(RuntimeLock {
-        path: path.to_path_buf(),
-    })
-}
-
-fn lock_is_stale(path: &Path) -> bool {
-    lock_age_seconds(path).is_some_and(|age| age >= LOCK_STALE_AFTER_SECONDS)
-}
-
-fn lock_age_seconds(path: &Path) -> Option<i64> {
-    if let Ok(content) = fs::read_to_string(path) {
-        if let Ok(value) = serde_json::from_str::<Value>(content.trim()) {
-            if let Some(stamp) = parse_iso_datetime(value.get("created_at")) {
-                return Some((utc_now() - stamp).num_seconds());
-            }
-        }
-    }
-    let modified = fs::metadata(path).ok()?.modified().ok()?;
-    Some(modified.elapsed().ok()?.as_secs() as i64)
-}
-
-fn reclaim_stale_lock(path: &Path) -> bool {
-    let claim = path.with_file_name(format!("state.lock.reclaiming.{}", std::process::id()));
-    if fs::rename(path, &claim).is_ok() {
-        let _ = fs::remove_file(&claim);
-        true
-    } else {
-        false
-    }
+    )?;
+    file.sync_data()?;
+    Ok(RuntimeLock { file })
 }
 
 pub(crate) fn active_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {

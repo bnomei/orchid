@@ -3,11 +3,13 @@
 //! Spawns the `orchid` binary with `--root` isolation; each test exercises one
 //! coordinator workflow boundary (lease, next, goal, Git staging, or security gate).
 
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use chrono::{Duration, SecondsFormat, Utc};
+use fs2::FileExt;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -177,6 +179,27 @@ fn git_stdout(root: &Path, args: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).expect("git stdout utf8")
+}
+
+fn hold_runtime_lock(repo: &Repo) -> File {
+    let lock_dir = repo.root.join(".orchid/locks");
+    fs::create_dir_all(&lock_dir).unwrap();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(lock_dir.join("state.lock"))
+        .unwrap();
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({"pid": 424242, "created_at": Utc::now().to_rfc3339()})
+    )
+    .unwrap();
+    file.sync_data().unwrap();
+    file.lock_exclusive().unwrap();
+    file
 }
 
 fn write_goal_report(repo: &Repo, goal_id: &str, cycle: &str, status: &str, next: &str) {
@@ -1113,9 +1136,7 @@ fn goal_evaluation_requires_runtime_lock() {
         "ready_for_evaluation",
         "try a smaller change",
     );
-    let lock_dir = repo.root.join(".orchid/locks");
-    fs::create_dir_all(&lock_dir).unwrap();
-    fs::write(lock_dir.join("state.lock"), "held\n").unwrap();
+    let _held = hold_runtime_lock(&repo);
 
     let failed = repo.run_fail(&["goal"]);
 
@@ -2604,9 +2625,7 @@ fn agent_status_refresh_requires_runtime_lock() {
         format!("{original_task}\nFresh task body from edited source.\n"),
     )
     .unwrap();
-    let lock_dir = repo.root.join(".orchid/locks");
-    fs::create_dir_all(&lock_dir).unwrap();
-    fs::write(lock_dir.join("state.lock"), "held\n").unwrap();
+    let _held = hold_runtime_lock(&repo);
 
     let status = repo.run_fail(&["status", "--agent-id", "agent_123"]);
 
@@ -4090,9 +4109,7 @@ fn research_commands_resolve_numeric_spec_prefix() {
 #[test]
 fn research_path_create_respects_runtime_lock() {
     let repo = Repo::new();
-    let lock_dir = repo.root.join(".orchid/locks");
-    fs::create_dir_all(&lock_dir).unwrap();
-    fs::write(lock_dir.join("state.lock"), "held\n").unwrap();
+    let _held = hold_runtime_lock(&repo);
 
     let payload = repo.run_fail(&["research-path", "example", "--create"]);
     assert_eq!(payload["code"], "runtime_lock_busy");
@@ -4895,18 +4912,30 @@ fn release_and_heartbeat_reject_completed_leases() {
 }
 
 #[test]
-fn runtime_lock_reclaims_stale_lock_but_respects_fresh_one() {
+fn runtime_lock_uses_live_file_ownership_instead_of_timestamp_reclamation() {
     let repo = Repo::new();
     let lock_dir = repo.root.join(".orchid/locks");
     fs::create_dir_all(&lock_dir).unwrap();
     let lock_path = lock_dir.join("state.lock");
 
     let stale = (Utc::now() - Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, false);
-    fs::write(
-        &lock_path,
-        format!("{{\"pid\":424242,\"created_at\":\"{stale}\"}}\n"),
-    )
-    .unwrap();
+    let mut held = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&lock_path)
+        .unwrap();
+    writeln!(held, "{{\"pid\":424242,\"created_at\":\"{stale}\"}}").unwrap();
+    held.sync_data().unwrap();
+    held.lock_exclusive().unwrap();
+
+    let busy = repo.run_fail(&["lease", "example", "T002", "--owner", "worker:b"]);
+    assert_eq!(busy["code"], "runtime_lock_busy");
+    assert_eq!(busy["owner_pid"], 424242);
+    assert!(busy["age_seconds"].as_i64().unwrap() >= 3_500);
+
+    held.unlock().unwrap();
     let lease = repo.run(&[
         "lease",
         "example",
@@ -4914,19 +4943,9 @@ fn runtime_lock_reclaims_stale_lock_but_respects_fresh_one() {
         "--owner",
         "worker:a",
         "--lease-id",
-        "l_reclaim",
+        "l_after_unlock",
     ]);
-    assert_eq!(lease["lease_id"], "l_reclaim");
-
-    fs::create_dir_all(&lock_dir).unwrap();
-    let fresh = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, false);
-    fs::write(
-        &lock_path,
-        format!("{{\"pid\":424242,\"created_at\":\"{fresh}\"}}\n"),
-    )
-    .unwrap();
-    let busy = repo.run_fail(&["lease", "example", "T002", "--owner", "worker:b"]);
-    assert_eq!(busy["code"], "runtime_lock_busy");
+    assert_eq!(lease["lease_id"], "l_after_unlock");
 }
 
 #[test]
@@ -6476,9 +6495,7 @@ fn git_touched_and_stage_plan_respect_runtime_lock() {
         "--lease-id",
         "l_lock",
     ]);
-    let lock_dir = repo.root.join(".orchid/locks");
-    fs::create_dir_all(&lock_dir).unwrap();
-    fs::write(lock_dir.join("state.lock"), "held\n").unwrap();
+    let _held = hold_runtime_lock(&repo);
 
     let touched = repo.run_fail(&["git-touched", "--lease", "l_lock"]);
     assert_eq!(touched["code"], "runtime_lock_busy");
@@ -6490,9 +6507,7 @@ fn git_touched_and_stage_plan_respect_runtime_lock() {
 #[test]
 fn next_respects_runtime_lock() {
     let repo = Repo::new();
-    let lock_dir = repo.root.join(".orchid/locks");
-    fs::create_dir_all(&lock_dir).unwrap();
-    fs::write(lock_dir.join("state.lock"), "held\n").unwrap();
+    let _held = hold_runtime_lock(&repo);
 
     let payload = repo.run_fail(&["next", "--spec", "example"]);
     assert_eq!(payload["code"], "runtime_lock_busy");
@@ -6961,9 +6976,7 @@ fn security_lock_and_help_contracts() {
     let payload = repo.run_fail(&["report-check", outside.to_str().unwrap()]);
     assert_eq!(payload["code"], "path_outside_repo");
 
-    let lock_dir = repo.root.join(".orchid/locks");
-    fs::create_dir_all(&lock_dir).unwrap();
-    fs::write(lock_dir.join("state.lock"), "held\n").unwrap();
+    let _held = hold_runtime_lock(&repo);
     let payload = repo.run_fail(&["lease", "example", "T001", "--owner", "worker:agent_123"]);
     assert_eq!(payload["code"], "runtime_lock_busy");
 
