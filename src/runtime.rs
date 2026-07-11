@@ -5,7 +5,6 @@
 //! without timestamp-based lock stealing.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, TimeDelta, Utc};
@@ -23,16 +22,18 @@ use crate::model::{
 };
 use crate::paths::{
     atomic_write_json, buds_dir, leases_dir, locks_dir, orch_dir, packets_dir, path_to_string,
-    relpath, repo_path, reports_dir, spec_research_root,
+    read_text, relpath, repo_path, reports_dir, spec_research_root,
 };
 use crate::specs::safe_spec_id;
 
 pub(crate) struct RuntimeLock {
     file: File,
+    metadata_path: PathBuf,
 }
 
 impl Drop for RuntimeLock {
     fn drop(&mut self) {
+        let _ = fs::remove_file(&self.metadata_path);
         let _ = FileExt::unlock(&self.file);
     }
 }
@@ -49,12 +50,22 @@ pub(crate) fn runtime_lock(root: &Path) -> OrchResult<RuntimeLock> {
                 .detail("lock_dir", path_to_string(&lock_dir)),
         );
     }
-    let path = lock_dir.join("state.lock");
-    try_acquire_lock(&path, root)
+    let path = repo_path(root, lock_dir.join("state.lock"), "lock_path")?;
+    if path
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(
+            OrchError::coded("path outside repo", ErrorCode::PathOutsideRepo)
+                .detail("lock", relpath(&path, root)),
+        );
+    }
+    let metadata_path = repo_path(root, lock_dir.join("state.json"), "lock_metadata_path")?;
+    try_acquire_lock(&path, &metadata_path, root)
 }
 
-fn try_acquire_lock(path: &Path, root: &Path) -> OrchResult<RuntimeLock> {
-    let mut file = OpenOptions::new()
+fn try_acquire_lock(path: &Path, metadata_path: &Path, root: &Path) -> OrchResult<RuntimeLock> {
+    let file = OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
@@ -65,7 +76,9 @@ fn try_acquire_lock(path: &Path, root: &Path) -> OrchResult<RuntimeLock> {
         let mut failure = OrchError::coded("runtime lock busy", ErrorCode::RuntimeLockBusy)
             .detail("lock", relpath(path, root))
             .detail("message", error.to_string());
-        if let Ok(Value::Object(metadata)) = serde_json::from_reader::<_, Value>(&file) {
+        if let Ok(Value::Object(metadata)) = read_text(metadata_path)
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).map_err(OrchError::from))
+        {
             if let Some(pid) = metadata.get("pid") {
                 failure = failure.detail("owner_pid", pid.clone());
             }
@@ -79,15 +92,15 @@ fn try_acquire_lock(path: &Path, root: &Path) -> OrchResult<RuntimeLock> {
         }
         return Err(failure);
     }
-    file.set_len(0)?;
-    file.seek(SeekFrom::Start(0))?;
-    writeln!(
+    let metadata = serde_json::json!({"pid": std::process::id(), "created_at": now_iso()});
+    if let Err(error) = atomic_write_json(metadata_path, &metadata) {
+        let _ = FileExt::unlock(&file);
+        return Err(error);
+    }
+    Ok(RuntimeLock {
         file,
-        "{}",
-        serde_json::json!({"pid": std::process::id(), "created_at": now_iso()})
-    )?;
-    file.sync_data()?;
-    Ok(RuntimeLock { file })
+        metadata_path: metadata_path.to_path_buf(),
+    })
 }
 
 pub(crate) fn active_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {

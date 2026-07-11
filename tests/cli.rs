@@ -4,7 +4,6 @@
 //! coordinator workflow boundary (lease, next, goal, Git staging, or security gate).
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -184,21 +183,22 @@ fn git_stdout(root: &Path, args: &[&str]) -> String {
 fn hold_runtime_lock(repo: &Repo) -> File {
     let lock_dir = repo.root.join(".orchid/locks");
     fs::create_dir_all(&lock_dir).unwrap();
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
-        .truncate(true)
+        .truncate(false)
         .open(lock_dir.join("state.lock"))
         .unwrap();
-    writeln!(
-        file,
-        "{}",
-        serde_json::json!({"pid": 424242, "created_at": Utc::now().to_rfc3339()})
+    file.lock_exclusive().unwrap();
+    fs::write(
+        lock_dir.join("state.json"),
+        format!(
+            "{}\n",
+            serde_json::json!({"pid": 424242, "created_at": Utc::now().to_rfc3339()})
+        ),
     )
     .unwrap();
-    file.sync_data().unwrap();
-    file.lock_exclusive().unwrap();
     file
 }
 
@@ -4919,16 +4919,19 @@ fn runtime_lock_uses_live_file_ownership_instead_of_timestamp_reclamation() {
     let lock_path = lock_dir.join("state.lock");
 
     let stale = (Utc::now() - Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, false);
-    let mut held = OpenOptions::new()
+    let held = OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
-        .truncate(true)
+        .truncate(false)
         .open(&lock_path)
         .unwrap();
-    writeln!(held, "{{\"pid\":424242,\"created_at\":\"{stale}\"}}").unwrap();
-    held.sync_data().unwrap();
     held.lock_exclusive().unwrap();
+    fs::write(
+        lock_dir.join("state.json"),
+        format!("{{\"pid\":424242,\"created_at\":\"{stale}\"}}\n"),
+    )
+    .unwrap();
 
     let busy = repo.run_fail(&["lease", "example", "T002", "--owner", "worker:b"]);
     assert_eq!(busy["code"], "runtime_lock_busy");
@@ -4946,6 +4949,32 @@ fn runtime_lock_uses_live_file_ownership_instead_of_timestamp_reclamation() {
         "l_after_unlock",
     ]);
     assert_eq!(lease["lease_id"], "l_after_unlock");
+}
+
+#[test]
+#[cfg(unix)]
+fn runtime_lock_rejects_symlinked_lock_file_without_touching_target() {
+    use std::os::unix::fs::symlink;
+
+    let repo = Repo::new();
+    let lock_dir = repo.root.join(".orchid/locks");
+    fs::create_dir_all(&lock_dir).unwrap();
+    let sentinel = repo.root.parent().unwrap().join("lock-sentinel.txt");
+    fs::write(&sentinel, "keep me\n").unwrap();
+    symlink(&sentinel, lock_dir.join("state.lock")).unwrap();
+
+    let failed = repo.run_fail(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_symlink_lock",
+    ]);
+
+    assert_eq!(failed["code"], "path_outside_repo");
+    assert_eq!(fs::read_to_string(&sentinel).unwrap(), "keep me\n");
 }
 
 #[test]
