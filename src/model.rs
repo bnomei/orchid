@@ -781,12 +781,8 @@ impl StagePlan {
         let mut map = Map::new();
         map.insert("lease_id".to_string(), Value::String(self.lease_id.clone()));
         map.insert("task".to_string(), Value::String(self.task.clone()));
-        if !self.git_available {
-            map.insert("git".to_string(), Value::Bool(false));
-        }
-        if !self.safe_to_stage {
-            map.insert("safe_to_stage".to_string(), Value::Bool(false));
-        }
+        map.insert("git".to_string(), Value::Bool(self.git_available));
+        map.insert("safe_to_stage".to_string(), Value::Bool(self.safe_to_stage));
         if !self.pathspecs.is_empty() {
             map.insert(
                 "pathspecs".to_string(),

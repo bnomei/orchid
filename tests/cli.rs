@@ -372,15 +372,59 @@ fn canonical_binary_json_contracts_are_stable() {
 }
 
 #[test]
+fn ack_v1_actions_and_capabilities_are_advertised() {
+    let repo = Repo::new();
+
+    let capabilities = repo.run(&["capabilities"]);
+    assert_eq!(capabilities["ack_version"], 1);
+    assert_eq!(capabilities["ok"], true);
+    assert_eq!(capabilities["command"], "capabilities");
+    assert_eq!(capabilities["protocols"]["ack"], 1);
+    assert_eq!(capabilities["protocols"]["actions"], 1);
+    assert_eq!(capabilities["protocols"]["lease_schema"], 1);
+    assert!(capabilities["json_commands"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("next".to_string())));
+
+    let failed = repo.run_fail(&["next"]);
+    assert_eq!(failed["ack_version"], 1);
+    assert_eq!(failed["ok"], false);
+    assert_eq!(failed["command"], "next");
+    assert_eq!(failed["code"], "scope_required");
+    assert_eq!(failed["error"], "next requires --spec or --all-open");
+    assert_eq!(failed["action_version"], 1);
+    assert_eq!(failed["commands"], serde_json::json!([]));
+    assert_eq!(failed["actions"], serde_json::json!([]));
+
+    let next = repo.run(&["next", "--spec", "example"]);
+    assert_eq!(next["ack_version"], 1);
+    assert_eq!(next["ok"], true);
+    assert_eq!(next["command"], "next");
+    assert_eq!(next["action_version"], 1);
+    assert_eq!(next["recommended_action"], "dispatch");
+    assert_eq!(next["commands"], serde_json::json!([next["cmd"].clone()]));
+    assert_eq!(next["actions"][0]["type"], "command");
+    assert_eq!(next["actions"][0]["argv"], next["cmd"]);
+    assert_eq!(next["blocked"][0]["code"], "unmet_dependency");
+}
+
+#[test]
 fn pretty_can_be_passed_after_subcommand() {
     let repo = Repo::new();
     let stdout = repo.run_stdout(&["--pretty", "lint"]);
 
-    assert_eq!(stdout, "{\n  \"tasks\": 3\n}\n");
+    assert_eq!(
+        stdout,
+        "{\n  \"ack_version\": 1,\n  \"command\": \"lint\",\n  \"ok\": true,\n  \"tasks\": 3\n}\n"
+    );
 
     let stdout = repo.run_stdout(&["lint", "--pretty"]);
 
-    assert_eq!(stdout, "{\n  \"tasks\": 3\n}\n");
+    assert_eq!(
+        stdout,
+        "{\n  \"ack_version\": 1,\n  \"command\": \"lint\",\n  \"ok\": true,\n  \"tasks\": 3\n}\n"
+    );
 }
 
 #[test]
@@ -1892,17 +1936,41 @@ fn all_open_selects_first_open_numerical_spec_and_skips_inactive() {
 }
 
 #[test]
-fn next_all_open_errors_when_no_open_spec_exists() {
+fn next_all_open_reports_done_when_no_open_spec_exists() {
     let repo = Repo::new();
     repo.write_task_file("example", "T001", "done", "src/example/");
     repo.write_task_file("example", "T002", "done", "src/example/");
     repo.write_task_file("00-done", "T001", "done", "src/done/");
     repo.write_task_file("01-also-done", "T001", "done", "src/also-done/");
 
-    let payload = repo.run_fail(&["next", "--all-open"]);
+    let payload = repo.run(&["next", "--all-open"]);
 
-    assert_eq!(payload["error"], "no open spec found");
-    assert_eq!(payload["code"], "no_open_spec");
+    assert_eq!(payload["phase"], "done");
+    assert_eq!(payload["recommended_action"], "done");
+    assert_eq!(payload["commands"], serde_json::json!([]));
+    assert_eq!(payload["actions"], serde_json::json!([]));
+}
+
+#[test]
+fn next_all_open_exhaustion_still_advances_terminal_leases() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_done",
+    ]);
+    repo.run(&["complete", "--lease", "l_done", "--verified-by", "mayor"]);
+    rewrite_task_status(&repo.root, "specs/example/tasks/T002.md", "todo", "done");
+
+    let payload = repo.run(&["next", "--all-open"]);
+
+    assert_eq!(payload["phase"], "stage");
+    assert_eq!(payload["stage"][0]["lease_id"], "l_done");
+    assert_eq!(payload["recommended_action"], "stage");
 }
 
 #[test]
@@ -6744,7 +6812,8 @@ fn stage_plan_allows_baseline_path_after_exact_dirty_content_is_committed() {
         plan["pathspecs"],
         serde_json::json!([":(literal)src/feature/work.txt"])
     );
-    assert!(plan.get("safe_to_stage").is_none());
+    assert_eq!(plan["git"], true);
+    assert_eq!(plan["safe_to_stage"], true);
 }
 
 #[test]

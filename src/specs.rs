@@ -508,53 +508,75 @@ pub(crate) fn ready_tasks(
 
     for task in &tasks {
         let policy = load_spec_policy(root, &task.spec_id)?;
-        let mut reason: Option<String> = None;
+        let mut block: Option<(ErrorCode, String)> = None;
         if policy.is_manual() {
-            reason = Some("spec manual".to_string());
+            block = Some((ErrorCode::SpecManual, "spec manual".to_string()));
         } else if policy.checkpoint_before_implementation() {
-            reason = Some("human checkpoint:before-implementation".to_string());
+            block = Some((
+                ErrorCode::HumanCheckpoint,
+                "human checkpoint:before-implementation".to_string(),
+            ));
         } else if !task.status_model().is_dispatchable() {
-            reason = Some(format!("status:{}", task.status()));
+            block = Some((ErrorCode::TaskNotTodo, format!("status:{}", task.status())));
         } else if !VerificationMode::parse(task.verification_mode()).is_dispatchable() {
-            reason = Some("invalid verification_mode".to_string());
+            block = Some((
+                ErrorCode::InvalidVerificationMode,
+                "invalid verification_mode".to_string(),
+            ));
         } else if let Some(bad_scope) = task
             .scope()
             .iter()
             .find(|entry| scope_entry_is_blank(entry))
         {
-            reason = Some(format!("blank scope entry:{bad_scope}"));
+            block = Some((
+                ErrorCode::InvalidScope,
+                format!("blank scope entry:{bad_scope}"),
+            ));
         } else if task
             .scope()
             .iter()
             .any(|entry| scope_entry_escapes_root(entry))
         {
-            reason = Some("scope escapes repo root".to_string());
+            block = Some((
+                ErrorCode::InvalidScope,
+                "scope escapes repo root".to_string(),
+            ));
         } else if !task.worker_reasoning_effort_model().is_valid() {
-            reason = Some("invalid worker_reasoning_effort".to_string());
+            block = Some((
+                ErrorCode::InvalidReasoningEffort,
+                "invalid worker_reasoning_effort".to_string(),
+            ));
         } else if !task.worker_model_is_valid() {
-            reason = Some("invalid worker_model".to_string());
-        } else if let Some(block) = dependency_block(task, &all_tasks) {
-            reason = Some(block.reason());
+            block = Some((
+                ErrorCode::InvalidWorkerModel,
+                "invalid worker_model".to_string(),
+            ));
+        } else if let Some(dependency) = dependency_block(task, &all_tasks) {
+            block = Some((dependency.error_code(), dependency.reason()));
         }
 
-        if reason.is_none() {
+        if block.is_none() {
             for lease in active {
                 if lease.task_path() == relpath(&task.path, root) {
-                    reason = Some("already leased".to_string());
+                    block = Some((ErrorCode::TaskAlreadyLeased, "already leased".to_string()));
                     break;
                 }
                 let lease_scope = effective_lease_scope(root, lease)?;
                 if scopes_overlap(&task.scope(), &lease_scope) {
                     let lease_id = lease.id().unwrap_or("");
-                    reason = Some(format!("scope conflict:{lease_id}"));
+                    block = Some((
+                        ErrorCode::ScopeConflict,
+                        format!("scope conflict:{lease_id}"),
+                    ));
                     break;
                 }
             }
         }
 
-        if let Some(reason) = reason {
+        if let Some((code, reason)) = block {
             let mut item = Map::new();
             item.insert("task".to_string(), Value::String(task_key(task)));
+            item.insert("code".to_string(), Value::String(code.as_str().to_string()));
             item.insert("reason".to_string(), Value::String(reason));
             blocked.push(item);
         } else {

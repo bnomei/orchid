@@ -1,4 +1,7 @@
 {
+  "ack_version": 1,
+  "command": "ready",
+  "ok": true,
   "ready": [
     {
       "task": "example/T001",
@@ -11,10 +14,12 @@
   ],
   "blocked": [
     {
+      "code": "unmet_dependency",
       "task": "example/T002",
       "reason": "unmet dependency:T001"
     },
     {
+      "code": "task_not_todo",
       "task": "example/T003",
       "reason": "status:done"
     }

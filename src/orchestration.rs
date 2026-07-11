@@ -679,10 +679,28 @@ pub(crate) fn lease_attach_agent(
 }
 
 pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String, Value>> {
+    if request.specs.is_empty() && !request.all_open {
+        return Err(OrchError::coded(
+            "next requires --spec or --all-open",
+            ErrorCode::ScopeRequired,
+        ));
+    }
     let _lock = runtime_lock(root)?;
     let stale_after = parse_duration(&request.older_than)?;
     let now = Utc::now();
-    let (tasks, selected_specs) = select_tasks(root, specs_arg(&request.specs), request.all_open)?;
+    let selection = select_tasks(root, specs_arg(&request.specs), request.all_open);
+    let (tasks, selected_specs, all_open_exhausted) = match selection {
+        Ok((tasks, selected_specs)) => (tasks, selected_specs, false),
+        Err(error) if request.all_open && error.code == ErrorCode::NoOpenSpec.as_str() => {
+            let tasks = load_tasks(root, None)?;
+            let mut selected_specs: Vec<String> =
+                tasks.iter().map(|task| task.spec_id.clone()).collect();
+            selected_specs.sort();
+            selected_specs.dedup();
+            (tasks, selected_specs, true)
+        }
+        Err(error) => return Err(error),
+    };
     let active_scan = active_leases_lenient(root)?;
     if !active_scan.corrupt_leases.is_empty() {
         let mut payload = json_ok();
@@ -701,12 +719,17 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
         return Ok(payload);
     }
     let active = active_scan.leases;
-    let (ready, blocked, _) = ready_tasks(
-        root,
-        specs_arg(&request.specs),
-        request.all_open,
-        Some(&active),
-    )?;
+    let (ready, blocked) = if all_open_exhausted {
+        (Vec::new(), Vec::new())
+    } else {
+        let (ready, blocked, _) = ready_tasks(
+            root,
+            specs_arg(&request.specs),
+            request.all_open,
+            Some(&active),
+        )?;
+        (ready, blocked)
+    };
     let stale = active
         .iter()
         .filter(|lease| lease_in_selected_queue(lease, &selected_specs))
@@ -775,6 +798,11 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
                 .get("task")
                 .and_then(Value::as_str)
                 .unwrap_or("")
+                .to_string(),
+            code: item
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("dispatch_blocked")
                 .to_string(),
             reason: item
                 .get("reason")

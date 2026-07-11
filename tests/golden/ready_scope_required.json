@@ -1,4 +1,7 @@
 {
+  "ack_version": 1,
+  "command": "ready",
+  "ok": false,
   "error": "ready requires --spec or --all-open",
   "code": "scope_required"
 }

@@ -11,6 +11,7 @@ use serde_json::{Map, Value};
 use crate::core::{emit, emit_markdown, json_fail, OrchResult, DEFAULT_STALE_AFTER};
 use crate::gitstate;
 use crate::goal::{self, GoalDirection, GoalId, GoalInitRequest};
+use crate::model::LEASE_SCHEMA_VERSION;
 use crate::orchestration::{
     self, AttachAgentRequest, BlockRequest, BudRequest, CleanupRequest, CloseRequest,
     CompleteRequest, LeaseRequest, NextRequest, PacketRequest, PacketRoleKind, ReportCheckRequest,
@@ -34,6 +35,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "Advertise machine-readable protocol capabilities")]
+    Capabilities,
     #[command(about = "List ready task files")]
     Ready(ReadyArgs),
     #[command(about = "Summarize specs, task states, active leases, or one agent lease")]
@@ -409,7 +412,8 @@ pub fn run() -> i32 {
     let root = match root_from_arg(cli.root.as_deref()) {
         Ok(root) => root,
         Err(error) => {
-            let payload = json_fail(&error.message, Some(&error.code));
+            let mut payload = json_fail(&error.message, Some(&error.code));
+            finalize_json_ack(&mut payload, &cli.command);
             emit(&payload, cli.pretty);
             return 1;
         }
@@ -426,11 +430,8 @@ pub fn run() -> i32 {
 
     match result {
         Ok(output) => match output {
-            CommandOutput::Json(payload) => {
-                let ok = payload
-                    .get("ok")
-                    .and_then(Value::as_bool)
-                    .unwrap_or_else(|| !payload.contains_key("error"));
+            CommandOutput::Json(mut payload) => {
+                let ok = finalize_json_ack(&mut payload, &cli.command);
                 emit(&payload, cli.pretty);
                 if ok {
                     0
@@ -446,6 +447,7 @@ pub fn run() -> i32 {
         Err(error) => {
             let mut payload = json_fail(&error.message, Some(&error.code));
             payload.extend(error.details);
+            finalize_json_ack(&mut payload, &cli.command);
             emit(&payload, cli.pretty);
             1
         }
@@ -465,6 +467,7 @@ impl From<Map<String, Value>> for CommandOutput {
 
 fn run_command(root: &Path, command: &Command) -> OrchResult<CommandOutput> {
     match command {
+        Command::Capabilities => Ok(cmd_capabilities().into()),
         Command::Ready(args) => cmd_ready(root, args).map(Into::into),
         Command::Status(args) => cmd_status(root, args).map(Into::into),
         Command::Lease(args) => cmd_lease(root, args).map(Into::into),
@@ -489,6 +492,151 @@ fn run_command(root: &Path, command: &Command) -> OrchResult<CommandOutput> {
         Command::Lint => cmd_lint(root).map(Into::into),
         Command::Goal(args) => cmd_goal(root, args).map(CommandOutput::Markdown),
     }
+}
+
+impl Command {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Capabilities => "capabilities",
+            Self::Ready(_) => "ready",
+            Self::Status(_) => "status",
+            Self::Lease(_) => "lease",
+            Self::Bud(_) => "bud",
+            Self::LeaseAttachAgent(_) => "lease-attach-agent",
+            Self::Running => "running",
+            Self::Heartbeat { .. } => "heartbeat",
+            Self::Stale { .. } => "stale",
+            Self::Release { .. } => "release",
+            Self::Close(_) => "close",
+            Self::Cleanup(_) => "cleanup",
+            Self::Next(_) => "next",
+            Self::ResearchPath(_) => "research-path",
+            Self::ResearchClean { .. } => "research-clean",
+            Self::Packet(_) => "packet",
+            Self::ReportCheck { .. } => "report-check",
+            Self::GitStatus => "git-status",
+            Self::GitTouched { .. } => "git-touched",
+            Self::GitStagePlan { .. } => "git-stage-plan",
+            Self::Complete(_) => "complete",
+            Self::Block(_) => "block",
+            Self::Lint => "lint",
+            Self::Goal(_) => "goal",
+        }
+    }
+}
+
+const ACK_VERSION: i64 = 1;
+const ACTION_VERSION: i64 = 1;
+
+fn finalize_json_ack(payload: &mut Map<String, Value>, command: &Command) -> bool {
+    let ok = payload
+        .get("ok")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| !payload.contains_key("error"));
+    payload.insert("ack_version".to_string(), Value::from(ACK_VERSION));
+    payload.insert("ok".to_string(), Value::Bool(ok));
+    payload.insert(
+        "command".to_string(),
+        Value::String(command.name().to_string()),
+    );
+    if matches!(command, Command::Next(_)) {
+        finalize_next_actions(payload);
+    }
+    ok
+}
+
+fn finalize_next_actions(payload: &mut Map<String, Value>) {
+    let commands = payload
+        .get("commands")
+        .and_then(Value::as_array)
+        .cloned()
+        .or_else(|| payload.get("cmds").and_then(Value::as_array).cloned())
+        .or_else(|| {
+            payload
+                .get("cmd")
+                .and_then(Value::as_array)
+                .cloned()
+                .map(|command| vec![Value::Array(command)])
+        })
+        .unwrap_or_default();
+    let actions = commands
+        .iter()
+        .map(|argv| {
+            let mut action = Map::new();
+            action.insert("type".to_string(), Value::String("command".to_string()));
+            action.insert("argv".to_string(), argv.clone());
+            Value::Object(action)
+        })
+        .collect();
+    payload.insert("action_version".to_string(), Value::from(ACTION_VERSION));
+    payload.insert("commands".to_string(), Value::Array(commands));
+    payload.insert("actions".to_string(), Value::Array(actions));
+    if let Some(phase) = payload.get("phase").and_then(Value::as_str) {
+        payload.insert(
+            "recommended_action".to_string(),
+            Value::String(phase.to_string()),
+        );
+    }
+}
+
+fn cmd_capabilities() -> Map<String, Value> {
+    let mut protocols = Map::new();
+    protocols.insert("ack".to_string(), Value::from(ACK_VERSION));
+    protocols.insert("actions".to_string(), Value::from(ACTION_VERSION));
+    protocols.insert(
+        "lease_schema".to_string(),
+        Value::from(LEASE_SCHEMA_VERSION),
+    );
+    let mut payload = Map::new();
+    payload.insert("protocols".to_string(), Value::Object(protocols));
+    payload.insert(
+        "json_commands".to_string(),
+        string_values(&[
+            "capabilities",
+            "ready",
+            "status",
+            "lease",
+            "bud",
+            "lease-attach-agent",
+            "running",
+            "heartbeat",
+            "stale",
+            "release",
+            "close",
+            "cleanup",
+            "next",
+            "research-path",
+            "research-clean",
+            "packet",
+            "report-check",
+            "git-status",
+            "git-touched",
+            "git-stage-plan",
+            "complete",
+            "block",
+            "lint",
+        ]),
+    );
+    payload.insert("markdown_commands".to_string(), string_values(&["goal"]));
+    payload.insert(
+        "features".to_string(),
+        string_values(&[
+            "typed_blocker_codes",
+            "read_only_agent_status",
+            "released_lease_attribution",
+            "spec_scoped_next",
+        ]),
+    );
+    payload
+}
+
+fn string_values(items: &[&str]) -> Value {
+    Value::Array(
+        items
+            .iter()
+            .map(|item| Value::String((*item).to_string()))
+            .collect(),
+    )
 }
 
 fn cmd_goal(root: &Path, args: &GoalArgs) -> OrchResult<String> {

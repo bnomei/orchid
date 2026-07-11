@@ -95,6 +95,7 @@ impl ReadyTask {
 #[derive(Debug, Clone)]
 pub(crate) struct BlockedTask {
     pub(crate) task: String,
+    pub(crate) code: String,
     pub(crate) reason: String,
 }
 
@@ -102,6 +103,7 @@ impl BlockedTask {
     pub(crate) fn to_payload(&self) -> Map<String, Value> {
         let mut map = Map::new();
         map.insert("task".to_string(), Value::String(self.task.clone()));
+        map.insert("code".to_string(), Value::String(self.code.clone()));
         map.insert("reason".to_string(), Value::String(self.reason.clone()));
         map
     }
@@ -502,6 +504,7 @@ mod tests {
     fn blocked_task() -> BlockedTask {
         BlockedTask {
             task: "example/T999".to_string(),
+            code: "task_not_todo".to_string(),
             reason: "status:blocked".to_string(),
         }
     }
