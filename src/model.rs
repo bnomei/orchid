@@ -87,15 +87,101 @@ pub(crate) fn validate_lease_id(value: &str) -> OrchResult<()> {
     LeaseId::parse(value).map(|_| ())
 }
 
-pub(crate) fn lease_status_field_error(data: &Map<String, Value>) -> Option<String> {
-    match data.get("status") {
-        None => Some("lease file is missing required status field".to_string()),
-        Some(Value::String(raw)) if raw.is_empty() => {
-            Some("lease file has empty status field".to_string())
+pub(crate) const LEASE_SCHEMA_VERSION: i64 = 1;
+
+pub(crate) fn lease_record_field_error(data: &Map<String, Value>) -> Option<String> {
+    let schema_version = match data.get("schema_version") {
+        None => None,
+        Some(Value::Number(number)) if number.as_i64() == Some(LEASE_SCHEMA_VERSION) => {
+            Some(LEASE_SCHEMA_VERSION)
         }
-        Some(Value::String(_)) => None,
-        Some(_) => Some("lease file has invalid status field".to_string()),
+        Some(Value::Number(number)) => {
+            return Some(format!(
+                "lease file has unsupported schema_version {}",
+                number
+            ));
+        }
+        Some(_) => return Some("lease file has invalid schema_version field".to_string()),
+    };
+    match data.get("status") {
+        None => return Some("lease file is missing required status field".to_string()),
+        Some(Value::String(raw)) if matches!(raw.as_str(), "active" | "completed" | "released") => {
+        }
+        Some(Value::String(raw)) => {
+            return Some(format!("lease file has invalid status value {raw}"));
+        }
+        Some(_) => return Some("lease file has invalid status field".to_string()),
     }
+    if let Some(value) = data.get("kind") {
+        match value.as_str() {
+            Some("task" | "bud") => {}
+            Some(raw) => return Some(format!("lease file has invalid kind value {raw}")),
+            None => return Some("lease file has invalid kind field".to_string()),
+        }
+    }
+    if let Some(value) = data.get("lease_mode") {
+        match value.as_str() {
+            Some("single" | "serial" | "parallel") => {}
+            Some(raw) => return Some(format!("lease file has invalid lease_mode value {raw}")),
+            None => return Some("lease file has invalid lease_mode field".to_string()),
+        }
+    }
+    schema_version?;
+    for key in [
+        "lease_id",
+        "kind",
+        "status",
+        "lease_mode",
+        "owner",
+        "task",
+        "task_path",
+        "started_at",
+        "heartbeat_at",
+        "base_head",
+        "packet_path",
+        "report_path",
+        "worker_reasoning_effort",
+    ] {
+        if !data.get(key).is_some_and(Value::is_string) {
+            return Some(format!("lease file has invalid or missing {key} field"));
+        }
+    }
+    for key in ["scope", "baseline_changed"] {
+        if !data.get(key).is_some_and(|value| {
+            value
+                .as_array()
+                .is_some_and(|items| items.iter().all(Value::is_string))
+        }) {
+            return Some(format!("lease file has invalid or missing {key} field"));
+        }
+    }
+    if !data.get("baseline_status").is_some_and(|value| {
+        value
+            .as_array()
+            .is_some_and(|items| items.iter().all(Value::is_object))
+    }) {
+        return Some("lease file has invalid or missing baseline_status field".to_string());
+    }
+    for key in ["baseline_fingerprints", "spec_policy"] {
+        if !data.get(key).is_some_and(Value::is_object) {
+            return Some(format!("lease file has invalid or missing {key} field"));
+        }
+    }
+    if let Some(value) = data.get("agent_id") {
+        if !value.is_string() {
+            return Some("lease file has invalid agent_id field".to_string());
+        }
+    }
+    if let Some(value) = data.get("worker_model") {
+        if !value.is_string() {
+            return Some("lease file has invalid worker_model field".to_string());
+        }
+    }
+    let effort = ReasoningEffort::from_value(data.get("worker_reasoning_effort"));
+    if !effort.is_valid() {
+        return Some("lease file has invalid worker_reasoning_effort value".to_string());
+    }
+    None
 }
 
 fn is_safe_lease_id(value: &str) -> bool {
@@ -410,6 +496,7 @@ impl LeaseRecord {
 
     pub(crate) fn new_active(input: ActiveLeaseRecordInput) -> Self {
         let mut data = Map::new();
+        insert(&mut data, "schema_version", LEASE_SCHEMA_VERSION);
         insert(&mut data, "lease_id", input.lease_id.into_string());
         insert(&mut data, "kind", LeaseKind::Task.as_str());
         insert(&mut data, "status", LeaseStatus::Active.as_str());
@@ -486,9 +573,17 @@ impl LeaseRecord {
     }
 
     pub(crate) fn has_git_baseline(&self) -> bool {
-        self.get_str("base_head")
-            .map(|value| !value.is_empty())
-            .unwrap_or(false)
+        match self.git_baseline() {
+            GitBaseline::Captured { head } => !head.is_empty(),
+            GitBaseline::Unavailable => false,
+        }
+    }
+
+    pub(crate) fn git_baseline(&self) -> GitBaseline<'_> {
+        match self.get_str("base_head").filter(|value| !value.is_empty()) {
+            Some(head) => GitBaseline::Captured { head },
+            None => GitBaseline::Unavailable,
+        }
     }
 
     pub(crate) fn owner_value(&self) -> Value {
@@ -564,6 +659,12 @@ impl LeaseRecord {
     pub(crate) fn raw(&self) -> &Map<String, Value> {
         &self.data
     }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum GitBaseline<'a> {
+    Unavailable,
+    Captured { head: &'a str },
 }
 
 impl LeaseStatus {

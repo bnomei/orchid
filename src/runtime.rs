@@ -17,8 +17,8 @@ use crate::core::{
     OrchResult, DEFAULT_STALE_AFTER,
 };
 use crate::model::{
-    lease_status_field_error, validate_lease_id, CompactLease, LeaseId, LeaseRecord,
-    ReasoningEffort,
+    lease_record_field_error, validate_lease_id, CompactLease, LeaseId, LeaseRecord,
+    ReasoningEffort, LEASE_SCHEMA_VERSION,
 };
 use crate::paths::{
     atomic_write_json, buds_dir, leases_dir, locks_dir, orch_dir, packets_dir, path_to_string,
@@ -242,7 +242,7 @@ pub(crate) fn scan_leases(root: &Path) -> OrchResult<LeaseScan> {
             ));
             continue;
         }
-        if let Some(error) = lease_status_field_error(&data) {
+        if let Some(error) = lease_record_field_error(&data) {
             corrupt_leases.push(CorruptLeaseFile::new(
                 expected_lease_id,
                 path,
@@ -279,7 +279,7 @@ pub(crate) fn load_lease(root: &Path, lease_id: &str) -> OrchResult<LeaseRecord>
         return Err(OrchError::new("invalid lease json").detail("lease_id", lease_id));
     };
     bind_lease_record_id(&mut data, lease_id)?;
-    if let Some(error) = lease_status_field_error(&data) {
+    if let Some(error) = lease_record_field_error(&data) {
         return Err(CorruptLeaseFile::new(
             lease_id,
             relpath(&path, root),
@@ -324,7 +324,54 @@ pub(crate) fn save_lease(root: &Path, lease: &LeaseRecord) -> OrchResult<()> {
     )?;
     let mut data = lease.raw().clone();
     data.retain(|key, _| !key.starts_with('_'));
+    upgrade_lease_data(&mut data, lease_id);
+    if let Some(error) = lease_record_field_error(&data) {
+        return Err(OrchError::coded(
+            "cannot save invalid lease record",
+            ErrorCode::CorruptLeaseFile,
+        )
+        .detail("lease_id", lease_id)
+        .detail("error", error));
+    }
     atomic_write_json(&path, &data)
+}
+
+fn upgrade_lease_data(data: &mut Map<String, Value>, lease_id: &str) {
+    let timestamp = data
+        .get("started_at")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(now_iso);
+    data.entry("schema_version".to_string())
+        .or_insert_with(|| Value::Number(LEASE_SCHEMA_VERSION.into()));
+    data.entry("lease_id".to_string())
+        .or_insert_with(|| Value::String(lease_id.to_string()));
+    data.entry("kind".to_string())
+        .or_insert_with(|| Value::String("task".to_string()));
+    data.entry("lease_mode".to_string())
+        .or_insert_with(|| Value::String("single".to_string()));
+    for key in ["owner", "task", "task_path", "base_head", "packet_path"] {
+        data.entry(key.to_string())
+            .or_insert_with(|| Value::String(String::new()));
+    }
+    data.entry("started_at".to_string())
+        .or_insert_with(|| Value::String(timestamp.clone()));
+    data.entry("heartbeat_at".to_string())
+        .or_insert_with(|| Value::String(timestamp));
+    data.entry("scope".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    data.entry("baseline_changed".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    data.entry("baseline_fingerprints".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    data.entry("baseline_status".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    data.entry("report_path".to_string())
+        .or_insert_with(|| Value::String(format!(".orchid/reports/{lease_id}.md")));
+    data.entry("spec_policy".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    data.entry("worker_reasoning_effort".to_string())
+        .or_insert_with(|| Value::String(ReasoningEffort::Medium.as_str().to_string()));
 }
 
 pub(crate) fn lease_stale(lease: &LeaseRecord, now: DateTime<Utc>, stale_after: TimeDelta) -> bool {

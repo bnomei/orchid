@@ -1986,7 +1986,10 @@ fn lease_runtime_and_parallel_guards_match_python_contract() {
     ]);
     assert_eq!(payload["lease_id"], "l_one");
     assert_eq!(payload["lease_mode"], "single");
-    assert!(repo.root.join(".orchid/leases/l_one.json").exists());
+    let lease_path = repo.root.join(".orchid/leases/l_one.json");
+    assert!(lease_path.exists());
+    let lease: Value = serde_json::from_str(&fs::read_to_string(lease_path).unwrap()).unwrap();
+    assert_eq!(lease["schema_version"], 1);
     assert!(!repo.root.join(".orch").exists());
     let running = repo.run_from_cwd(&["running"]);
     assert_eq!(running["leases"][0]["id"], "l_one");
@@ -3516,6 +3519,91 @@ fn lease_missing_status_is_corrupt() {
     let cleanup = repo.run(&["cleanup", "--completed"]);
     assert!(cleanup.get("closed").is_none());
     assert_eq!(cleanup["corrupt_leases"][0]["lease_id"], "l_done");
+}
+
+#[test]
+fn legacy_lease_is_upgraded_on_write_without_losing_extensions() {
+    let repo = Repo::new();
+    write_lease_json(
+        &repo,
+        "l_legacy",
+        serde_json::json!({
+            "status": "active",
+            "task": "example/T001",
+            "started_at": "2020-01-01T00:00:00Z",
+            "extension": { "keep": true }
+        }),
+    );
+
+    repo.run(&["heartbeat", "l_legacy"]);
+
+    let path = repo.root.join(".orchid/leases/l_legacy.json");
+    let lease: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(lease["schema_version"], 1);
+    assert_eq!(lease["lease_id"], "l_legacy");
+    assert_eq!(lease["kind"], "task");
+    assert_eq!(lease["lease_mode"], "single");
+    assert_eq!(lease["extension"], serde_json::json!({ "keep": true }));
+}
+
+#[test]
+fn unknown_lease_status_fails_closed_and_survives_cleanup() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_unknown",
+    ]);
+    let lease_path = repo.root.join(".orchid/leases/l_unknown.json");
+    let mut lease: Value = serde_json::from_str(&fs::read_to_string(&lease_path).unwrap()).unwrap();
+    lease["status"] = Value::String("lost".to_string());
+    fs::write(&lease_path, serde_json::to_string(&lease).unwrap()).unwrap();
+
+    let running = repo.run(&["running"]);
+    assert_eq!(running["leases"], serde_json::json!([]));
+    assert!(running["corrupt_leases"][0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("invalid status value lost"));
+    let heartbeat = repo.run_fail(&["heartbeat", "l_unknown"]);
+    assert_eq!(heartbeat["code"], "corrupt_lease_file");
+
+    let cleanup = repo.run(&["cleanup", "--completed"]);
+    assert_eq!(cleanup["corrupt_leases"][0]["lease_id"], "l_unknown");
+    assert!(lease_path.exists());
+}
+
+#[test]
+fn unsupported_lease_schema_fails_closed_and_survives_cleanup() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_future",
+    ]);
+    let lease_path = repo.root.join(".orchid/leases/l_future.json");
+    let mut lease: Value = serde_json::from_str(&fs::read_to_string(&lease_path).unwrap()).unwrap();
+    lease["schema_version"] = Value::from(2);
+    fs::write(&lease_path, serde_json::to_string(&lease).unwrap()).unwrap();
+
+    let running = repo.run(&["running"]);
+    assert!(running["corrupt_leases"][0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("unsupported schema_version 2"));
+    let heartbeat = repo.run_fail(&["heartbeat", "l_future"]);
+    assert_eq!(heartbeat["code"], "corrupt_lease_file");
+
+    repo.run(&["cleanup", "--completed"]);
+    assert!(lease_path.exists());
 }
 
 #[test]
@@ -6445,6 +6533,7 @@ fn stage_plan_keeps_old_baseline_lease_without_fingerprints_fail_closed() {
         .as_object_mut()
         .unwrap()
         .remove("baseline_fingerprints");
+    lease.as_object_mut().unwrap().remove("schema_version");
     fs::write(&lease_path, serde_json::to_string_pretty(&lease).unwrap()).unwrap();
 
     git(&repo.root, &["add", "src/feature/work.txt"]);
