@@ -1371,6 +1371,11 @@ pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<Str
         request.role,
         source_report.as_deref(),
     )?;
+    if request.role.has_source_report() {
+        if let Some(source_report) = source_report.as_deref() {
+            lease.set("source_report_path", source_report);
+        }
+    }
     save_lease(root, &lease)?;
     let mut payload = json_ok();
     insert(&mut payload, "lease_id", request.lease.clone());
@@ -1437,6 +1442,16 @@ fn resolve_packet_source_report(
         .detail("source_report_kind", report.kind().as_str()));
     }
     let expected_path = report_path_for_lease(root, lease)?;
+    let expected_report = relpath(&expected_path, root);
+    if expected_report != report_path.rel {
+        return Err(OrchError::coded(
+            "source report lease mismatch",
+            ErrorCode::ReportLeaseMismatch,
+        )
+        .detail("report", report_path.rel)
+        .detail("expected_report", expected_report)
+        .detail("lease_id", lease.id().unwrap_or("").to_string()));
+    }
     let external = report_is_external(&report_path, &expected_path);
     validate_report_binding(lease, &report, external)?;
     Ok(Some(report_display_path(root, &report_path)))
@@ -2049,7 +2064,7 @@ pub(crate) fn report_check(
     let commands = report_recommended_commands(
         lease_id,
         recommended_action,
-        (recommended_action == "validate" && external)
+        (recommended_action == "validate" && external && report.kind().is_worker())
             .then(|| report_display_path(root, &report_path)),
     );
 
@@ -2088,11 +2103,14 @@ pub(crate) fn report_check(
         insert(&mut payload, "verdict", report.validator_verdict().as_str());
     }
     if !report.kind().is_worker() {
-        insert(
-            &mut payload,
-            "source_report",
-            relpath(&report_path_for_lease(root, &lease)?, root),
-        );
+        let source_report = match lease
+            .get_str("source_report_path")
+            .filter(|path| !path.is_empty())
+        {
+            Some(path) => path.to_string(),
+            None => relpath(&report_path_for_lease(root, &lease)?, root),
+        };
+        insert(&mut payload, "source_report", source_report);
     }
     insert_worker_execution_metadata(
         &mut payload,
@@ -2157,14 +2175,14 @@ fn report_recommended_action(lease: &LeaseRecord, report: &ReportFrontmatter) ->
         },
         ReportKind::Reviewer => match report.status() {
             ReportStatus::Done => "complete",
-            ReportStatus::ReadyForValidation => "validate",
+            ReportStatus::ReadyForValidation => "none",
             ReportStatus::NeedsFix => "fix",
             ReportStatus::Blocked => "resolve_blocker",
             ReportStatus::Unknown(_) => "",
         },
         ReportKind::LoopRunner => match report.status() {
             ReportStatus::Done => "continue",
-            ReportStatus::ReadyForValidation => "validate",
+            ReportStatus::ReadyForValidation => "none",
             ReportStatus::NeedsFix => "fix",
             ReportStatus::Blocked => "resolve_blocker",
             ReportStatus::Unknown(_) => "",
