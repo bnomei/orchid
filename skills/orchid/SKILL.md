@@ -12,6 +12,10 @@ ACKs from the CLI instead of parsing generated Markdown or Git porcelain. For
 goal loops, follow the Markdown prompt printed by `orchid goal`; that command is
 Markdown-first by design.
 
+At the start of an orchestration run, call `orchid capabilities`. When it
+advertises ACK/action support, follow the returned `actions` or `commands` from
+`next` and `report-check` instead of reconstructing command arguments.
+
 ## Mayor Loop
 
 Think in this loop:
