@@ -613,6 +613,27 @@ fn baseline_path_committed_at_head(
     Ok(head_blob_oid(root, path)?.as_deref() == Some(expected))
 }
 
+fn path_matches_released_fingerprint(
+    root: &Path,
+    lease: &LeaseRecord,
+    path: &str,
+) -> OrchResult<bool> {
+    let Some(expected) = lease
+        .released_fingerprints()
+        .and_then(|fingerprints| fingerprints.get(path))
+        .and_then(Value::as_object)
+    else {
+        return Ok(false);
+    };
+    if expected.get("state").and_then(Value::as_str) == Some("absent") {
+        return Ok(!root.join(path).exists());
+    }
+    let Some(expected_oid) = expected.get("worktree_blob_oid").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    Ok(worktree_blob_oid(root, path)?.as_deref() == Some(expected_oid))
+}
+
 fn git_status_records_from_status(status: &Map<String, Value>) -> Vec<GitStatusRecord> {
     status
         .get("records")
@@ -804,19 +825,24 @@ pub(crate) fn touched_for_lease(
     let released_window: Option<BTreeSet<String>> = lease
         .released_changed()
         .map(|paths| paths.into_iter().collect());
-    let terminal_window = completed_window.as_ref().or(released_window.as_ref());
     let completed_snapshot_missing = lease.status().is_completed() && completed_window.is_none();
+    let released_snapshot_missing = lease.status().is_released()
+        && (released_window.is_none() || lease.released_fingerprints().is_none());
     let records = git_status_records_from_status(&status);
     let scope = lease.scope();
     let mut stage_paths = BTreeSet::new();
     let mut out_of_scope = BTreeSet::new();
     let mut ambiguous = BTreeSet::new();
     let mut missing_completion_snapshot = BTreeSet::new();
+    let mut missing_release_snapshot = BTreeSet::new();
+    let mut changed_after_release = BTreeSet::new();
     let mut changed_records = Vec::new();
     let mut stage_records = Vec::new();
     let mut out_of_scope_records = Vec::new();
     let mut ambiguous_records = Vec::new();
     let mut missing_completion_snapshot_records = Vec::new();
+    let mut missing_release_snapshot_records = Vec::new();
+    let mut changed_after_release_records = Vec::new();
 
     for record in records {
         let paths = record.visible_paths();
@@ -852,8 +878,35 @@ pub(crate) fn touched_for_lease(
             continue;
         }
 
-        if let Some(window) = terminal_window {
+        if released_snapshot_missing {
+            for path in paths {
+                missing_release_snapshot.insert(path);
+            }
+            missing_release_snapshot_records.push(record);
+            continue;
+        }
+
+        if let Some(window) = &completed_window {
             if !paths.iter().any(|path| window.contains(path)) {
+                continue;
+            }
+        }
+        if let Some(window) = &released_window {
+            if !paths.iter().any(|path| window.contains(path)) {
+                continue;
+            }
+            let mut unchanged = true;
+            for path in &paths {
+                if !path_matches_released_fingerprint(root, lease, path)? {
+                    unchanged = false;
+                    break;
+                }
+            }
+            if !unchanged {
+                for path in paths {
+                    changed_after_release.insert(path);
+                }
+                changed_after_release_records.push(record);
                 continue;
             }
         }
@@ -908,6 +961,16 @@ pub(crate) fn touched_for_lease(
         "completion_snapshot_missing",
         missing_completion_snapshot.iter().cloned().collect(),
     );
+    insert_array_if_non_empty(
+        &mut blocked_by,
+        "release_snapshot_missing",
+        missing_release_snapshot.iter().cloned().collect(),
+    );
+    insert_array_if_non_empty(
+        &mut blocked_by,
+        "changed_after_release",
+        changed_after_release.iter().cloned().collect(),
+    );
     if !blocked_by.is_empty() {
         map.insert("blocked_by".to_string(), Value::Object(blocked_by));
     }
@@ -923,6 +986,16 @@ pub(crate) fn touched_for_lease(
         "completion_snapshot_missing",
         &missing_completion_snapshot_records,
     );
+    insert_records_value_if_non_empty(
+        &mut blocked_by_records,
+        "release_snapshot_missing",
+        &missing_release_snapshot_records,
+    );
+    insert_records_value_if_non_empty(
+        &mut blocked_by_records,
+        "changed_after_release",
+        &changed_after_release_records,
+    );
     if !blocked_by_records.is_empty() {
         map.insert(
             "blocked_by_records".to_string(),
@@ -933,7 +1006,14 @@ pub(crate) fn touched_for_lease(
     if completed_snapshot_missing {
         map.insert("completion_snapshot_missing".to_string(), Value::Bool(true));
     }
-    if !out_of_scope.is_empty() || !ambiguous.is_empty() || !missing_completion_snapshot.is_empty()
+    if released_snapshot_missing {
+        map.insert("release_snapshot_missing".to_string(), Value::Bool(true));
+    }
+    if !out_of_scope.is_empty()
+        || !ambiguous.is_empty()
+        || !missing_completion_snapshot.is_empty()
+        || !missing_release_snapshot.is_empty()
+        || !changed_after_release.is_empty()
     {
         map.insert("safe_to_stage".to_string(), Value::Bool(false));
     }

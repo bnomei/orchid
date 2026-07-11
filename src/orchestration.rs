@@ -1042,6 +1042,12 @@ pub(crate) fn release(root: &Path, lease_id: &str, reason: &str) -> OrchResult<M
     }
     let released_status = git_status_data(root)?;
     apply_released_changed_snapshot(&mut lease, &released_status);
+    if released_status.get("git").and_then(Value::as_bool) == Some(true) {
+        lease.set(
+            "released_fingerprints",
+            baseline_fingerprints_value(root, &released_status)?,
+        );
+    }
     save_lease(root, &lease)?;
     let mut payload = json_ok();
     insert(&mut payload, "lease_id", lease_id);

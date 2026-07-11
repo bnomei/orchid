@@ -184,6 +184,12 @@ pub(crate) fn lease_record_field_error(data: &Map<String, Value>) -> Option<Stri
             return Some(format!("lease file has invalid or missing {key} field"));
         }
     }
+    if data
+        .get("released_fingerprints")
+        .is_some_and(|value| !value.is_object())
+    {
+        return Some("lease file has invalid released_fingerprints field".to_string());
+    }
     if let Some(value) = data.get("agent_id") {
         if !value.is_string() {
             return Some("lease file has invalid agent_id field".to_string());
@@ -654,6 +660,10 @@ impl LeaseRecord {
     pub(crate) fn released_changed(&self) -> Option<Vec<String>> {
         self.get("released_changed")
             .map(|value| string_list(Some(value)))
+    }
+
+    pub(crate) fn released_fingerprints(&self) -> Option<&Map<String, Value>> {
+        self.get("released_fingerprints").and_then(Value::as_object)
     }
 
     pub(crate) fn report_path(&self) -> Option<&str> {

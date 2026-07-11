@@ -6824,6 +6824,9 @@ fn git_touched_and_stage_plan_attribute_released_lease_window() {
         lease["released_changed"],
         serde_json::json!(["src/feature/work.txt"])
     );
+    assert!(
+        lease["released_fingerprints"]["src/feature/work.txt"]["worktree_blob_oid"].is_string()
+    );
 
     let touched = repo.run(&["git-touched", "--lease", "l_x"]);
     assert_eq!(
@@ -6866,6 +6869,77 @@ fn released_lease_attribution_still_rejects_out_of_scope_work() {
     assert_eq!(
         touched["blocked_by"]["out_of_scope"],
         serde_json::json!(["src/other/work.txt"])
+    );
+    assert!(touched.get("stage").is_none());
+}
+
+#[test]
+fn released_lease_attribution_rejects_edits_to_captured_paths() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_released_modified",
+    ]);
+    fs::write(repo.root.join("src/feature/work.txt"), "at release\n").unwrap();
+    repo.run(&["release", "l_released_modified", "--reason", "abandoned"]);
+    fs::write(
+        repo.root.join("src/feature/work.txt"),
+        "modified after release\n",
+    )
+    .unwrap();
+
+    let touched = repo.run(&["git-touched", "--lease", "l_released_modified"]);
+    assert_eq!(touched["safe_to_stage"], false);
+    assert_eq!(
+        touched["blocked_by"]["changed_after_release"],
+        serde_json::json!(["src/feature/work.txt"])
+    );
+    assert!(touched.get("stage").is_none());
+
+    let next = repo.run(&["next", "--spec", "example"]);
+    assert_eq!(next["phase"], "stage");
+    assert_eq!(
+        next["stage"][0]["excluded"]["changed_after_release"],
+        serde_json::json!(["src/feature/work.txt"])
+    );
+}
+
+#[test]
+fn legacy_released_lease_without_snapshot_fails_closed() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_released_legacy",
+    ]);
+    fs::write(repo.root.join("src/feature/work.txt"), "at release\n").unwrap();
+    repo.run(&["release", "l_released_legacy", "--reason", "abandoned"]);
+    let lease_path = repo.root.join(".orchid/leases/l_released_legacy.json");
+    let mut lease: Value = serde_json::from_str(&fs::read_to_string(&lease_path).unwrap()).unwrap();
+    lease.as_object_mut().unwrap().remove("released_changed");
+    lease
+        .as_object_mut()
+        .unwrap()
+        .remove("released_fingerprints");
+    fs::write(&lease_path, serde_json::to_string(&lease).unwrap()).unwrap();
+
+    let touched = repo.run(&["git-touched", "--lease", "l_released_legacy"]);
+    assert_eq!(touched["safe_to_stage"], false);
+    assert_eq!(touched["release_snapshot_missing"], true);
+    assert_eq!(
+        touched["blocked_by"]["release_snapshot_missing"],
+        serde_json::json!(["src/feature/work.txt"])
     );
     assert!(touched.get("stage").is_none());
 }
