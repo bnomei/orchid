@@ -4339,7 +4339,7 @@ fn malformed_versioned_context_snapshot_fails_closed() {
 
 #[test]
 fn tampered_context_snapshot_content_or_revision_fails_closed() {
-    for mutation in ["content", "revision"] {
+    for mutation in ["content", "revision", "schema_downgrade"] {
         let repo = Repo::new();
         repo.run(&[
             "lease",
@@ -4356,6 +4356,10 @@ fn tampered_context_snapshot_content_or_revision_fails_closed() {
         match mutation {
             "content" => lease["context_snapshot"]["requirements"] = Value::from("tampered\n"),
             "revision" => lease["context_snapshot"]["revision"] = Value::from("banana"),
+            "schema_downgrade" => {
+                lease.as_object_mut().unwrap().remove("schema_version");
+                lease["context_snapshot"]["requirements"] = Value::from("tampered\n");
+            }
             _ => unreachable!(),
         }
         fs::write(&lease_path, serde_json::to_string(&lease).unwrap()).unwrap();

@@ -117,6 +117,57 @@ fn hex_bytes(bytes: &[u8]) -> String {
     output
 }
 
+fn lease_context_snapshot_field_error(data: &Map<String, Value>) -> Option<String> {
+    let snapshot = data.get("context_snapshot")?;
+    let Some(snapshot) = snapshot.as_object() else {
+        return Some("lease file has invalid context_snapshot field".to_string());
+    };
+    if snapshot.get("schema_version").and_then(Value::as_i64) != Some(LEASE_CONTEXT_SCHEMA_VERSION)
+    {
+        return Some("lease file has invalid context snapshot schema_version".to_string());
+    }
+    let Some(kind) = snapshot.get("kind").and_then(Value::as_str) else {
+        return Some("lease file has invalid context snapshot kind".to_string());
+    };
+    let outer_kind = data.get("kind").and_then(Value::as_str).unwrap_or("task");
+    if kind != outer_kind {
+        return Some("lease file context snapshot kind does not match lease kind".to_string());
+    }
+    let Some(revision) = snapshot.get("revision").and_then(Value::as_str) else {
+        return Some("lease file has invalid context snapshot revision".to_string());
+    };
+    let required = match kind {
+        "task" => ["task_source", "requirements", "design"].as_slice(),
+        "bud" => ["instructions"].as_slice(),
+        _ => return Some("lease file has invalid context snapshot kind".to_string()),
+    };
+    if let Some(key) = required
+        .iter()
+        .find(|key| !snapshot.get(**key).is_some_and(Value::is_string))
+    {
+        return Some(format!(
+            "lease file has invalid context snapshot {key} field"
+        ));
+    }
+    let expected_revision = match kind {
+        "task" => lease_context_revision(
+            kind,
+            &[
+                ("task_source", snapshot["task_source"].as_str().unwrap()),
+                ("requirements", snapshot["requirements"].as_str().unwrap()),
+                ("design", snapshot["design"].as_str().unwrap()),
+            ],
+        ),
+        "bud" => lease_context_revision(
+            kind,
+            &[("instructions", snapshot["instructions"].as_str().unwrap())],
+        ),
+        _ => unreachable!(),
+    };
+    (revision != expected_revision)
+        .then(|| "lease file has invalid context snapshot revision".to_string())
+}
+
 pub(crate) fn lease_record_field_error(data: &Map<String, Value>) -> Option<String> {
     let schema_version = match data.get("schema_version") {
         None => None,
@@ -153,6 +204,9 @@ pub(crate) fn lease_record_field_error(data: &Map<String, Value>) -> Option<Stri
             Some(raw) => return Some(format!("lease file has invalid lease_mode value {raw}")),
             None => return Some("lease file has invalid lease_mode field".to_string()),
         }
+    }
+    if let Some(error) = lease_context_snapshot_field_error(data) {
+        return Some(error);
     }
     schema_version?;
     for key in [
@@ -217,57 +271,6 @@ pub(crate) fn lease_record_field_error(data: &Map<String, Value>) -> Option<Stri
         .is_some_and(|value| !value.is_object())
     {
         return Some("lease file has invalid released_fingerprints field".to_string());
-    }
-    if let Some(snapshot) = data.get("context_snapshot") {
-        let Some(snapshot) = snapshot.as_object() else {
-            return Some("lease file has invalid context_snapshot field".to_string());
-        };
-        if snapshot.get("schema_version").and_then(Value::as_i64)
-            != Some(LEASE_CONTEXT_SCHEMA_VERSION)
-        {
-            return Some("lease file has invalid context snapshot schema_version".to_string());
-        }
-        let Some(kind) = snapshot.get("kind").and_then(Value::as_str) else {
-            return Some("lease file has invalid context snapshot kind".to_string());
-        };
-        let outer_kind = data.get("kind").and_then(Value::as_str).unwrap_or("task");
-        if kind != outer_kind {
-            return Some("lease file context snapshot kind does not match lease kind".to_string());
-        }
-        let Some(revision) = snapshot.get("revision").and_then(Value::as_str) else {
-            return Some("lease file has invalid context snapshot revision".to_string());
-        };
-        let required = match kind {
-            "task" => ["task_source", "requirements", "design"].as_slice(),
-            "bud" => ["instructions"].as_slice(),
-            _ => return Some("lease file has invalid context snapshot kind".to_string()),
-        };
-        if let Some(key) = required
-            .iter()
-            .find(|key| !snapshot.get(**key).is_some_and(Value::is_string))
-        {
-            return Some(format!(
-                "lease file has invalid context snapshot {key} field"
-            ));
-        }
-        let expected_revision = match kind {
-            "task" => lease_context_revision(
-                kind,
-                &[
-                    ("task_source", snapshot["task_source"].as_str().unwrap()),
-                    ("requirements", snapshot["requirements"].as_str().unwrap()),
-                    ("design", snapshot["design"].as_str().unwrap()),
-                ],
-            ),
-            "bud" => lease_context_revision(
-                kind,
-                &[("instructions", snapshot["instructions"].as_str().unwrap())],
-            ),
-            _ => unreachable!(),
-        };
-        if revision != expected_revision {
-            return Some("lease file has invalid context snapshot revision".to_string());
-        }
     }
     if let Some(value) = data.get("agent_id") {
         if !value.is_string() {
