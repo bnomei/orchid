@@ -3284,8 +3284,9 @@ fn bud_packet_complete_git_and_cleanup_lifecycle_work() {
     assert!(next.get("reports_ready").is_none());
     assert!(next.get("cmds").is_none());
     let next_all = repo.run(&["next", "--all-open"]);
-    assert_eq!(next_all["phase"], "validate");
-    assert_eq!(next_all["reports_ready"][0]["task"], "bud:l_bud");
+    assert_eq!(next_all["phase"], "wait");
+    assert!(next_all.get("reports_ready").is_none());
+    assert!(next_all.get("cmds").is_none());
     let report = repo.run(&["report-check", ".orchid/reports/l_bud.md"]);
     assert_eq!(report["lease_id"], "l_bud");
     assert_eq!(report["task"], "bud:l_bud");
@@ -4751,6 +4752,141 @@ fn next_spec_does_not_surface_foreign_spec_cleanup() {
     assert_eq!(other["phase"], "stage");
     assert_eq!(other["stage"][0]["lease_id"], "l_other");
     assert_eq!(other["stage"][0]["git"], false);
+}
+
+#[test]
+fn next_selectors_do_not_advance_unrelated_bud_reports() {
+    let repo = Repo::new();
+    let instructions = repo.root.join("bud-instructions.md");
+    fs::write(&instructions, "Independent report-ready bud.\n").unwrap();
+    let bud = repo.run(&[
+        "bud",
+        "--title",
+        "Independent report-ready bud",
+        "--scope",
+        "src/other/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_bud_report",
+    ]);
+    fs::write(
+        repo.root.join(bud["report"].as_str().unwrap()),
+        "+++\nlease_id = \"l_bud_report\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
+    )
+    .unwrap();
+
+    for args in [
+        &["next", "--spec", "example"][..],
+        &["next", "--all-open"][..],
+    ] {
+        let payload = repo.run(args);
+        assert_eq!(payload["phase"], "dispatch");
+        assert!(payload.get("reports_ready").is_none());
+        assert_eq!(
+            payload["cmd"].as_array().unwrap().last().unwrap(),
+            "--allow-parallel"
+        );
+    }
+}
+
+#[test]
+fn next_selectors_do_not_recover_unrelated_stale_buds() {
+    let repo = Repo::new();
+    let instructions = repo.root.join("bud-instructions.md");
+    fs::write(&instructions, "Independent stale bud.\n").unwrap();
+    repo.run(&[
+        "bud",
+        "--title",
+        "Independent stale bud",
+        "--scope",
+        "src/other/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_bud_stale",
+    ]);
+    let lease_path = repo.root.join(".orchid/leases/l_bud_stale.json");
+    let mut lease: Value = serde_json::from_str(&fs::read_to_string(&lease_path).unwrap()).unwrap();
+    lease["started_at"] = Value::String("2020-01-01T00:00:00Z".to_string());
+    lease["heartbeat_at"] = Value::String("2020-01-01T00:00:00Z".to_string());
+    fs::write(&lease_path, serde_json::to_string(&lease).unwrap()).unwrap();
+
+    for args in [
+        &["next", "--spec", "example", "--older-than", "1m"][..],
+        &["next", "--all-open", "--older-than", "1m"][..],
+    ] {
+        let payload = repo.run(args);
+        assert_eq!(payload["phase"], "dispatch");
+        assert!(payload.get("stale").is_none());
+        assert_eq!(
+            payload["cmd"].as_array().unwrap().last().unwrap(),
+            "--allow-parallel"
+        );
+    }
+}
+
+#[test]
+fn next_selectors_do_not_stage_or_clean_unrelated_completed_buds() {
+    let repo = Repo::new();
+    let instructions = repo.root.join("bud-instructions.md");
+    fs::write(&instructions, "Independent completed bud.\n").unwrap();
+    repo.run(&[
+        "bud",
+        "--title",
+        "Independent completed bud",
+        "--scope",
+        "src/other/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_bud_done",
+    ]);
+    repo.run(&[
+        "complete",
+        "--lease",
+        "l_bud_done",
+        "--verified-by",
+        "mayor",
+    ]);
+
+    for args in [
+        &["next", "--spec", "example"][..],
+        &["next", "--all-open"][..],
+    ] {
+        let payload = repo.run(args);
+        assert_eq!(payload["phase"], "dispatch");
+        assert!(payload.get("stage").is_none());
+        assert!(payload.get("cleanup").is_none());
+    }
+}
+
+#[test]
+fn next_selectors_do_not_clean_unrelated_released_buds() {
+    let repo = Repo::new();
+    let instructions = repo.root.join("bud-instructions.md");
+    fs::write(&instructions, "Independent released bud.\n").unwrap();
+    repo.run(&[
+        "bud",
+        "--title",
+        "Independent released bud",
+        "--scope",
+        "src/other/",
+        "--instructions",
+        instructions.to_str().unwrap(),
+        "--lease-id",
+        "l_bud_released",
+    ]);
+    repo.run(&["release", "l_bud_released", "--reason", "paused"]);
+
+    for args in [
+        &["next", "--spec", "example"][..],
+        &["next", "--all-open"][..],
+    ] {
+        let payload = repo.run(args);
+        assert_eq!(payload["phase"], "dispatch");
+        assert!(payload.get("cleanup").is_none());
+    }
 }
 
 #[test]

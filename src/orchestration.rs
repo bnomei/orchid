@@ -689,6 +689,7 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
     )?;
     let stale = active
         .iter()
+        .filter(|lease| lease_in_selected_queue(lease, &selected_specs))
         .filter(|lease| lease_stale(lease, now, stale_after))
         .filter(|lease| {
             !report_path_for_lease(root, lease)
@@ -698,13 +699,8 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
         .map(|lease| compact_lease(lease, Some(now), Some(stale_after)))
         .collect::<OrchResult<Vec<_>>>()?;
     let mut reports_ready = Vec::new();
-    let spec_scoped = specs_arg(&request.specs).is_some();
     for lease in &active {
-        if lease.is_bud() {
-            if spec_scoped {
-                continue;
-            }
-        } else if !lease_in_selected_specs(lease, &selected_specs) {
+        if !lease_in_selected_queue(lease, &selected_specs) {
             continue;
         }
         let report = report_path_for_lease(root, lease)?;
@@ -723,11 +719,11 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
     }
     let completed: Vec<_> = completed_runtime_leases(root)?
         .into_iter()
-        .filter(|lease| lease.is_bud() || lease_in_selected_specs(lease, &selected_specs))
+        .filter(|lease| lease_in_selected_queue(lease, &selected_specs))
         .collect();
     let cleanup_leases: Vec<_> = cleanup_runtime_leases(root)?
         .into_iter()
-        .filter(|lease| lease.is_bud() || lease_in_selected_specs(lease, &selected_specs))
+        .filter(|lease| lease_in_selected_queue(lease, &selected_specs))
         .collect();
     let stage = completed
         .iter()
@@ -2094,6 +2090,10 @@ fn lease_in_selected_specs(lease: &LeaseRecord, selected_specs: &[String]) -> bo
     let task = lease.get_str("task").unwrap_or("");
     let spec = task.split_once('/').map(|(spec, _)| spec).unwrap_or("");
     !spec.is_empty() && selected_specs.iter().any(|selected| selected == spec)
+}
+
+fn lease_in_selected_queue(lease: &LeaseRecord, selected_specs: &[String]) -> bool {
+    !lease.is_bud() && lease_in_selected_specs(lease, selected_specs)
 }
 
 fn specs_arg(specs: &[String]) -> Option<&[String]> {
