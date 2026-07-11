@@ -552,6 +552,9 @@ pub(crate) fn baseline_fingerprints_value(
             if let Some(oid) = worktree_blob_oid(root, &path)? {
                 entry.insert("worktree_blob_oid".to_string(), Value::String(oid));
             }
+            if let Some(mode) = worktree_git_mode(root, &path)? {
+                entry.insert("worktree_mode".to_string(), Value::String(mode));
+            }
         } else {
             entry.insert("state".to_string(), Value::String("absent".to_string()));
         }
@@ -570,6 +573,38 @@ fn worktree_blob_oid(root: &Path, path: &str) -> OrchResult<Option<String>> {
         .trim()
         .to_string();
     Ok((!oid.is_empty()).then_some(oid))
+}
+
+/// Return the only regular-file mode bit Git tracks in a worktree.
+///
+/// Git distinguishes executable files (`100755`) from ordinary files (`100644`)
+/// even though both have the same blob object id. Capture it alongside the blob
+/// so a released lease cannot later stage an executable-bit change made by
+/// another actor.
+fn worktree_git_mode(root: &Path, path: &str) -> OrchResult<Option<String>> {
+    let metadata = match std::fs::metadata(root.join(path)) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) | Err(_) => return Ok(None),
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        Ok(Some(
+            if metadata.permissions().mode() & 0o111 == 0 {
+                "100644"
+            } else {
+                "100755"
+            }
+            .to_string(),
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        // Git does not track a usable executable bit on these worktrees.
+        Ok(Some("100644".to_string()))
+    }
 }
 
 fn head_blob_oid(root: &Path, path: &str) -> OrchResult<Option<String>> {
@@ -631,7 +666,13 @@ fn path_matches_released_fingerprint(
     let Some(expected_oid) = expected.get("worktree_blob_oid").and_then(Value::as_str) else {
         return Ok(false);
     };
-    Ok(worktree_blob_oid(root, path)?.as_deref() == Some(expected_oid))
+    let Some(expected_mode) = expected.get("worktree_mode").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    Ok(
+        worktree_blob_oid(root, path)?.as_deref() == Some(expected_oid)
+            && worktree_git_mode(root, path)?.as_deref() == Some(expected_mode),
+    )
 }
 
 fn git_status_records_from_status(status: &Map<String, Value>) -> Vec<GitStatusRecord> {

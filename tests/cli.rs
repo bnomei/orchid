@@ -7797,6 +7797,11 @@ fn git_touched_and_stage_plan_attribute_released_lease_window() {
     assert!(
         lease["released_fingerprints"]["src/feature/work.txt"]["worktree_blob_oid"].is_string()
     );
+    #[cfg(unix)]
+    assert_eq!(
+        lease["released_fingerprints"]["src/feature/work.txt"]["worktree_mode"],
+        "100644"
+    );
 
     let touched = repo.run(&["git-touched", "--lease", "l_x"]);
     assert_eq!(
@@ -7878,6 +7883,58 @@ fn released_lease_attribution_rejects_edits_to_captured_paths() {
         next["stage"][0]["excluded"]["changed_after_release"],
         serde_json::json!(["src/feature/work.txt"])
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn released_lease_attribution_rejects_later_executable_bit_changes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = Repo::new();
+    repo.init_git();
+    git(&repo.root, &["config", "core.fileMode", "true"]);
+    let path = repo.root.join("src/feature/work.txt");
+    fs::write(&path, "baseline\n").unwrap();
+    git(&repo.root, &["add", "src/feature/work.txt"]);
+    git(&repo.root, &["commit", "-m", "track work file"]);
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_released_mode",
+    ]);
+    fs::write(&path, "at release\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    repo.run(&["release", "l_released_mode", "--reason", "abandoned"]);
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_released_mode.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        lease["released_fingerprints"]["src/feature/work.txt"]["worktree_mode"],
+        "100644"
+    );
+    let permissions = fs::metadata(&path).unwrap().permissions();
+    fs::set_permissions(
+        &path,
+        fs::Permissions::from_mode(permissions.mode() | 0o111),
+    )
+    .unwrap();
+
+    let touched = repo.run(&["git-touched", "--lease", "l_released_mode"]);
+    assert_eq!(touched["safe_to_stage"], false);
+    assert_eq!(
+        touched["blocked_by"]["changed_after_release"],
+        serde_json::json!(["src/feature/work.txt"])
+    );
+    assert!(touched.get("stage").is_none());
+
+    let plan = repo.run(&["git-stage-plan", "--lease", "l_released_mode"]);
+    assert_eq!(plan["safe_to_stage"], false);
+    assert!(plan.get("pathspecs").is_none());
 }
 
 #[test]
