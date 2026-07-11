@@ -451,10 +451,12 @@ mod tests {
             task: Value::String("example/T001".to_string()),
             owner: Value::String("worker:agent_123".to_string()),
             kind: "task".to_string(),
+            scope: vec!["src/feature/".to_string()],
             agent_id: None,
             worker_reasoning_effort: "medium".to_string(),
             worker_model: None,
             mode: mode.to_string(),
+            heartbeat_at: Some("2020-01-01T00:00:00Z".to_string()),
             age: 0,
             stale: false,
         }

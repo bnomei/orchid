@@ -320,7 +320,9 @@ fn normalize_value(value: &mut Value) {
             for (key, item) in map {
                 match key.as_str() {
                     "started_at" | "heartbeat_at" | "released_at" | "completed_at"
-                    | "blocked_at" => *item = Value::String("<timestamp>".to_string()),
+                    | "blocked_at" | "snapshot_at" => {
+                        *item = Value::String("<timestamp>".to_string())
+                    }
                     "age_seconds" | "heartbeat_age_seconds" => {
                         *item = Value::String("<age>".to_string())
                     }
@@ -1923,6 +1925,49 @@ fn status_all_open_echoes_selected_and_skipped_specs() {
         all_open["skipped_inactive_specs"],
         serde_json::json!(["DONE-99-closed"])
     );
+}
+
+#[test]
+fn status_scopes_active_counts_and_ids_to_selected_specs() {
+    let repo = Repo::new();
+    repo.write_task_file("other", "T001", "todo", "src/other/");
+    repo.run(&[
+        "lease",
+        "other",
+        "T001",
+        "--owner",
+        "worker:other",
+        "--lease-id",
+        "l_other",
+    ]);
+
+    let scoped = repo.run(&["status", "--spec", "example"]);
+    assert_eq!(scoped["active"], 0);
+    assert_eq!(scoped["active_global"], 1);
+    assert!(scoped.get("active_leases").is_none());
+
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:example",
+        "--lease-id",
+        "l_example",
+        "--allow-parallel",
+    ]);
+    let scoped = repo.run(&["status", "--spec", "example"]);
+    assert_eq!(scoped["active"], 1);
+    assert_eq!(scoped["active_global"], 2);
+    assert_eq!(scoped["active_leases"], serde_json::json!(["l_example"]));
+
+    let global = repo.run(&["status"]);
+    assert_eq!(global["active"], 2);
+    assert_eq!(
+        global["active_leases"],
+        serde_json::json!(["l_example", "l_other"])
+    );
+    assert!(global.get("active_global").is_none());
 }
 
 #[test]
@@ -3769,6 +3814,18 @@ fn corrupt_lease_file_warns_but_keeps_aggregate_status_online() {
 
     let running = repo.run(&["running"]);
     assert_eq!(running["leases"][0]["id"], "l_real");
+    assert_eq!(
+        running["leases"][0]["scope"],
+        serde_json::json!(["src/feature/"])
+    );
+    assert_eq!(running["leases"][0]["heartbeat_at"], "2020-01-01T00:00:00Z");
+    let running_snapshot =
+        chrono::DateTime::parse_from_rfc3339(running["snapshot_at"].as_str().unwrap()).unwrap();
+    let heartbeat = chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z").unwrap();
+    assert_eq!(
+        running["leases"][0]["age"],
+        (running_snapshot - heartbeat).num_seconds()
+    );
     assert_eq!(running["corrupt_leases"][0]["lease_id"], "l_ghost");
     assert_eq!(
         running["corrupt_leases"][0]["path"],
@@ -3778,6 +3835,16 @@ fn corrupt_lease_file_warns_but_keeps_aggregate_status_online() {
 
     let stale = repo.run(&["stale", "--older-than", "30m"]);
     assert_eq!(stale["stale"][0]["id"], "l_real");
+    assert_eq!(
+        stale["stale"][0]["scope"],
+        serde_json::json!(["src/feature/"])
+    );
+    let stale_snapshot =
+        chrono::DateTime::parse_from_rfc3339(stale["snapshot_at"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        stale["stale"][0]["age"],
+        (stale_snapshot - heartbeat).num_seconds()
+    );
     assert_eq!(stale["corrupt_leases"][0]["lease_id"], "l_ghost");
 
     let status = repo.run(&["status"]);

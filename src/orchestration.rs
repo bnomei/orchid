@@ -7,13 +7,10 @@ use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Value};
 
-use crate::core::{
-    insert, json_ok, now_iso, parse_duration, parse_iso_datetime_str, value_to_string, ErrorCode,
-    OrchError, OrchResult,
-};
+use crate::core::{insert, json_ok, now_iso, parse_duration, ErrorCode, OrchError, OrchResult};
 use crate::gitstate::{
     append_completed_changed_path, apply_completed_changed_snapshot,
     apply_released_changed_snapshot, baseline_fingerprints_value, changed_paths_value,
@@ -258,7 +255,17 @@ pub(crate) fn status(root: &Path, request: &StatusRequest) -> OrchResult<Map<Str
     };
     let counts = nonzero_counts(selected_task_counts(&tasks));
     let active_scan = active_leases_lenient(root)?;
-    let active = active_scan.leases.len();
+    let active_global = active_scan.leases.len();
+    let scoped = !selected_specs.is_empty();
+    let selected_active: Vec<&LeaseRecord> = if scoped {
+        active_scan
+            .leases
+            .iter()
+            .filter(|lease| lease_in_selected_specs(lease, &selected_specs))
+            .collect()
+    } else {
+        active_scan.leases.iter().collect()
+    };
     let mut payload = json_ok();
     insert(&mut payload, "tasks", tasks.len() as i64);
     insert(&mut payload, "counts", Value::Object(counts));
@@ -271,9 +278,22 @@ pub(crate) fn status(root: &Path, request: &StatusRequest) -> OrchResult<Map<Str
             string_values(inactive_spec_names(root)?),
         );
     }
-    if active != 0 {
-        insert(&mut payload, "active", active as i64);
+    if scoped || !selected_active.is_empty() {
+        insert(&mut payload, "active", selected_active.len() as i64);
     }
+    if scoped {
+        insert(&mut payload, "active_global", active_global as i64);
+    }
+    insert_non_empty(
+        &mut payload,
+        "active_leases",
+        Value::Array(
+            selected_active
+                .into_iter()
+                .filter_map(|lease| lease.id().map(|id| Value::String(id.to_string())))
+                .collect(),
+        ),
+    );
     Ok(payload)
 }
 
@@ -763,7 +783,7 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
                 .to_string(),
         })
         .collect();
-    Ok(decide_next(NextInput {
+    let mut payload = decide_next(NextInput {
         stale,
         reports_ready,
         active: active
@@ -778,7 +798,9 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
         older_than: request.older_than.clone(),
         explain: request.explain,
     })
-    .to_payload())
+    .to_payload();
+    insert(&mut payload, "snapshot_at", snapshot_timestamp(now));
+    Ok(payload)
 }
 
 pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map<String, Value>> {
@@ -988,37 +1010,40 @@ pub(crate) fn heartbeat(root: &Path, lease_id: &str) -> OrchResult<Map<String, V
 
 pub(crate) fn running(root: &Path) -> OrchResult<Map<String, Value>> {
     let active = active_leases_lenient(root)?;
+    let now = Utc::now();
     let mut payload = json_ok();
-    insert(&mut payload, "leases", compact_leases(active.leases)?);
+    insert(&mut payload, "snapshot_at", snapshot_timestamp(now));
+    insert(
+        &mut payload,
+        "leases",
+        compact_leases_at(&active.leases, now)?,
+    );
     insert_corrupt_leases(&mut payload, &active.corrupt_leases);
     Ok(payload)
 }
 
 pub(crate) fn stale(root: &Path, older_than: &str) -> OrchResult<Map<String, Value>> {
-    let cutoff = Utc::now() - parse_duration(older_than)?;
-    let epoch = Utc.timestamp_opt(0, 0).single().unwrap();
-    let mut stale = Vec::new();
+    let stale_after = parse_duration(older_than)?;
+    let now = Utc::now();
     let active = active_leases_lenient(root)?;
-    for lease in active.leases {
-        let raw = lease
-            .heartbeat_or_started()
-            .and_then(value_to_string)
-            .unwrap_or_default();
-        let heartbeat = parse_iso_datetime_str(&raw).unwrap_or(epoch);
-        if heartbeat < cutoff {
-            let mut item = Map::new();
-            item.insert("id".to_string(), lease.id_value());
-            item.insert("task".to_string(), lease.task_value());
-            insert(
-                &mut item,
-                "age",
-                (Utc::now() - heartbeat).num_seconds().max(0),
-            );
-            stale.push(item);
-        }
-    }
+    let stale = active
+        .leases
+        .iter()
+        .filter(|lease| lease_stale(lease, now, stale_after))
+        .map(|lease| compact_lease(lease, Some(now), Some(stale_after)))
+        .collect::<OrchResult<Vec<_>>>()?;
     let mut payload = json_ok();
-    insert(&mut payload, "stale", objects_array(stale));
+    insert(&mut payload, "snapshot_at", snapshot_timestamp(now));
+    insert(
+        &mut payload,
+        "stale",
+        Value::Array(
+            stale
+                .into_iter()
+                .map(|lease| Value::Object(lease.to_payload()))
+                .collect(),
+        ),
+    );
     insert_corrupt_leases(&mut payload, &active.corrupt_leases);
     Ok(payload)
 }
@@ -1835,14 +1860,22 @@ pub(crate) fn lint(root: &Path) -> OrchResult<Map<String, Value>> {
 }
 
 fn compact_leases(leases: Vec<LeaseRecord>) -> OrchResult<Value> {
+    compact_leases_at(&leases, Utc::now())
+}
+
+fn compact_leases_at(leases: &[LeaseRecord], now: DateTime<Utc>) -> OrchResult<Value> {
     Ok(Value::Array(
         leases
             .iter()
             .map(|lease| {
-                compact_lease(lease, None, None).map(|lease| Value::Object(lease.to_payload()))
+                compact_lease(lease, Some(now), None).map(|lease| Value::Object(lease.to_payload()))
             })
             .collect::<OrchResult<Vec<_>>>()?,
     ))
+}
+
+fn snapshot_timestamp(now: DateTime<Utc>) -> String {
+    now.to_rfc3339_opts(SecondsFormat::Secs, false)
 }
 
 fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value>> {

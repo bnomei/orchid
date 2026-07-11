@@ -716,10 +716,12 @@ pub(crate) struct CompactLease {
     pub(crate) task: Value,
     pub(crate) owner: Value,
     pub(crate) kind: String,
+    pub(crate) scope: Vec<String>,
     pub(crate) agent_id: Option<String>,
     pub(crate) worker_reasoning_effort: String,
     pub(crate) worker_model: Option<String>,
     pub(crate) mode: String,
+    pub(crate) heartbeat_at: Option<String>,
     pub(crate) age: i64,
     pub(crate) stale: bool,
 }
@@ -732,6 +734,9 @@ impl CompactLease {
         map.insert("owner".to_string(), self.owner.clone());
         if self.kind != "task" {
             insert(&mut map, "kind", self.kind.clone());
+        }
+        if !self.scope.is_empty() {
+            insert(&mut map, "scope", string_values(self.scope.clone()));
         }
         if let Some(agent_id) = &self.agent_id {
             insert(&mut map, "agent_id", agent_id.clone());
@@ -747,6 +752,9 @@ impl CompactLease {
         insert(&mut map, "age", self.age);
         if self.mode != "single" {
             insert(&mut map, "mode", self.mode.clone());
+        }
+        if let Some(heartbeat_at) = &self.heartbeat_at {
+            insert(&mut map, "heartbeat_at", heartbeat_at.clone());
         }
         if self.stale {
             insert(&mut map, "stale", true);

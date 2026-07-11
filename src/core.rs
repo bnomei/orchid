@@ -268,15 +268,6 @@ pub(crate) fn parse_iso_datetime(value: Option<&Value>) -> Option<DateTime<Utc>>
         .map(|stamp| stamp.with_timezone(&Utc))
 }
 
-pub(crate) fn parse_iso_datetime_str(raw: &str) -> Option<DateTime<Utc>> {
-    if raw.is_empty() {
-        return None;
-    }
-    DateTime::parse_from_rfc3339(raw)
-        .ok()
-        .map(|stamp| stamp.with_timezone(&Utc))
-}
-
 pub(crate) fn elapsed_seconds(value: Option<&Value>, now: DateTime<Utc>) -> i64 {
     parse_iso_datetime(value)
         .map(|stamp| (now - stamp).num_seconds().max(0))

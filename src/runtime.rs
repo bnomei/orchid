@@ -13,8 +13,8 @@ use serde_json::{Map, Value};
 use sha1::{Digest, Sha1};
 
 use crate::core::{
-    elapsed_seconds, now_iso, parse_duration, parse_iso_datetime, utc_now, ErrorCode, OrchError,
-    OrchResult, DEFAULT_STALE_AFTER,
+    elapsed_seconds, now_iso, parse_duration, parse_iso_datetime, utc_now, value_to_string,
+    ErrorCode, OrchError, OrchResult, DEFAULT_STALE_AFTER,
 };
 use crate::model::{
     lease_record_field_error, validate_lease_id, CompactLease, LeaseId, LeaseRecord,
@@ -403,6 +403,7 @@ pub(crate) fn compact_lease(
         task: lease.task_value(),
         owner: lease.owner_value(),
         kind: lease.kind().as_str().to_string(),
+        scope: lease.scope(),
         agent_id: lease.agent_id().map(str::to_string),
         worker_reasoning_effort: lease
             .worker_reasoning_effort()
@@ -410,6 +411,7 @@ pub(crate) fn compact_lease(
             .to_string(),
         worker_model: lease.worker_model().map(str::to_string),
         mode: lease.mode(),
+        heartbeat_at: lease.heartbeat_or_started().and_then(value_to_string),
         age: elapsed_seconds(lease.heartbeat_or_started(), now),
         stale: lease_stale(lease, now, stale_after),
     })
