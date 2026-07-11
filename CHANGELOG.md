@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0] - 2026-07-11
+
+### Added
+
+- Added versioned lease records and coherent runtime snapshots, giving
+  coordinators a stable view of leased task scope, policy, worker settings, and
+  Git attribution.
+- Added ACK v1 actions and capability metadata so coordinators can follow
+  structured next steps without parsing worker packets.
+- Added snapshot bindings and role-aware evidence contracts for packets and
+  reports, making handoffs traceable to the specific lease context.
+- Added `orchid completion-recover --lease <ID>` to safely resume an
+  interrupted task completion after its durable intent has been written.
+- Added read-only `orchid doctor` runtime health checks and
+  `orchid inspect --lease <ID>` lease and handoff inspection.
+
+### Changed
+
+- Refreshed the README and bundled Orchid skills for the current orchestration
+  workflow, and updated Cargo dependencies.
+
+### Fixed
+
+- Various bug fixes and reliability improvements.
+
 ## [0.5.0] - 2026-06-29
 
 ### Added
