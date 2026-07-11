@@ -386,6 +386,10 @@ fn ack_v1_actions_and_capabilities_are_advertised() {
         .as_array()
         .unwrap()
         .contains(&Value::String("next".to_string())));
+    assert_eq!(
+        capabilities["markdown_commands"],
+        serde_json::json!(["goal"])
+    );
 
     let failed = repo.run_fail(&["next"]);
     assert_eq!(failed["ack_version"], 1);
@@ -3961,6 +3965,7 @@ fn next_blocks_recovery_when_corrupt_lease_file_exists() {
 
     let payload = repo.run(&["next", "--spec", "corrupt", "--explain"]);
     assert_eq!(payload["phase"], "blocked");
+    assert_eq!(payload["code"], "corrupt_lease_file");
     assert!(payload.get("cmd").is_none());
     assert!(payload.get("cmds").is_none());
     assert_eq!(payload["corrupt_leases"][0]["lease_id"], "l_ghost");

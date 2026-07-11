@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use serde_json::{Map, Value};
 
 use crate::core::{emit, emit_markdown, json_fail, OrchResult, DEFAULT_STALE_AFTER};
@@ -587,37 +587,29 @@ fn cmd_capabilities() -> Map<String, Value> {
         "lease_schema".to_string(),
         Value::from(LEASE_SCHEMA_VERSION),
     );
+    let command_names: Vec<String> = Cli::command()
+        .get_subcommands()
+        .map(|command| command.get_name().to_string())
+        .collect();
     let mut payload = Map::new();
     payload.insert("protocols".to_string(), Value::Object(protocols));
     payload.insert(
         "json_commands".to_string(),
-        string_values(&[
-            "capabilities",
-            "ready",
-            "status",
-            "lease",
-            "bud",
-            "lease-attach-agent",
-            "running",
-            "heartbeat",
-            "stale",
-            "release",
-            "close",
-            "cleanup",
-            "next",
-            "research-path",
-            "research-clean",
-            "packet",
-            "report-check",
-            "git-status",
-            "git-touched",
-            "git-stage-plan",
-            "complete",
-            "block",
-            "lint",
-        ]),
+        owned_string_values(
+            command_names
+                .iter()
+                .filter(|name| name.as_str() != "goal")
+                .cloned(),
+        ),
     );
-    payload.insert("markdown_commands".to_string(), string_values(&["goal"]));
+    payload.insert(
+        "markdown_commands".to_string(),
+        owned_string_values(
+            command_names
+                .into_iter()
+                .filter(|name| name.as_str() == "goal"),
+        ),
+    );
     payload.insert(
         "features".to_string(),
         string_values(&[
@@ -637,6 +629,10 @@ fn string_values(items: &[&str]) -> Value {
             .map(|item| Value::String((*item).to_string()))
             .collect(),
     )
+}
+
+fn owned_string_values(items: impl IntoIterator<Item = String>) -> Value {
+    Value::Array(items.into_iter().map(Value::String).collect())
 }
 
 fn cmd_goal(root: &Path, args: &GoalArgs) -> OrchResult<String> {

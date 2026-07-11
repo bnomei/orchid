@@ -179,6 +179,7 @@ pub(crate) fn ready(root: &Path, request: &ReadyRequest) -> OrchResult<Map<Strin
     if !active_scan.corrupt_leases.is_empty() {
         let mut payload = json_ok();
         insert(&mut payload, "phase", "blocked");
+        insert(&mut payload, "code", ErrorCode::CorruptLeaseFile.as_str());
         insert(
             &mut payload,
             "reason",
@@ -705,6 +706,7 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
     if !active_scan.corrupt_leases.is_empty() {
         let mut payload = json_ok();
         insert(&mut payload, "phase", "blocked");
+        insert(&mut payload, "code", ErrorCode::CorruptLeaseFile.as_str());
         insert(
             &mut payload,
             "reason",
