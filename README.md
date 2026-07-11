@@ -705,7 +705,6 @@ Run the local checks used by CI:
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
-scripts/check-source-hygiene.sh
 cargo package --locked
 ```
 

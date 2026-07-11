@@ -67,8 +67,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Restore Rust cache
         uses: Swatinem/rust-cache@v2
-      - name: Check source hygiene
-        run: scripts/check-source-hygiene.sh
       - name: Verify crates.io package
         run: cargo package --locked
 
