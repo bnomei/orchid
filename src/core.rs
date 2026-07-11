@@ -172,6 +172,7 @@ impl From<std::io::Error> for OrchError {
     }
 }
 
+/// Result alias for command handlers and orchestration boundaries.
 pub(crate) type OrchResult<T> = Result<T, OrchError>;
 
 pub(crate) fn error_code(message: &str) -> String {
@@ -288,7 +289,7 @@ pub(crate) fn elapsed_seconds(value: Option<&Value>, now: DateTime<Utc>) -> i64 
         .unwrap_or(0)
 }
 
-/// Parse a positive duration such as `30m`, `2h`, or `1d` without panicking on overflow.
+/// Parse a positive duration (`30m`, `2h`, `1d`) used for stale leases and goal budgets.
 pub(crate) fn parse_duration(value: &str) -> OrchResult<TimeDelta> {
     let raw = value.trim();
     if raw.len() < 2 {

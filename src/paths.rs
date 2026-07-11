@@ -13,6 +13,7 @@ use serde::Serialize;
 
 use crate::core::{ErrorCode, OrchError, OrchResult};
 
+/// Resolve the repository root from `--root`, `.orchid/`, or Git toplevel.
 pub(crate) fn root_from_arg(value: Option<&str>) -> OrchResult<PathBuf> {
     if let Some(value) = value {
         return abs_clean(expand_home(value));
@@ -60,6 +61,7 @@ fn clean_path(path: &Path) -> PathBuf {
     out
 }
 
+/// Walk ancestors until a `.orchid/` directory marker is found.
 pub(crate) fn discover_orchid_root(path: &Path) -> Option<PathBuf> {
     let start = if path.is_file() {
         path.parent().unwrap_or(path)
@@ -135,6 +137,7 @@ pub(crate) fn spec_research_root(root: &Path) -> PathBuf {
     orch_dir(root).join("spec-research")
 }
 
+/// Create lease, packet, bud, and report dirs, rejecting symlinked runtime paths.
 pub(crate) fn ensure_runtime_dirs(root: &Path) -> OrchResult<()> {
     for (label, path) in [
         ("leases_dir", leases_dir(root)),

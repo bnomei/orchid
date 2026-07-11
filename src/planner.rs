@@ -7,6 +7,7 @@ use serde_json::{Map, Value};
 
 use crate::model::{CompactLease, LeaseMode, StagePlan};
 
+/// Worker report accepted and ready for validator check and git-touched.
 #[derive(Debug, Clone)]
 pub(crate) struct ReportReady {
     pub(crate) lease_id: String,
@@ -36,6 +37,7 @@ impl ReportReady {
     }
 }
 
+/// Completed or released lease whose runtime artifacts can be deleted.
 #[derive(Debug, Clone)]
 pub(crate) struct CleanupCandidate {
     pub(crate) lease_id: String,
@@ -51,6 +53,7 @@ impl CleanupCandidate {
     }
 }
 
+/// Dispatchable task with scope and verification metadata for `orchid next`.
 #[derive(Debug, Clone)]
 pub(crate) struct ReadyTask {
     pub(crate) id: String,
@@ -92,6 +95,7 @@ impl ReadyTask {
     }
 }
 
+/// Task blocked by dependency, policy, scope conflict, or corrupt runtime state.
 #[derive(Debug, Clone)]
 pub(crate) struct BlockedTask {
     pub(crate) task: String,
@@ -109,6 +113,7 @@ impl BlockedTask {
     }
 }
 
+/// Harness phase returned by `orchid next` (recover, validate, dispatch, ...).
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum Phase {
     Blocked,
@@ -136,6 +141,7 @@ impl Phase {
     }
 }
 
+/// Snapshot inputs assembled before ranking the next coordinator action.
 pub(crate) struct NextInput {
     pub(crate) stale: Vec<CompactLease>,
     pub(crate) reports_ready: Vec<ReportReady>,
@@ -149,6 +155,7 @@ pub(crate) struct NextInput {
     pub(crate) explain: bool,
 }
 
+/// Recommended phase, argv hints, and explain payloads for `orchid next`.
 pub(crate) struct NextDecision {
     pub(crate) phase: Phase,
     pub(crate) commands: Vec<Vec<String>>,
@@ -191,6 +198,7 @@ impl NextDecision {
     }
 }
 
+/// Rank recover, validate, stage, cleanup, dispatch, and wait from lease snapshots.
 pub(crate) fn decide_next(input: NextInput) -> NextDecision {
     let NextInput {
         stale,

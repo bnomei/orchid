@@ -556,6 +556,7 @@ impl Command {
 const ACK_VERSION: i64 = 1;
 const ACTION_VERSION: i64 = 1;
 
+// ACK envelope: stable ok/command fields plus action hints for next and report-check.
 fn finalize_json_ack(payload: &mut Map<String, Value>, command: &Command) -> bool {
     let ok = payload
         .get("ok")

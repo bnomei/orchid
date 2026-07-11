@@ -8,6 +8,7 @@ use sha1::{Digest, Sha1};
 
 use crate::core::{insert, string_list, value_to_string, ErrorCode, OrchError, OrchResult};
 
+/// Single-segment spec directory name under `specs/` (no path separators).
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) struct SpecId(String);
 
@@ -41,6 +42,7 @@ impl SpecId {
     }
 }
 
+/// Task identifier from frontmatter or the Markdown filename stem.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) struct TaskId(String);
 
@@ -54,6 +56,7 @@ impl TaskId {
     }
 }
 
+/// Runtime lease filename stem; ASCII alphanumeric and underscores only.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(crate) struct LeaseId(String);
 
@@ -92,6 +95,7 @@ pub(crate) const LEASE_SCHEMA_VERSION: i64 = 1;
 pub(crate) const LEASE_CONTEXT_SCHEMA_VERSION: i64 = 1;
 pub(crate) const COMPLETION_INTENT_SCHEMA_VERSION: i64 = 1;
 
+/// Content-addressed revision for lease context snapshots and completion intents.
 pub(crate) fn lease_context_revision(kind: &str, fields: &[(&str, &str)]) -> String {
     let mut hasher = Sha1::new();
     hash_context_part(&mut hasher, "kind", kind);
@@ -101,6 +105,7 @@ pub(crate) fn lease_context_revision(kind: &str, fields: &[(&str, &str)]) -> Str
     format!("sha1:{}", hex_bytes(hasher.finalize().as_slice()))
 }
 
+/// Revision hash for one text blob such as a task body or bud instructions.
 pub(crate) fn content_revision(kind: &str, content: &str) -> String {
     lease_context_revision(kind, &[("content", content)])
 }
@@ -236,6 +241,7 @@ fn completion_intent_field_error(data: &Map<String, Value>) -> Option<String> {
     None
 }
 
+/// Validate lease JSON schema and required fields; return a human-readable error.
 pub(crate) fn lease_record_field_error(data: &Map<String, Value>) -> Option<String> {
     let schema_version = match data.get("schema_version") {
         None => None,
@@ -404,6 +410,7 @@ impl Scope {
     }
 }
 
+/// Normalize a scope path entry for prefix overlap and lint checks.
 pub(crate) fn normalize_scope_entry(value: &str) -> String {
     normalize_path_for_scope(&value.replace('\\', "/"))
 }
@@ -489,6 +496,7 @@ impl TaskStatus {
     }
 }
 
+/// Worker verification policy from task frontmatter (`mayor`, `required`, `validator`).
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum VerificationMode {
     Mayor,
@@ -515,6 +523,7 @@ impl VerificationMode {
     }
 }
 
+/// Worker reasoning effort copied into lease and packet metadata.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum ReasoningEffort {
     Low,
@@ -559,6 +568,7 @@ impl ReasoningEffort {
     }
 }
 
+/// Lease lifecycle state stored in `.orchid/leases/*.json`.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum LeaseStatus {
     Active,
@@ -593,6 +603,7 @@ impl LeaseStatus {
     }
 }
 
+/// Distinguishes durable task leases from ephemeral bud delegations.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum LeaseKind {
     Task,
@@ -623,6 +634,7 @@ impl LeaseKind {
     }
 }
 
+/// Exclusive, serial, or parallel reservation relative to other active leases.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum LeaseMode {
     Parallel,
@@ -646,6 +658,7 @@ pub(crate) struct LeaseRecord {
     data: Map<String, Value>,
 }
 
+/// Fields required to mint a new active task lease record.
 pub(crate) struct ActiveLeaseRecordInput {
     pub(crate) lease_id: LeaseId,
     pub(crate) lease_mode: LeaseMode,
@@ -866,6 +879,7 @@ impl LeaseRecord {
     }
 }
 
+/// Whether a Git `base_head` was captured when the lease started.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum GitBaseline<'a> {
     Unavailable,
@@ -883,6 +897,7 @@ impl LeaseStatus {
     }
 }
 
+/// Compact lease summary for status, stale, and next-action snapshots.
 #[derive(Debug, Clone)]
 pub(crate) struct CompactLease {
     pub(crate) id: Value,
@@ -978,6 +993,7 @@ impl StagePlan {
     }
 }
 
+/// Worker or validator report status parsed from Markdown frontmatter.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum ReportStatus {
     Blocked,
@@ -1020,6 +1036,7 @@ impl ReportStatus {
     }
 }
 
+/// Role that produced a report under `.orchid/reports/`.
 #[derive(Debug, Clone)]
 pub(crate) enum ReportKind {
     Worker,
@@ -1067,6 +1084,7 @@ impl ReportKind {
     }
 }
 
+/// Validator verdict when report `kind` is `validator`.
 #[derive(Debug, Clone)]
 pub(crate) enum ValidatorVerdict {
     Passed,
@@ -1103,6 +1121,7 @@ impl ValidatorVerdict {
     }
 }
 
+/// Parsed report frontmatter with typed kind, status, and validator verdict.
 #[derive(Debug, Clone)]
 pub(crate) struct ReportFrontmatter {
     data: Map<String, Value>,
@@ -1166,6 +1185,7 @@ impl ReportFrontmatter {
     }
 }
 
+/// Spec execution policy copied into leases (manual gate, fanout, checkpoints).
 #[derive(Debug, Clone)]
 pub(crate) struct SpecPolicy {
     data: Map<String, Value>,

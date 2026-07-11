@@ -129,6 +129,7 @@ enum ArrayStyle {
     Multiline,
 }
 
+/// Markdown task file with TOML frontmatter and durable body content.
 #[derive(Debug, Clone)]
 pub(crate) struct Task {
     pub(crate) path: PathBuf,
@@ -191,6 +192,7 @@ impl Task {
     }
 }
 
+/// Split `+++` TOML frontmatter from Markdown body for task and goal reports.
 pub(crate) fn split_frontmatter(
     text: &str,
     path: &Path,
@@ -232,6 +234,7 @@ fn closing_frontmatter_marker(text: &str, start: usize) -> Option<(usize, &'stat
         .min_by_key(|(idx, _)| *idx)
 }
 
+/// Load a task file, preserving frontmatter array style for later write-back.
 pub(crate) fn load_task(path: impl AsRef<Path>, root: &Path) -> OrchResult<Task> {
     let path = repo_path(root, path.as_ref(), "task_path")?;
     let text = read_text(&path)?;

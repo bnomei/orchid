@@ -38,6 +38,7 @@ pub(crate) fn scopes_overlap(a: &[String], b: &[String]) -> bool {
     Scope::from_entries(a.to_vec()).overlaps(&Scope::from_entries(b.to_vec()))
 }
 
+/// Union lease scope with task frontmatter scope for Git attribution checks.
 pub(crate) fn effective_lease_scope(root: &Path, lease: &LeaseRecord) -> OrchResult<Vec<String>> {
     let mut scope = lease.scope();
     if lease.is_bud() || lease.task_path().is_empty() {
@@ -144,6 +145,7 @@ fn resolve_spec_selector(root: &Path, specs: &Path, selector: &str) -> OrchResul
     }
 }
 
+/// Resolve a spec id or `specs/<id>` selector to a canonical spec directory name.
 pub(crate) fn resolve_spec(root: &Path, selector: &str) -> OrchResult<String> {
     let specs = repo_path(root, root.join("specs"), "specs_dir")?;
     resolve_spec_selector(root, &specs, selector)
@@ -313,6 +315,7 @@ pub(crate) fn select_tasks(
     ))
 }
 
+/// Reject inactive, manual, or checkpoint-gated specs before leasing tasks.
 pub(crate) fn ensure_spec_dispatchable(root: &Path, spec_id: &str) -> OrchResult<()> {
     if spec_is_inactive(spec_id) {
         return Err(
@@ -396,6 +399,7 @@ fn safe_task_id(task_id: &str) -> OrchResult<&str> {
     Ok(task_id)
 }
 
+/// Resolve a lease or block target to one task file under `specs/`.
 pub(crate) fn resolve_task(root: &Path, target: &str, task_id: Option<&str>) -> OrchResult<Task> {
     let target_path = Path::new(target);
     if task_id.is_none() && target_path.extension().and_then(|s| s.to_str()) == Some("md") {
@@ -478,6 +482,7 @@ impl DependencyBlock {
     }
 }
 
+/// Return the first unmet task dependency blocking dispatch, if any.
 pub(crate) fn dependency_block(task: &Task, all_tasks: &[Task]) -> Option<DependencyBlock> {
     for dep in task.depends() {
         if dep == "-" {
@@ -494,6 +499,7 @@ pub(crate) fn dependency_block(task: &Task, all_tasks: &[Task]) -> Option<Depend
     None
 }
 
+/// Select dispatchable tasks for a spec scope, honoring fanout and lease conflicts.
 pub(crate) fn ready_tasks(
     root: &Path,
     spec_names: Option<&[String]>,

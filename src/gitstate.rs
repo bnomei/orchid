@@ -853,6 +853,7 @@ pub(crate) fn clean_goal_candidates(root: &Path) -> OrchResult<()> {
     Ok(())
 }
 
+/// Attribute Git changes since lease baseline against effective write scope.
 pub(crate) fn touched_for_lease(
     root: &Path,
     lease: &LeaseRecord,
@@ -1065,6 +1066,7 @@ pub(crate) fn touched_for_lease(
     Ok(map)
 }
 
+/// Build a safe staging plan from lease-window edits and out-of-scope exclusions.
 pub(crate) fn stage_plan_for_lease(root: &Path, lease: &LeaseRecord) -> OrchResult<StagePlan> {
     let data = touched_for_lease(root, lease)?;
     let pathspecs: BTreeSet<String> = string_list(data.get("stage"))

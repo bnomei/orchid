@@ -26,6 +26,7 @@ use crate::paths::{
 };
 use crate::specs::safe_spec_id;
 
+/// Advisory lock held for mutating commands; released when the guard is dropped.
 pub(crate) struct RuntimeLock {
     file: File,
     metadata_path: PathBuf,
@@ -103,6 +104,7 @@ fn try_acquire_lock(path: &Path, metadata_path: &Path, root: &Path) -> OrchResul
     })
 }
 
+/// Active leases only; fails on the first corrupt lease file.
 pub(crate) fn active_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
     Ok(all_leases(root)?
         .into_iter()
@@ -110,6 +112,7 @@ pub(crate) fn active_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
         .collect())
 }
 
+/// Lease file that failed parse or schema validation during directory scan.
 #[derive(Debug, Clone)]
 pub(crate) struct CorruptLeaseFile {
     pub(crate) lease_id: String,
@@ -154,11 +157,13 @@ impl CorruptLeaseFile {
     }
 }
 
+/// Lease directory scan result, including corrupt files for lenient callers.
 pub(crate) struct LeaseScan {
     pub(crate) leases: Vec<LeaseRecord>,
     pub(crate) corrupt_leases: Vec<CorruptLeaseFile>,
 }
 
+/// Every lease file regardless of status; fails on the first corrupt file.
 pub(crate) fn all_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
     let scan = scan_leases(root)?;
     if let Some(corrupt) = scan.corrupt_leases.first() {
@@ -167,12 +172,14 @@ pub(crate) fn all_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
     Ok(scan.leases)
 }
 
+/// Active leases plus corrupt entries for doctor and next-action snapshots.
 pub(crate) fn active_leases_lenient(root: &Path) -> OrchResult<LeaseScan> {
     let mut scan = scan_leases(root)?;
     scan.leases.retain(|lease| lease.status().is_active());
     Ok(scan)
 }
 
+/// Read every `.orchid/leases/*.json`, validating ids and schema.
 pub(crate) fn scan_leases(root: &Path) -> OrchResult<LeaseScan> {
     let path = leases_dir(root);
     if !path.exists() {
@@ -261,6 +268,7 @@ pub(crate) fn scan_leases(root: &Path) -> OrchResult<LeaseScan> {
     })
 }
 
+/// Load one lease by id with full schema validation.
 pub(crate) fn load_lease(root: &Path, lease_id: &str) -> OrchResult<LeaseRecord> {
     validate_lease_id(lease_id)?;
     let path = repo_path(
@@ -319,6 +327,7 @@ fn bind_lease_record_id(
     }
 }
 
+/// Persist a lease record atomically to `.orchid/leases/<id>.json`.
 pub(crate) fn save_lease(root: &Path, lease: &LeaseRecord) -> OrchResult<()> {
     let lease_id = lease
         .id()
@@ -381,6 +390,7 @@ fn upgrade_lease_data(data: &mut Map<String, Value>, lease_id: &str) {
         .or_insert_with(|| Value::String(ReasoningEffort::Medium.as_str().to_string()));
 }
 
+/// True when the lease heartbeat is older than the configured stale threshold.
 pub(crate) fn lease_stale(lease: &LeaseRecord, now: DateTime<Utc>, stale_after: TimeDelta) -> bool {
     let heartbeat = lease
         .heartbeat_or_started()
@@ -388,6 +398,7 @@ pub(crate) fn lease_stale(lease: &LeaseRecord, now: DateTime<Utc>, stale_after: 
     heartbeat.is_none_or(|stamp| stamp < now - stale_after)
 }
 
+/// Build a compact lease summary for status, stale, and next-action payloads.
 pub(crate) fn compact_lease(
     lease: &LeaseRecord,
     now: Option<DateTime<Utc>>,
@@ -554,6 +565,7 @@ pub(crate) fn cleanup_runtime_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>
         .collect())
 }
 
+/// Derive a deterministic lease id from task path and owner for recovery flows.
 pub(crate) fn lease_id_for(task_path: &Path, owner: &str) -> LeaseId {
     let seed = format!("{}:{}:{}", path_to_string(task_path), owner, now_iso());
     let mut hasher = Sha1::new();

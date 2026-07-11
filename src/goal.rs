@@ -29,6 +29,7 @@ const STATE_JSON: &str = "state.json";
 const RESULTS_JSONL: &str = "results.jsonl";
 const MEASUREMENTS_JSONL: &str = "measurements.jsonl";
 
+/// Stable goal directory name under `.orchid/goals/<id>/`.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct GoalId(String);
@@ -82,6 +83,7 @@ pub(crate) struct GoalRequest {
     pub(crate) id: Option<GoalId>,
 }
 
+/// Validated inputs for initializing a branch-local goal improvement loop.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct GoalInitRequest {
     pub(crate) goal_id: GoalId,
@@ -473,6 +475,7 @@ impl EvaluatorRecommendation {
     }
 }
 
+/// Cycle report Markdown with frontmatter status and next hypothesis.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct GoalReport {
     pub(crate) cycle: String,
@@ -517,6 +520,7 @@ impl GoalReportStatus {
     }
 }
 
+/// Parsed evaluator JSON for keep/discard decisions and measurement traces.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EvaluatorResult {
     pub(crate) status: String,
@@ -610,6 +614,7 @@ pub(crate) fn report_path(root: &Path, goal_id: &GoalId, cycle: &str) -> OrchRes
     )
 }
 
+/// Initialize goal artifacts, run baseline evaluation, and render the first prompt.
 pub(crate) fn init_goal(root: &Path, request: GoalInitRequest) -> OrchResult<String> {
     let _lock = runtime_lock(root)?;
     let goal_id = request.goal_id.clone();
@@ -644,6 +649,7 @@ pub(crate) fn init_goal(root: &Path, request: GoalInitRequest) -> OrchResult<Str
     render_goal_prompt(root, &contract, &state)
 }
 
+/// Load the current goal contract and state from `.orchid/goal-current`.
 pub(crate) fn current_goal(root: &Path) -> OrchResult<Option<(GoalContract, GoalState)>> {
     let current_path = repo_path(root, goal_current_path(root), "goal_current_path")?;
     if !current_path.exists() {

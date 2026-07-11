@@ -46,6 +46,7 @@ use crate::taskfile::{
     write_task_frontmatter, Task,
 };
 
+/// CLI inputs for reserving a scoped task lease.
 pub(crate) struct LeaseRequest {
     pub(crate) target: String,
     pub(crate) task_id: Option<String>,
@@ -58,6 +59,7 @@ pub(crate) struct LeaseRequest {
     pub(crate) allow_parallel: bool,
 }
 
+/// CLI inputs for a runtime-only bud lease and instruction snapshot.
 pub(crate) struct BudRequest {
     pub(crate) title: String,
     pub(crate) scope: Vec<String>,
@@ -71,11 +73,13 @@ pub(crate) struct BudRequest {
     pub(crate) allow_parallel: bool,
 }
 
+/// CLI inputs for attaching a discovery-only agent id to an existing lease.
 pub(crate) struct AttachAgentRequest {
     pub(crate) lease: String,
     pub(crate) agent_id: String,
 }
 
+/// CLI inputs for the next-action planner (`orchid next`).
 pub(crate) struct NextRequest {
     pub(crate) specs: Vec<String>,
     pub(crate) all_open: bool,
@@ -83,23 +87,27 @@ pub(crate) struct NextRequest {
     pub(crate) explain: bool,
 }
 
+/// CLI inputs for listing dispatchable tasks (`orchid ready`).
 pub(crate) struct ReadyRequest {
     pub(crate) specs: Vec<String>,
     pub(crate) all_open: bool,
     pub(crate) explain: bool,
 }
 
+/// CLI inputs for spec, task, and lease status summaries.
 pub(crate) struct StatusRequest {
     pub(crate) specs: Vec<String>,
     pub(crate) agent_id: Option<String>,
     pub(crate) all_open: bool,
 }
 
+/// CLI inputs for resolving or creating a spec research workspace.
 pub(crate) struct ResearchPathRequest {
     pub(crate) spec: String,
     pub(crate) create: bool,
 }
 
+/// CLI inputs for verified task completion and optional research cleanup.
 pub(crate) struct CompleteRequest {
     pub(crate) lease: String,
     pub(crate) verified_by: String,
@@ -111,21 +119,25 @@ pub(crate) struct CompleteRequest {
     pub(crate) clean_spec_research: bool,
 }
 
+/// CLI inputs for marking a task blocked with a recorded reason.
 pub(crate) struct BlockRequest {
     pub(crate) target: String,
     pub(crate) task_id: Option<String>,
     pub(crate) reason: String,
 }
 
+/// CLI inputs for closing lease runtime files after handoff.
 pub(crate) struct CloseRequest {
     pub(crate) lease: String,
     pub(crate) force: bool,
 }
 
+/// CLI inputs for deleting completed or released runtime artifacts.
 pub(crate) struct CleanupRequest {
     pub(crate) completed: bool,
 }
 
+/// Role-specific packet template selected by `orchid packet --role`.
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub(crate) enum PacketRoleKind {
     Worker,
@@ -189,16 +201,19 @@ impl PacketRoleKind {
     }
 }
 
+/// CLI inputs for generating a worker, validator, reviewer, or loop-runner packet.
 pub(crate) struct PacketRequest {
     pub(crate) lease: String,
     pub(crate) role: PacketRoleKind,
     pub(crate) source_report: Option<String>,
 }
 
+/// CLI inputs for validating a role report and returning evidence diagnostics.
 pub(crate) struct ReportCheckRequest {
     pub(crate) report: String,
 }
 
+/// List dispatchable tasks and selection blockers for the requested spec scope.
 pub(crate) fn ready(root: &Path, request: &ReadyRequest) -> OrchResult<Map<String, Value>> {
     let active_scan = active_leases_lenient(root)?;
     if !active_scan.corrupt_leases.is_empty() {
@@ -258,6 +273,7 @@ pub(crate) fn ready(root: &Path, request: &ReadyRequest) -> OrchResult<Map<Strin
     Ok(payload)
 }
 
+/// Summarize specs, task states, active leases, or one agent-attached lease.
 pub(crate) fn status(root: &Path, request: &StatusRequest) -> OrchResult<Map<String, Value>> {
     if let Some(agent_id) = request
         .agent_id
@@ -334,6 +350,7 @@ pub(crate) fn status(root: &Path, request: &StatusRequest) -> OrchResult<Map<Str
     Ok(payload)
 }
 
+/// Reserve one scoped task lease, snapshot context, and reject scope conflicts.
 pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<String, Value>> {
     if nonempty_trimmed(&request.owner).is_none() {
         return Err(OrchError::coded(
@@ -510,6 +527,7 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
     Ok(payload)
 }
 
+/// Create a runtime-only bud lease and snapshot instructions under `.orchid/buds/`.
 pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, Value>> {
     let requested_lease_id = request.lease_id.clone().map(LeaseId::parse).transpose()?;
     let _lock = runtime_lock(root)?;
@@ -699,6 +717,7 @@ fn rollback_bud_artifacts(root: &Path, instructions_path: &Path, packet_path: &s
     let _ = fs::remove_file(root.join(packet_path));
 }
 
+/// Attach a discovery-only agent id to an active lease without changing scope.
 pub(crate) fn lease_attach_agent(
     root: &Path,
     request: &AttachAgentRequest,
@@ -742,6 +761,7 @@ pub(crate) fn lease_attach_agent(
     Ok(payload)
 }
 
+/// Decide the next harness phase from leases, reports, staging, and ready tasks.
 pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String, Value>> {
     if request.specs.is_empty() && !request.all_open {
         return Err(OrchError::coded(
@@ -930,6 +950,7 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
     Ok(payload)
 }
 
+/// Record verified work as complete, stage scoped paths, and update the task file.
 pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map<String, Value>> {
     validate_lease_id(&request.lease)?;
     if nonempty_trimmed(&request.verified_by).is_none() {
@@ -1092,6 +1113,7 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     resume_completion_intent(root, &mut lease, &request.lease)
 }
 
+/// Finish an interrupted completion that left a prepared `completion_intent` on disk.
 pub(crate) fn completion_recover(root: &Path, lease_id: &str) -> OrchResult<Map<String, Value>> {
     validate_lease_id(lease_id)?;
     let _lock = runtime_lock(root)?;
@@ -1214,6 +1236,7 @@ fn append_completion_research_cleanup(
     }
 }
 
+/// Mark a dispatchable task blocked and persist the reason in frontmatter.
 pub(crate) fn block(root: &Path, request: &BlockRequest) -> OrchResult<Map<String, Value>> {
     let _lock = runtime_lock(root)?;
     ensure_runtime_dirs(root)?;
@@ -1254,6 +1277,7 @@ pub(crate) fn block(root: &Path, request: &BlockRequest) -> OrchResult<Map<Strin
     Ok(payload)
 }
 
+/// Refresh a lease heartbeat timestamp for stale detection.
 pub(crate) fn heartbeat(root: &Path, lease_id: &str) -> OrchResult<Map<String, Value>> {
     validate_lease_id(lease_id)?;
     let _lock = runtime_lock(root)?;
@@ -1275,6 +1299,7 @@ pub(crate) fn heartbeat(root: &Path, lease_id: &str) -> OrchResult<Map<String, V
     Ok(payload)
 }
 
+/// List active lease runtime files with compact metadata.
 pub(crate) fn running(root: &Path) -> OrchResult<Map<String, Value>> {
     let active = active_leases_lenient(root)?;
     let now = Utc::now();
@@ -1289,6 +1314,7 @@ pub(crate) fn running(root: &Path) -> OrchResult<Map<String, Value>> {
     Ok(payload)
 }
 
+/// Find active leases whose heartbeat is older than the requested duration.
 pub(crate) fn stale(root: &Path, older_than: &str) -> OrchResult<Map<String, Value>> {
     let stale_after = parse_duration(older_than)?;
     let now = Utc::now();
@@ -1440,6 +1466,7 @@ fn runtime_artifact_exists(root: &Path, path: &str, label: &str) -> OrchResult<b
     Ok(repo_path(root, path, label)?.is_file())
 }
 
+/// Release a lease without completing its task and freeze released attribution.
 pub(crate) fn release(root: &Path, lease_id: &str, reason: &str) -> OrchResult<Map<String, Value>> {
     validate_lease_id(lease_id)?;
     let _lock = runtime_lock(root)?;
@@ -1471,6 +1498,7 @@ pub(crate) fn release(root: &Path, lease_id: &str, reason: &str) -> OrchResult<M
     Ok(payload)
 }
 
+/// Resolve or create `.orchid/spec-research/<spec-id>/` for exploratory work.
 pub(crate) fn research_path(
     root: &Path,
     request: &ResearchPathRequest,
@@ -1496,6 +1524,7 @@ pub(crate) fn research_path(
     Ok(payload)
 }
 
+/// Delete a spec research workspace after durable spec work is committed.
 pub(crate) fn research_clean(root: &Path, spec: &str) -> OrchResult<Map<String, Value>> {
     let spec_id = crate::specs::resolve_spec(root, spec)?;
     let _lock = runtime_lock(root)?;
@@ -1507,6 +1536,7 @@ pub(crate) fn research_clean(root: &Path, spec: &str) -> OrchResult<Map<String, 
     Ok(payload)
 }
 
+/// Close lease runtime files after handoff, optionally forcing active leases.
 pub(crate) fn close(root: &Path, request: &CloseRequest) -> OrchResult<Map<String, Value>> {
     validate_lease_id(&request.lease)?;
     let _lock = runtime_lock(root)?;
@@ -1543,6 +1573,7 @@ pub(crate) fn close(root: &Path, request: &CloseRequest) -> OrchResult<Map<Strin
     Ok(payload)
 }
 
+/// Remove completed or released lease files, packets, and reports.
 pub(crate) fn cleanup(root: &Path, request: &CleanupRequest) -> OrchResult<Map<String, Value>> {
     if !request.completed {
         return Err(OrchError::coded(
@@ -1669,6 +1700,7 @@ fn fail_on_corrupt_lease_identity_for_cleanup(
     Ok(())
 }
 
+/// Generate a fresh role packet bound to the lease context revision.
 pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<String, Value>> {
     validate_lease_id(&request.lease)?;
     let _lock = runtime_lock(root)?;
@@ -2302,6 +2334,7 @@ fn report_display_path(root: &Path, report_path: &ResolvedReportPath) -> String 
     }
 }
 
+/// Validate a role report against lease context and return evidence diagnostics.
 pub(crate) fn report_check(
     root: &Path,
     request: &ReportCheckRequest,
@@ -2540,6 +2573,7 @@ fn report_recommended_commands(
     vec![command]
 }
 
+/// Return compact Git status for coordinator snapshots.
 pub(crate) fn git_status(root: &Path) -> OrchResult<Map<String, Value>> {
     let mut payload = json_ok();
     payload.extend(git_status_data(root)?);
@@ -2569,6 +2603,7 @@ fn ensure_lease_for_git_attribution(lease: &LeaseRecord, lease_id: &str) -> Orch
     Ok(())
 }
 
+/// Compare Git changes since the lease baseline against effective write scope.
 pub(crate) fn git_touched(root: &Path, lease_id: &str) -> OrchResult<Map<String, Value>> {
     validate_lease_id(lease_id)?;
     let _lock = runtime_lock(root)?;
@@ -2580,6 +2615,7 @@ pub(crate) fn git_touched(root: &Path, lease_id: &str) -> OrchResult<Map<String,
     Ok(payload)
 }
 
+/// Plan safe Git pathspecs for completing a lease without staging out-of-scope edits.
 pub(crate) fn git_stage_plan(root: &Path, lease_id: &str) -> OrchResult<Map<String, Value>> {
     validate_lease_id(lease_id)?;
     let _lock = runtime_lock(root)?;
@@ -2590,6 +2626,7 @@ pub(crate) fn git_stage_plan(root: &Path, lease_id: &str) -> OrchResult<Map<Stri
     Ok(payload)
 }
 
+/// Validate spec and task-file structure, scopes, and inactive spec rules.
 pub(crate) fn lint(root: &Path) -> OrchResult<Map<String, Value>> {
     let tasks = load_tasks(root, None)?;
     let all_tasks = load_all_tasks(root)?;
