@@ -893,10 +893,7 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     if !request.commit_review.is_empty() {
         insert(meta, "commit_review", request.commit_review.clone());
     }
-    let completed_status = match git_status_data(root) {
-        Ok(status) => status,
-        Err(err) => return Err(err),
-    };
+    let completed_status = git_status_data(root)?;
     let completed_at = meta.get("completed_at").cloned().unwrap_or(Value::Null);
     let original_lease = lease.clone();
     lease.set("status", "completed");
