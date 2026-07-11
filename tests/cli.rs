@@ -7262,7 +7262,7 @@ fn report_check_accepts_report_from_external_orchid_reports_dir() {
     )
     .unwrap();
     let canonical_report_path = fs::canonicalize(&report_path).unwrap();
-    let canonical_report = canonical_report_path.to_str().unwrap();
+    let canonical_report = canonical_report_path.to_string_lossy().replace('\\', "/");
 
     let payload = repo.run(&["report-check", report_path.to_str().unwrap()]);
     assert_eq!(payload["lease_id"], "l_test");
@@ -7293,7 +7293,7 @@ fn report_check_accepts_report_from_external_orchid_reports_dir() {
     assert_eq!(packet["source_report"], canonical_report);
     let packet_text =
         fs::read_to_string(repo.root.join(packet["packet"].as_str().unwrap())).unwrap();
-    assert!(packet_text.contains(canonical_report));
+    assert!(packet_text.contains(&canonical_report));
 
     repo.run(&[
         "lease-attach-agent",
@@ -7306,7 +7306,7 @@ fn report_check_accepts_report_from_external_orchid_reports_dir() {
     assert_eq!(packet["source_report"], canonical_report);
     let regenerated =
         fs::read_to_string(repo.root.join(packet["packet"].as_str().unwrap())).unwrap();
-    assert!(regenerated.contains(canonical_report));
+    assert!(regenerated.contains(&canonical_report));
 
     fs::write(
         repo.root.join(".orchid/reports/l_test-validator.md"),
