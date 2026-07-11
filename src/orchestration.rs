@@ -1889,11 +1889,7 @@ fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value
         }
         return Err(error);
     }
-    let mut lease = active[0].clone();
-    if let Some(lease_id) = lease.id().map(str::to_string) {
-        let _lock = runtime_lock(root)?;
-        refresh_existing_packets_for_active_lease(root, &mut lease, &lease_id)?;
-    }
+    let lease = active[0];
     let mut payload = json_ok();
     insert(&mut payload, "agent_id", agent_id);
     insert(&mut payload, "lease_id", lease.id_value());
@@ -1919,24 +1915,6 @@ fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value
     }
     insert_corrupt_leases(&mut payload, &corrupt_leases);
     Ok(payload)
-}
-
-fn refresh_existing_packets_for_active_lease(
-    root: &Path,
-    lease: &mut LeaseRecord,
-    lease_id: &str,
-) -> OrchResult<()> {
-    if !lease.status().is_active() {
-        return Ok(());
-    }
-    let roles = existing_packet_roles_for_lease(root, lease_id);
-    if roles.is_empty() {
-        return Ok(());
-    }
-    for role in roles {
-        render_packet_for_lease(root, lease, lease_id, role)?;
-    }
-    save_lease(root, lease)
 }
 
 fn ensure_lease_id_available(root: &Path, lease_id: &str) -> OrchResult<()> {

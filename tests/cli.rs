@@ -2570,7 +2570,7 @@ fn attach_agent_refreshes_existing_worker_packet() {
 }
 
 #[test]
-fn agent_status_refreshes_existing_worker_packet_after_task_body_edit() {
+fn agent_status_does_not_mutate_existing_worker_packet_after_task_body_edit() {
     let repo = Repo::new();
     repo.run(&[
         "lease",
@@ -2600,11 +2600,12 @@ fn agent_status_refreshes_existing_worker_packet_after_task_body_edit() {
     assert_eq!(status["packet"], packet["packet"]);
 
     let after = fs::read_to_string(&packet_path).unwrap();
-    assert!(after.contains("Fresh task body from edited source."));
+    assert_eq!(after, before);
+    assert!(!after.contains("Fresh task body from edited source."));
 }
 
 #[test]
-fn agent_status_refresh_requires_runtime_lock() {
+fn agent_status_remains_read_only_while_runtime_lock_is_held() {
     let repo = Repo::new();
     repo.run(&[
         "lease",
@@ -2617,7 +2618,11 @@ fn agent_status_refresh_requires_runtime_lock() {
         "--lease-id",
         "l_stale",
     ]);
-    repo.run(&["packet", "--lease", "l_stale", "--role", "worker"]);
+    let packet = repo.run(&["packet", "--lease", "l_stale", "--role", "worker"]);
+    let packet_path = repo.root.join(packet["packet"].as_str().unwrap());
+    let packet_before = fs::read_to_string(&packet_path).unwrap();
+    let lease_path = repo.root.join(".orchid/leases/l_stale.json");
+    let lease_before = fs::read_to_string(&lease_path).unwrap();
     let task_path = repo.root.join("specs/example/tasks/T001.md");
     let original_task = fs::read_to_string(&task_path).unwrap();
     fs::write(
@@ -2627,9 +2632,11 @@ fn agent_status_refresh_requires_runtime_lock() {
     .unwrap();
     let _held = hold_runtime_lock(&repo);
 
-    let status = repo.run_fail(&["status", "--agent-id", "agent_123"]);
+    let status = repo.run(&["status", "--agent-id", "agent_123"]);
 
-    assert_eq!(status["code"], "runtime_lock_busy");
+    assert_eq!(status["lease_id"], "l_stale");
+    assert_eq!(fs::read_to_string(packet_path).unwrap(), packet_before);
+    assert_eq!(fs::read_to_string(lease_path).unwrap(), lease_before);
 }
 
 #[test]
