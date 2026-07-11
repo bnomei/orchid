@@ -614,6 +614,7 @@ fn cmd_capabilities() -> Map<String, Value> {
         "features".to_string(),
         string_values(&[
             "typed_blocker_codes",
+            "leased_context_snapshots",
             "read_only_agent_status",
             "released_lease_attribution",
             "spec_scoped_next",

@@ -9,6 +9,7 @@ use std::path::{Component, Path, PathBuf};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Value};
+use sha1::{Digest, Sha1};
 
 use crate::core::{insert, json_ok, now_iso, parse_duration, ErrorCode, OrchError, OrchResult};
 use crate::gitstate::{
@@ -39,7 +40,7 @@ use crate::specs::{
     select_tasks, selected_task_counts, status_set, task_by_ref, task_key,
 };
 use crate::taskfile::{
-    load_task, quote_toml_string, read_optional, split_frontmatter, write_task_frontmatter,
+    load_task, quote_toml_string, read_optional, split_frontmatter, write_task_frontmatter, Task,
 };
 
 pub(crate) struct LeaseRequest {
@@ -416,6 +417,7 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
         LeaseMode::Single
     };
     let started_at = now_iso();
+    let context_snapshot = task_context_snapshot(root, &task)?;
     let lease = LeaseRecord::new_active(ActiveLeaseRecordInput {
         lease_id: lease_id.clone(),
         lease_mode,
@@ -440,6 +442,7 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
         spec_policy: Value::Object(spec_policy.into_map()),
         worker_reasoning_effort: worker_reasoning_effort.clone(),
         worker_model: worker_model.clone(),
+        context_snapshot,
     });
     save_lease(root, &lease)?;
 
@@ -459,6 +462,9 @@ pub(crate) fn lease(root: &Path, request: &LeaseRequest) -> OrchResult<Map<Strin
         &worker_reasoning_effort,
         worker_model.as_deref(),
     );
+    if let Some(revision) = lease.context_revision() {
+        insert(&mut payload, "context_revision", revision);
+    }
     if let Some(agent_id) = request
         .agent_id
         .as_deref()
@@ -574,6 +580,8 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
         LeaseMode::Single
     };
     let started_at = now_iso();
+    let context_snapshot =
+        context_snapshot_value("bud", &[("instructions", instructions.as_str())]);
     let instructions_path = repo_path(
         root,
         buds_dir(root).join(format!("{lease_id_text}.md")),
@@ -601,6 +609,7 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
         spec_policy: Value::Object(Map::new()),
         worker_reasoning_effort: worker_reasoning_effort.clone(),
         worker_model: worker_model.clone(),
+        context_snapshot,
     });
     lease.set("kind", "bud");
     lease.set("title", request.title.clone());
@@ -630,6 +639,9 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
         &worker_reasoning_effort,
         worker_model.as_deref(),
     );
+    if let Some(revision) = lease.context_revision() {
+        insert(&mut payload, "context_revision", revision);
+    }
     insert(&mut payload, "scope", string_values(scope));
     insert(&mut payload, "packet", packet);
     insert(
@@ -676,6 +688,9 @@ pub(crate) fn lease_attach_agent(
     insert(&mut payload, "agent_id", request.agent_id.clone());
     insert(&mut payload, "kind", lease.kind().as_str());
     insert(&mut payload, "status", lease.status().as_str());
+    if let Some(revision) = lease.context_revision() {
+        insert(&mut payload, "context_revision", revision);
+    }
     Ok(payload)
 }
 
@@ -1333,6 +1348,9 @@ pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<Str
             .unwrap_or(ReasoningEffort::Medium.as_str()),
         lease.worker_model(),
     );
+    if let Some(revision) = lease.context_revision() {
+        insert(&mut payload, "context_revision", revision);
+    }
     Ok(payload)
 }
 
@@ -1392,19 +1410,37 @@ fn render_task_packet(
     report_template: &str,
 ) -> OrchResult<String> {
     let task_path = repo_path(root, lease.task_path(), "task_path")?;
-    let task = load_task(&task_path, root)?;
-    let task_source = crate::paths::read_text(&task_path)?;
     let spec_dir = task_path.parent().and_then(|p| p.parent()).unwrap_or(root);
     let policy = match lease.spec_policy() {
         Some(policy) => policy.clone(),
-        None => load_spec_policy(root, &task.spec_id).map(SpecPolicy::into_map)?,
+        None => {
+            let spec_id = lease
+                .get_str("task")
+                .and_then(|task| task.split_once('/').map(|(spec, _)| spec))
+                .unwrap_or("");
+            load_spec_policy(root, spec_id).map(SpecPolicy::into_map)?
+        }
     };
-    let requirements = read_optional(&repo_path(
-        root,
-        spec_dir.join("requirements.md"),
-        "requirements_path",
-    )?)?;
-    let design = read_optional(&repo_path(root, spec_dir.join("design.md"), "design_path")?)?;
+    let (task_source, requirements, design) = match (
+        lease.context_text("task_source"),
+        lease.context_text("requirements"),
+        lease.context_text("design"),
+    ) {
+        (Some(task_source), Some(requirements), Some(design)) => (
+            task_source.to_string(),
+            requirements.to_string(),
+            design.to_string(),
+        ),
+        _ => (
+            crate::paths::read_text(&task_path)?,
+            read_optional(&repo_path(
+                root,
+                spec_dir.join("requirements.md"),
+                "requirements_path",
+            )?)?,
+            read_optional(&repo_path(root, spec_dir.join("design.md"), "design_path")?)?,
+        ),
+    };
     let policy_text = if policy.is_empty() {
         "{}".to_string()
     } else {
@@ -1424,6 +1460,10 @@ fn render_task_packet(
             packet_inline_code(lease.get_str("task").unwrap_or(""))
         ),
         format!("- Task path: {}", packet_inline_code(lease.task_path())),
+        lease
+            .context_revision()
+            .map(|revision| format!("- Context revision: {}", packet_inline_code(revision)))
+            .unwrap_or_default(),
         format!(
             "- Owner: {}",
             packet_inline_code(lease.get_str("owner").unwrap_or(""))
@@ -1499,8 +1539,10 @@ fn render_bud_packet(
     let instructions_path = lease
         .instructions_path()
         .ok_or_else(|| OrchError::new("bud lease missing instructions_path"))?;
-    let instructions =
-        crate::paths::read_text(&repo_path(root, instructions_path, "instructions_path")?)?;
+    let instructions = match lease.context_text("instructions") {
+        Some(instructions) => instructions.to_string(),
+        None => crate::paths::read_text(&repo_path(root, instructions_path, "instructions_path")?)?,
+    };
     let scope = lease.scope().join(", ");
     let agent_line = lease
         .agent_id()
@@ -1515,6 +1557,10 @@ fn render_bud_packet(
         String::new(),
         format!("- Lease: {}", packet_inline_code(lease_id)),
         "- Kind: `bud`".to_string(),
+        lease
+            .context_revision()
+            .map(|revision| format!("- Context revision: {}", packet_inline_code(revision)))
+            .unwrap_or_default(),
         format!(
             "- Task: {}",
             packet_inline_code(lease.get_str("task").unwrap_or(""))
@@ -1889,6 +1935,68 @@ pub(crate) fn lint(root: &Path) -> OrchResult<Map<String, Value>> {
     Ok(payload)
 }
 
+fn task_context_snapshot(root: &Path, task: &Task) -> OrchResult<Value> {
+    let task_path = repo_path(root, &task.path, "task_path")?;
+    let spec_dir = task_path
+        .parent()
+        .and_then(|path| path.parent())
+        .unwrap_or(root);
+    let task_source = crate::paths::read_text(&task_path)?;
+    let requirements = read_optional(&repo_path(
+        root,
+        spec_dir.join("requirements.md"),
+        "requirements_path",
+    )?)?;
+    let design = read_optional(&repo_path(root, spec_dir.join("design.md"), "design_path")?)?;
+    Ok(context_snapshot_value(
+        "task",
+        &[
+            ("task_source", task_source.as_str()),
+            ("requirements", requirements.as_str()),
+            ("design", design.as_str()),
+        ],
+    ))
+}
+
+fn context_snapshot_value(kind: &str, fields: &[(&str, &str)]) -> Value {
+    let mut hasher = Sha1::new();
+    hash_context_part(&mut hasher, "kind", kind);
+    let mut snapshot = Map::new();
+    insert(
+        &mut snapshot,
+        "schema_version",
+        crate::model::LEASE_CONTEXT_SCHEMA_VERSION,
+    );
+    insert(&mut snapshot, "kind", kind);
+    for (key, value) in fields {
+        hash_context_part(&mut hasher, key, value);
+        insert(&mut snapshot, key, *value);
+    }
+    insert(
+        &mut snapshot,
+        "revision",
+        format!("sha1:{}", hex_bytes(hasher.finalize().as_slice())),
+    );
+    Value::Object(snapshot)
+}
+
+fn hash_context_part(hasher: &mut Sha1, key: &str, value: &str) {
+    hasher.update((key.len() as u64).to_be_bytes());
+    hasher.update(key.as_bytes());
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
 fn compact_leases(leases: Vec<LeaseRecord>) -> OrchResult<Value> {
     compact_leases_at(&leases, Utc::now())
 }
@@ -1963,6 +2071,9 @@ fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value
     insert(&mut payload, "status", lease.status().as_str());
     insert(&mut payload, "task", lease.task_value());
     insert(&mut payload, "owner", lease.owner_value());
+    if let Some(revision) = lease.context_revision() {
+        insert(&mut payload, "context_revision", revision);
+    }
     insert_worker_execution_metadata(
         &mut payload,
         lease

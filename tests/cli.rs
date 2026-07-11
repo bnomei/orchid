@@ -326,6 +326,7 @@ fn normalize_value(value: &mut Value) {
                     "age_seconds" | "heartbeat_age_seconds" => {
                         *item = Value::String("<age>".to_string())
                     }
+                    "context_revision" => *item = Value::String("<context_revision>".to_string()),
                     "lease_id"
                         if item
                             .as_str()
@@ -2524,8 +2525,33 @@ fn symlinked_spec_research_root_is_rejected_before_create() {
 
 #[test]
 #[cfg(unix)]
-fn symlinked_spec_sidecars_are_rejected_before_packet_read() {
+fn symlinked_spec_sidecars_are_rejected_during_lease_capture() {
     let repo = Repo::new();
+    let outside_requirements = repo.root.parent().unwrap().join("outside-requirements.md");
+    fs::write(&outside_requirements, "outside requirements\n").unwrap();
+    let requirements = repo.root.join("specs/example/requirements.md");
+    fs::remove_file(&requirements).unwrap();
+    std::os::unix::fs::symlink(&outside_requirements, requirements).unwrap();
+
+    let lease = repo.run_fail(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_test",
+    ]);
+    assert_eq!(lease["code"], "path_outside_repo");
+    assert!(!repo.root.join(".orchid/leases/l_test.json").exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn task_packet_uses_captured_sidecars_after_live_files_become_symlinks() {
+    let repo = Repo::new();
+    let original_requirements =
+        fs::read_to_string(repo.root.join("specs/example/requirements.md")).unwrap();
     repo.run(&[
         "lease",
         "example",
@@ -2535,14 +2561,17 @@ fn symlinked_spec_sidecars_are_rejected_before_packet_read() {
         "--lease-id",
         "l_test",
     ]);
+
     let outside_requirements = repo.root.parent().unwrap().join("outside-requirements.md");
-    fs::write(&outside_requirements, "outside requirements\n").unwrap();
+    fs::write(&outside_requirements, "outside secret requirements\n").unwrap();
     let requirements = repo.root.join("specs/example/requirements.md");
     fs::remove_file(&requirements).unwrap();
     std::os::unix::fs::symlink(&outside_requirements, requirements).unwrap();
 
-    let packet = repo.run_fail(&["packet", "--lease", "l_test", "--role", "worker"]);
-    assert_eq!(packet["code"], "path_outside_repo");
+    let packet = repo.run(&["packet", "--lease", "l_test", "--role", "worker"]);
+    let text = fs::read_to_string(repo.root.join(packet["packet"].as_str().unwrap())).unwrap();
+    assert!(text.contains(&original_requirements));
+    assert!(!text.contains("outside secret requirements"));
 }
 
 #[test]
@@ -3038,6 +3067,10 @@ fn bud_creates_runtime_packet_without_report_stub() {
     assert_eq!(payload["agent_id"], "agent_123");
     assert_eq!(payload["worker_reasoning_effort"], "low");
     assert_eq!(payload["worker_model"], "gpt-test-fast");
+    assert!(payload["context_revision"]
+        .as_str()
+        .unwrap()
+        .starts_with("sha1:"));
     assert_eq!(payload["packet"], ".orchid/packets/l_bud-worker.md");
     assert_eq!(payload["report"], ".orchid/reports/l_bud.md");
     assert!(repo.root.join(".orchid/leases/l_bud.json").exists());
@@ -3065,6 +3098,22 @@ fn bud_creates_runtime_packet_without_report_stub() {
     assert_eq!(status["packet"], ".orchid/packets/l_bud-worker.md");
     assert_eq!(status["worker_reasoning_effort"], "low");
     assert_eq!(status["worker_model"], "gpt-test-fast");
+    assert_eq!(status["context_revision"], payload["context_revision"]);
+
+    fs::write(
+        repo.root.join(".orchid/buds/l_bud.md"),
+        "tampered after lease\n",
+    )
+    .unwrap();
+    let reviewer_packet = repo.run(&["packet", "--lease", "l_bud", "--role", "reviewer"]);
+    assert_eq!(
+        reviewer_packet["context_revision"],
+        payload["context_revision"]
+    );
+    let reviewer =
+        fs::read_to_string(repo.root.join(reviewer_packet["packet"].as_str().unwrap())).unwrap();
+    assert!(reviewer.contains("Diagnose the runner failure."));
+    assert!(!reviewer.contains("tampered after lease"));
 
     let validator_packet = repo.run(&["packet", "--lease", "l_bud", "--role", "validator"]);
     assert_eq!(
@@ -4184,6 +4233,100 @@ fn task_packet_uses_lease_time_spec_policy_after_spec_policy_edit() {
     let after = fs::read_to_string(&packet_path).unwrap();
     assert!(after.contains(r#"- Spec policy: `{"packet_policy":"P0"}`"#));
     assert!(!after.contains("P1"));
+}
+
+#[test]
+fn task_packets_use_lease_time_context_and_revision_after_source_drift() {
+    let repo = Repo::new();
+    let task_path = repo.write_task_file("contextspec", "T001", "todo", "src/context/");
+    fs::write(
+        repo.root.join("specs/contextspec/requirements.md"),
+        "# Original requirements\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.root.join("specs/contextspec/design.md"),
+        "# Original design\n",
+    )
+    .unwrap();
+    let task = fs::read_to_string(&task_path).unwrap();
+    fs::write(
+        &task_path,
+        task.replace("## Context", "## Original task context"),
+    )
+    .unwrap();
+
+    let leased = repo.run(&[
+        "lease",
+        "contextspec",
+        "T001",
+        "--owner",
+        "worker:context",
+        "--agent-id",
+        "agent_context",
+        "--lease-id",
+        "l_context",
+    ]);
+    let revision = leased["context_revision"].as_str().unwrap().to_string();
+    assert!(revision.starts_with("sha1:"));
+
+    fs::remove_file(&task_path).unwrap();
+    fs::write(
+        repo.root.join("specs/contextspec/requirements.md"),
+        "# Changed requirements\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.root.join("specs/contextspec/design.md"),
+        "# Changed design\n",
+    )
+    .unwrap();
+
+    let packet = repo.run(&["packet", "--lease", "l_context", "--role", "worker"]);
+    assert_eq!(packet["context_revision"], revision);
+    let text = fs::read_to_string(repo.root.join(packet["packet"].as_str().unwrap())).unwrap();
+    assert!(text.contains("## Original task context"));
+    assert!(text.contains("# Original requirements"));
+    assert!(text.contains("# Original design"));
+    assert!(!text.contains("Changed requirements"));
+    assert!(!text.contains("Changed design"));
+    assert!(text.contains(&format!("- Context revision: `{revision}`")));
+
+    let status = repo.run(&["status", "--agent-id", "agent_context"]);
+    assert_eq!(status["context_revision"], revision);
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_context.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lease["context_snapshot"]["revision"], revision);
+    assert_eq!(lease["context_snapshot"]["kind"], "task");
+}
+
+#[test]
+fn malformed_versioned_context_snapshot_fails_closed() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_bad_context",
+    ]);
+    let lease_path = repo.root.join(".orchid/leases/l_bad_context.json");
+    let mut lease: Value = serde_json::from_str(&fs::read_to_string(&lease_path).unwrap()).unwrap();
+    lease["context_snapshot"]["task_source"] = Value::from(7);
+    fs::write(&lease_path, serde_json::to_string(&lease).unwrap()).unwrap();
+
+    let running = repo.run(&["running"]);
+    assert_eq!(running["leases"], serde_json::json!([]));
+    assert!(running["corrupt_leases"][0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("context snapshot task_source"));
+    let packet = repo.run_fail(&["packet", "--lease", "l_bad_context"]);
+    assert_eq!(packet["code"], "corrupt_lease_file");
 }
 
 #[test]

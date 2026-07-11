@@ -88,6 +88,7 @@ pub(crate) fn validate_lease_id(value: &str) -> OrchResult<()> {
 }
 
 pub(crate) const LEASE_SCHEMA_VERSION: i64 = 1;
+pub(crate) const LEASE_CONTEXT_SCHEMA_VERSION: i64 = 1;
 
 pub(crate) fn lease_record_field_error(data: &Map<String, Value>) -> Option<String> {
     let schema_version = match data.get("schema_version") {
@@ -189,6 +190,33 @@ pub(crate) fn lease_record_field_error(data: &Map<String, Value>) -> Option<Stri
         .is_some_and(|value| !value.is_object())
     {
         return Some("lease file has invalid released_fingerprints field".to_string());
+    }
+    if let Some(snapshot) = data.get("context_snapshot") {
+        let Some(snapshot) = snapshot.as_object() else {
+            return Some("lease file has invalid context_snapshot field".to_string());
+        };
+        if snapshot.get("schema_version").and_then(Value::as_i64)
+            != Some(LEASE_CONTEXT_SCHEMA_VERSION)
+        {
+            return Some("lease file has invalid context snapshot schema_version".to_string());
+        }
+        let kind = snapshot.get("kind").and_then(Value::as_str);
+        if !snapshot.get("revision").is_some_and(Value::is_string) {
+            return Some("lease file has invalid context snapshot revision".to_string());
+        }
+        let required = match kind {
+            Some("task") => ["task_source", "requirements", "design"].as_slice(),
+            Some("bud") => ["instructions"].as_slice(),
+            _ => return Some("lease file has invalid context snapshot kind".to_string()),
+        };
+        if let Some(key) = required
+            .iter()
+            .find(|key| !snapshot.get(**key).is_some_and(Value::is_string))
+        {
+            return Some(format!(
+                "lease file has invalid context snapshot {key} field"
+            ));
+        }
     }
     if let Some(value) = data.get("agent_id") {
         if !value.is_string() {
@@ -510,6 +538,7 @@ pub(crate) struct ActiveLeaseRecordInput {
     pub(crate) spec_policy: Value,
     pub(crate) worker_reasoning_effort: String,
     pub(crate) worker_model: Option<String>,
+    pub(crate) context_snapshot: Value,
 }
 
 impl LeaseRecord {
@@ -552,6 +581,7 @@ impl LeaseRecord {
         if let Some(worker_model) = input.worker_model.filter(|value| !value.is_empty()) {
             insert(&mut data, "worker_model", worker_model);
         }
+        insert(&mut data, "context_snapshot", input.context_snapshot);
         Self { data }
     }
 
@@ -664,6 +694,20 @@ impl LeaseRecord {
 
     pub(crate) fn released_fingerprints(&self) -> Option<&Map<String, Value>> {
         self.get("released_fingerprints").and_then(Value::as_object)
+    }
+
+    pub(crate) fn context_snapshot(&self) -> Option<&Map<String, Value>> {
+        self.get("context_snapshot").and_then(Value::as_object)
+    }
+
+    pub(crate) fn context_revision(&self) -> Option<&str> {
+        self.context_snapshot()?
+            .get("revision")
+            .and_then(Value::as_str)
+    }
+
+    pub(crate) fn context_text(&self, key: &str) -> Option<&str> {
+        self.context_snapshot()?.get(key).and_then(Value::as_str)
     }
 
     pub(crate) fn report_path(&self) -> Option<&str> {
