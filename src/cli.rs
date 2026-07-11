@@ -41,6 +41,13 @@ enum Command {
     Ready(ReadyArgs),
     #[command(about = "Summarize specs, task states, active leases, or one agent lease")]
     Status(StatusArgs),
+    #[command(about = "Report lightweight runtime health and recoverable work")]
+    Doctor,
+    #[command(about = "Inspect one lease without changing runtime state")]
+    Inspect {
+        #[arg(long, help = "Lease id to inspect")]
+        lease: String,
+    },
     #[command(about = "Reserve a task for one scoped worker")]
     Lease(LeaseArgs),
     #[command(about = "Create a runtime-only bud lease and worker packet")]
@@ -483,6 +490,8 @@ fn run_command(root: &Path, command: &Command) -> OrchResult<CommandOutput> {
         Command::Capabilities => Ok(cmd_capabilities().into()),
         Command::Ready(args) => cmd_ready(root, args).map(Into::into),
         Command::Status(args) => cmd_status(root, args).map(Into::into),
+        Command::Doctor => orchestration::doctor(root).map(Into::into),
+        Command::Inspect { lease } => orchestration::inspect(root, lease).map(Into::into),
         Command::Lease(args) => cmd_lease(root, args).map(Into::into),
         Command::Bud(args) => cmd_bud(root, args).map(Into::into),
         Command::LeaseAttachAgent(args) => cmd_lease_attach_agent(root, args).map(Into::into),
@@ -516,6 +525,8 @@ impl Command {
             Self::Capabilities => "capabilities",
             Self::Ready(_) => "ready",
             Self::Status(_) => "status",
+            Self::Doctor => "doctor",
+            Self::Inspect { .. } => "inspect",
             Self::Lease(_) => "lease",
             Self::Bud(_) => "bud",
             Self::LeaseAttachAgent(_) => "lease-attach-agent",
@@ -638,6 +649,7 @@ fn cmd_capabilities() -> Map<String, Value> {
             "read_only_agent_status",
             "released_lease_attribution",
             "role_specific_reports",
+            "runtime_observability_v1",
             "spec_scoped_next",
         ]),
     );

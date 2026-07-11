@@ -5994,6 +5994,27 @@ fn complete_rolls_back_lease_when_task_write_fails() {
     assert!(lease.get("completed_changed").is_some());
     assert_eq!(lease["completion_intent"]["state"], "prepared");
 
+    let doctor = repo.run(&["doctor"]);
+    assert_eq!(doctor["healthy"], true);
+    assert_eq!(
+        doctor["recovery"],
+        serde_json::json!([{
+            "lease_id": "l_task_write",
+            "code": "completion_incomplete",
+            "cmd": ["completion-recover", "--lease", "l_task_write"],
+        }])
+    );
+    let inspect = repo.run(&["inspect", "--lease", "l_task_write"]);
+    assert_eq!(inspect["status"], "active");
+    assert_eq!(
+        inspect["completion"],
+        serde_json::json!({
+            "state": "prepared",
+            "clean_spec_research": false,
+        })
+    );
+    assert!(inspect["completion"].get("task_after").is_none());
+
     let next = repo.run(&["next", "--spec", "example"]);
     assert_eq!(next["phase"], "recover");
     assert_eq!(next["code"], "completion_incomplete");
@@ -6014,6 +6035,65 @@ fn complete_rolls_back_lease_when_task_write_fails() {
     .unwrap();
     assert_eq!(lease["status"], "completed");
     assert_eq!(lease["completion_intent"]["state"], "committed");
+    let inspect = repo.run(&["inspect", "--lease", "l_task_write"]);
+    assert_eq!(inspect["status"], "completed");
+    assert_eq!(inspect["completion"]["state"], "committed");
+}
+
+#[test]
+fn doctor_and_inspect_are_read_only_runtime_observability() {
+    let repo = Repo::new();
+    let healthy = repo.run(&["doctor"]);
+    assert_eq!(healthy["healthy"], true);
+    assert_eq!(healthy["active"], 0);
+    assert_eq!(healthy["stale"], 0);
+    assert!(healthy["snapshot_at"].as_str().is_some());
+
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--agent-id",
+        "agent_123",
+        "--lease-id",
+        "l_inspect",
+    ]);
+    repo.run(&["packet", "--lease", "l_inspect", "--role", "worker"]);
+
+    let inspect = repo.run(&["inspect", "--lease", "l_inspect"]);
+    assert_eq!(inspect["lease_id"], "l_inspect");
+    assert_eq!(inspect["status"], "active");
+    assert_eq!(inspect["task_path"], "specs/example/tasks/T001.md");
+    assert_eq!(inspect["report"], ".orchid/reports/l_inspect.md");
+    assert_eq!(inspect["report_exists"], false);
+    assert_eq!(inspect["worker_packet_exists"], true);
+    assert!(inspect["context_revision"].as_str().is_some());
+    assert_eq!(inspect["lease"]["id"], "l_inspect");
+
+    let status = repo.run(&["status", "--spec", "example"]);
+    assert!(status["snapshot_at"].as_str().is_some());
+    assert_eq!(status["stale"], 0);
+    let agent = repo.run(&["status", "--agent-id", "agent_123"]);
+    assert!(agent["snapshot_at"].as_str().is_some());
+    assert!(agent["heartbeat_at"].as_str().is_some());
+    assert!(agent["age"].as_i64().is_some());
+
+    let lease_path = repo.root.join(".orchid/leases/l_inspect.json");
+    let mut lease: Value = serde_json::from_str(&fs::read_to_string(&lease_path).unwrap()).unwrap();
+    lease["heartbeat_at"] = Value::String("2020-01-01T00:00:00Z".to_string());
+    fs::write(&lease_path, serde_json::to_string_pretty(&lease).unwrap()).unwrap();
+    fs::write(repo.root.join(".orchid/leases/l_bad.json"), "not json\n").unwrap();
+    let before = fs::read_to_string(&lease_path).unwrap();
+
+    let doctor = repo.run(&["doctor"]);
+    assert_eq!(doctor["healthy"], false);
+    assert_eq!(doctor["active"], 1);
+    assert_eq!(doctor["stale"], 1);
+    assert_eq!(doctor["corrupt_leases"][0]["lease_id"], "l_bad");
+    assert_eq!(doctor["corrupt_leases"][0]["code"], "corrupt_lease_file");
+    assert_eq!(fs::read_to_string(&lease_path).unwrap(), before);
 }
 
 #[test]
@@ -8308,6 +8388,10 @@ fn security_lock_and_help_contracts() {
     assert!(help.contains("Discovery-only runtime agent id to attach"));
     let help = repo.run_help(&["status"]);
     assert!(help.contains("Find the lease attached to a discovery-only agent id"));
+    let help = repo.run_help(&["doctor"]);
+    assert!(help.contains("Report lightweight runtime health and recoverable work"));
+    let help = repo.run_help(&["inspect"]);
+    assert!(help.contains("Lease id to inspect"));
     let help = repo.run_help(&["ready"]);
     assert!(!help.contains("--explain"));
     assert!(help.contains("--brief"));

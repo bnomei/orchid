@@ -547,6 +547,8 @@ Successful commands exit with status `0`. Structured failures include an
 | `orchid ready` | List dispatchable task files. Requires `--spec` or `--all-open`. |
 | `orchid next` | Decide the next orchestration phase. Requires `--spec` or `--all-open`. |
 | `orchid status` | Summarize specs, task states, active leases, or one `--agent-id`. |
+| `orchid doctor` | Read-only runtime health: lint summary, stale work, corrupt leases, and safe recovery commands. |
+| `orchid inspect --lease <ID>` | Read-only detail for one active or terminal lease and its handoff artifacts. |
 | `orchid lease` | Reserve one spec task for a scoped worker. |
 | `orchid bud` | Create a runtime-only scoped lease and worker packet. |
 | `orchid lease-attach-agent` | Attach a runtime agent id after lease creation. |
@@ -560,6 +562,7 @@ Successful commands exit with status `0`. Structured failures include an
 | `orchid git-touched` | Compare Git changes against a lease scope. |
 | `orchid git-stage-plan` | Return safe pathspecs for a completed lease. |
 | `orchid complete` | Mark verified work complete. |
+| `orchid completion-recover --lease <ID>` | Finish a task completion that was interrupted after its durable intent was written. |
 | `orchid close` | Delete one lease's runtime files after handoff. |
 | `orchid cleanup --completed` | Delete completed or released runtime artifacts. |
 | `orchid block` | Mark a task blocked with a reason. |
@@ -620,6 +623,21 @@ orchid heartbeat <LEASE_ID>
 # or
 orchid release <LEASE_ID> --reason "abandoned worker"
 ```
+
+### Runtime state needs attention
+
+Start with a bounded read-only health check. It reports stale leases, corrupt
+runtime files, and a `completion-recover` command only when Orchid has a
+durable completion intent it can safely finish:
+
+```sh
+orchid doctor --pretty
+orchid inspect --lease <LEASE_ID> --pretty
+```
+
+`doctor` does not release work, rewrite packets, or claim resources. Use
+`next`, `report-check`, and the returned recovery command to choose the next
+authorized action.
 
 ### A lease cannot run in parallel
 

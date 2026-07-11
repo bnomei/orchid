@@ -10,7 +10,9 @@ use std::path::{Component, Path, PathBuf};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Value};
 
-use crate::core::{insert, json_ok, now_iso, parse_duration, ErrorCode, OrchError, OrchResult};
+use crate::core::{
+    insert, json_ok, now_iso, parse_duration, ErrorCode, OrchError, OrchResult, DEFAULT_STALE_AFTER,
+};
 use crate::gitstate::{
     append_completed_changed_path, apply_completed_changed_snapshot,
     apply_released_changed_snapshot, baseline_fingerprints_value, changed_paths_value,
@@ -278,6 +280,8 @@ pub(crate) fn status(root: &Path, request: &StatusRequest) -> OrchResult<Map<Str
         (load_tasks(root, None)?, Vec::new())
     };
     let counts = nonzero_counts(selected_task_counts(&tasks));
+    let now = Utc::now();
+    let stale_after = parse_duration(DEFAULT_STALE_AFTER)?;
     let active_scan = active_leases_lenient(root)?;
     let active_global = active_scan.leases.len();
     let scoped = !selected_specs.is_empty();
@@ -291,6 +295,7 @@ pub(crate) fn status(root: &Path, request: &StatusRequest) -> OrchResult<Map<Str
         active_scan.leases.iter().collect()
     };
     let mut payload = json_ok();
+    insert(&mut payload, "snapshot_at", snapshot_timestamp(now));
     insert(&mut payload, "tasks", tasks.len() as i64);
     insert(&mut payload, "counts", Value::Object(counts));
     insert_corrupt_leases(&mut payload, &active_scan.corrupt_leases);
@@ -304,6 +309,14 @@ pub(crate) fn status(root: &Path, request: &StatusRequest) -> OrchResult<Map<Str
     }
     if scoped || !selected_active.is_empty() {
         insert(&mut payload, "active", selected_active.len() as i64);
+        insert(
+            &mut payload,
+            "stale",
+            selected_active
+                .iter()
+                .filter(|lease| lease_stale(lease, now, stale_after))
+                .count() as i64,
+        );
     }
     if scoped {
         insert(&mut payload, "active_global", active_global as i64);
@@ -1300,6 +1313,131 @@ pub(crate) fn stale(root: &Path, older_than: &str) -> OrchResult<Map<String, Val
     );
     insert_corrupt_leases(&mut payload, &active.corrupt_leases);
     Ok(payload)
+}
+
+/// Return a bounded, read-only runtime health summary for an orchestrator.
+pub(crate) fn doctor(root: &Path) -> OrchResult<Map<String, Value>> {
+    let now = Utc::now();
+    let stale_after = parse_duration(DEFAULT_STALE_AFTER)?;
+    let lint = lint(root)?;
+    let scan = scan_leases(root)?;
+    let active = scan
+        .leases
+        .iter()
+        .filter(|lease| lease.status().is_active())
+        .collect::<Vec<_>>();
+    let stale = active
+        .iter()
+        .filter(|lease| lease_stale(lease, now, stale_after))
+        .count();
+    let recovery = active
+        .iter()
+        .filter(|lease| lease.completion_intent().is_some())
+        .map(|lease| {
+            let mut entry = Map::new();
+            insert(&mut entry, "lease_id", lease.id_value());
+            insert(&mut entry, "code", "completion_incomplete");
+            insert(
+                &mut entry,
+                "cmd",
+                Value::Array(vec![
+                    Value::String("completion-recover".to_string()),
+                    Value::String("--lease".to_string()),
+                    lease.id_value(),
+                ]),
+            );
+            Value::Object(entry)
+        })
+        .collect::<Vec<_>>();
+    let lint_errors = lint
+        .get("errors")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty);
+    let mut lint_payload = Map::new();
+    insert(
+        &mut lint_payload,
+        "tasks",
+        lint.get("tasks").cloned().unwrap_or(Value::from(0)),
+    );
+    if let Some(errors) = lint.get("errors") {
+        insert(&mut lint_payload, "errors", errors.clone());
+    }
+    let mut payload = json_ok();
+    insert(&mut payload, "snapshot_at", snapshot_timestamp(now));
+    insert(
+        &mut payload,
+        "healthy",
+        lint_errors && scan.corrupt_leases.is_empty(),
+    );
+    insert(&mut payload, "lint", Value::Object(lint_payload));
+    insert(&mut payload, "active", active.len() as i64);
+    insert(&mut payload, "stale", stale as i64);
+    insert_non_empty(&mut payload, "recovery", Value::Array(recovery));
+    insert_corrupt_leases(&mut payload, &scan.corrupt_leases);
+    Ok(payload)
+}
+
+/// Inspect one lease without mutating it or expanding into Git attribution work.
+pub(crate) fn inspect(root: &Path, lease_id: &str) -> OrchResult<Map<String, Value>> {
+    validate_lease_id(lease_id)?;
+    let now = Utc::now();
+    let lease = load_lease(root, lease_id)?;
+    let mut payload = json_ok();
+    insert(&mut payload, "snapshot_at", snapshot_timestamp(now));
+    insert(
+        &mut payload,
+        "lease",
+        Value::Object(compact_lease(&lease, Some(now), None)?.to_payload()),
+    );
+    insert(&mut payload, "lease_id", lease.id_value());
+    insert(&mut payload, "status", lease.status().as_str());
+    if !lease.task_path().is_empty() {
+        insert(&mut payload, "task_path", lease.task_path());
+    }
+    if let Some(report_path) = lease.report_path() {
+        insert(&mut payload, "report", report_path);
+        insert(
+            &mut payload,
+            "report_exists",
+            runtime_artifact_exists(root, report_path, "report_path")?,
+        );
+    }
+    if let Some(packet_path) = lease.worker_packet_path().or_else(|| lease.packet_path()) {
+        insert(&mut payload, "worker_packet", packet_path);
+        insert(
+            &mut payload,
+            "worker_packet_exists",
+            runtime_artifact_exists(root, packet_path, "packet_path")?,
+        );
+    } else {
+        insert(&mut payload, "worker_packet_exists", false);
+    }
+    if let Some(revision) = lease.context_revision() {
+        insert(&mut payload, "context_revision", revision);
+    }
+    if let Some(intent) = lease.completion_intent() {
+        let mut completion = Map::new();
+        insert(
+            &mut completion,
+            "state",
+            intent.get("state").cloned().unwrap_or(Value::Null),
+        );
+        insert(
+            &mut completion,
+            "clean_spec_research",
+            intent
+                .get("clean_spec_research")
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
+        insert(&mut payload, "completion", Value::Object(completion));
+    }
+    insert_corrupt_leases(&mut payload, &scan_leases(root)?.corrupt_leases);
+    Ok(payload)
+}
+
+fn runtime_artifact_exists(root: &Path, path: &str, label: &str) -> OrchResult<bool> {
+    Ok(repo_path(root, path, label)?.is_file())
 }
 
 pub(crate) fn release(root: &Path, lease_id: &str, reason: &str) -> OrchResult<Map<String, Value>> {
@@ -2578,6 +2716,7 @@ fn snapshot_timestamp(now: DateTime<Utc>) -> String {
 }
 
 fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value>> {
+    let now = Utc::now();
     let scan = scan_leases(root)?;
     let corrupt_leases = scan.corrupt_leases;
     let matches = scan
@@ -2625,7 +2764,9 @@ fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value
         return Err(error);
     }
     let lease = active[0];
+    let compact = compact_lease(lease, Some(now), None)?;
     let mut payload = json_ok();
+    insert(&mut payload, "snapshot_at", snapshot_timestamp(now));
     insert(&mut payload, "agent_id", agent_id);
     insert(&mut payload, "lease_id", lease.id_value());
     insert(&mut payload, "kind", lease.kind().as_str());
@@ -2650,6 +2791,13 @@ fn status_for_agent(root: &Path, agent_id: &str) -> OrchResult<Map<String, Value
     }
     if let Some(report_path) = lease.report_path() {
         insert(&mut payload, "report", report_path);
+    }
+    insert(&mut payload, "age", compact.age);
+    if let Some(heartbeat_at) = compact.heartbeat_at {
+        insert(&mut payload, "heartbeat_at", heartbeat_at);
+    }
+    if compact.stale {
+        insert(&mut payload, "stale", true);
     }
     insert_corrupt_leases(&mut payload, &corrupt_leases);
     Ok(payload)
