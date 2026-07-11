@@ -359,6 +359,11 @@ struct PacketArgs {
         help = "Packet role to generate"
     )]
     role: PacketRole,
+    #[arg(
+        long,
+        help = "Accepted worker report path to hand to a validator, reviewer, or loop-runner"
+    )]
+    source_report: Option<String>,
 }
 
 #[derive(Args)]
@@ -829,6 +834,7 @@ fn cmd_packet(root: &Path, args: &PacketArgs) -> OrchResult<Map<String, Value>> 
         &PacketRequest {
             lease: args.lease.clone(),
             role: args.role.into(),
+            source_report: args.source_report.clone(),
         },
     )
 }

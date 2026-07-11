@@ -1056,6 +1056,14 @@ impl ReportFrontmatter {
             .unwrap_or("")
     }
 
+    pub(crate) fn lease_started_at(&self) -> Option<&str> {
+        self.data.get("lease_started_at").and_then(Value::as_str)
+    }
+
+    pub(crate) fn context_revision(&self) -> Option<&str> {
+        self.data.get("context_revision").and_then(Value::as_str)
+    }
+
     pub(crate) fn status(&self) -> &ReportStatus {
         &self.status
     }

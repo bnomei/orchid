@@ -189,6 +189,7 @@ impl PacketRoleKind {
 pub(crate) struct PacketRequest {
     pub(crate) lease: String,
     pub(crate) role: PacketRoleKind,
+    pub(crate) source_report: Option<String>,
 }
 
 pub(crate) struct ReportCheckRequest {
@@ -634,7 +635,13 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
     lease.set("kind", "bud");
     lease.set("title", request.title.clone());
     lease.set("instructions_path", relpath(&instructions_path, root));
-    let packet = render_packet_for_lease(root, &mut lease, &lease_id_text, PacketRoleKind::Worker)?;
+    let packet = render_packet_for_lease(
+        root,
+        &mut lease,
+        &lease_id_text,
+        PacketRoleKind::Worker,
+        None,
+    )?;
     if let Err(err) = save_lease(root, &lease) {
         rollback_bud_artifacts(root, &instructions_path, &packet);
         return Err(err);
@@ -700,7 +707,7 @@ pub(crate) fn lease_attach_agent(
         lease.set("owner", format!("worker:{}", request.agent_id));
     }
     for role in existing_packet_roles {
-        render_packet_for_lease(root, &mut lease, &request.lease, role)?;
+        render_packet_for_lease(root, &mut lease, &request.lease, role, None)?;
     }
     save_lease(root, &lease)?;
     let mut payload = json_ok();
@@ -1355,7 +1362,15 @@ pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<Str
         .detail("lease_id", request.lease.clone())
         .detail("status", lease.get_str("status").unwrap_or("").to_string()));
     }
-    let packet = render_packet_for_lease(root, &mut lease, &request.lease, request.role)?;
+    let source_report =
+        resolve_packet_source_report(root, &lease, request.role, request.source_report.as_deref())?;
+    let packet = render_packet_for_lease(
+        root,
+        &mut lease,
+        &request.lease,
+        request.role,
+        source_report.as_deref(),
+    )?;
     save_lease(root, &lease)?;
     let mut payload = json_ok();
     insert(&mut payload, "lease_id", request.lease.clone());
@@ -1374,7 +1389,7 @@ pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<Str
         insert(
             &mut payload,
             "source_report",
-            relpath(&report_path_for_lease(root, &lease)?, root),
+            source_report.as_deref().unwrap_or(""),
         );
     }
     insert_worker_execution_metadata(
@@ -1390,17 +1405,51 @@ pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<Str
     Ok(payload)
 }
 
+fn resolve_packet_source_report(
+    root: &Path,
+    lease: &LeaseRecord,
+    role: PacketRoleKind,
+    source_report: Option<&str>,
+) -> OrchResult<Option<String>> {
+    if !role.has_source_report() {
+        if source_report.is_some() {
+            return Err(OrchError::coded(
+                "worker packets do not accept a source report",
+                ErrorCode::ReportLeaseMismatch,
+            ));
+        }
+        return Ok(None);
+    }
+    let Some(source_report) = source_report else {
+        return Ok(Some(relpath(&report_path_for_lease(root, lease)?, root)));
+    };
+    let report_path = report_path_from_request(root, source_report)?;
+    let text = crate::paths::read_text(&report_path.path)?;
+    let (meta, _) = split_frontmatter(&text, &report_path.path)?;
+    let report = ReportFrontmatter::from_map(meta);
+    if report.lease_id() != lease.id().unwrap_or("") || !report.kind().is_worker() {
+        return Err(OrchError::coded(
+            "source report does not match worker lease",
+            ErrorCode::ReportLeaseMismatch,
+        )
+        .detail("lease_id", lease.id().unwrap_or("").to_string())
+        .detail("source_lease_id", report.lease_id().to_string())
+        .detail("source_report_kind", report.kind().as_str()));
+    }
+    let expected_path = report_path_for_lease(root, lease)?;
+    let external = report_is_external(&report_path, &expected_path);
+    validate_report_binding(lease, &report, external)?;
+    Ok(Some(report_display_path(root, &report_path)))
+}
+
 fn render_packet_for_lease(
     root: &Path,
     lease: &mut LeaseRecord,
     lease_id: &str,
     role: PacketRoleKind,
+    source_report: Option<&str>,
 ) -> OrchResult<String> {
     let report_path = report_path_for_lease_role(root, lease, role.as_str())?;
-    let source_report_path = role
-        .has_source_report()
-        .then(|| report_path_for_lease(root, lease))
-        .transpose()?;
     let packet_path = repo_path(
         root,
         packets_dir(root).join(format!("{}-{}.md", lease_id, role.as_str())),
@@ -1408,8 +1457,10 @@ fn render_packet_for_lease(
     )?;
     let verdict = (role == PacketRoleKind::Validator).then_some("verdict = \"\"\n");
     let report_template = format!(
-        "+++\nlease_id = {}\nkind = {}\nstatus = {}\n{}commands_run = []\nresult = \"\"\n+++\n\n## Summary\n\n## Evidence\n\n## Notes\n",
+        "+++\nlease_id = {}\nlease_started_at = {}\ncontext_revision = {}\nkind = {}\nstatus = {}\n{}commands_run = []\nresult = \"\"\n+++\n\n## Summary\n\n## Evidence\n\n## Notes\n",
         quote_toml_string(lease_id),
+        quote_toml_string(lease.get_str("started_at").unwrap_or("")),
+        quote_toml_string(lease.context_revision().unwrap_or("")),
         quote_toml_string(role.as_str()),
         quote_toml_string(role.report_status()),
         verdict.unwrap_or_default(),
@@ -1421,7 +1472,7 @@ fn render_packet_for_lease(
             lease_id,
             role,
             &report_path,
-            source_report_path.as_deref(),
+            source_report,
             &report_template,
         )?
     } else {
@@ -1431,7 +1482,7 @@ fn render_packet_for_lease(
             lease_id,
             role,
             &report_path,
-            source_report_path.as_deref(),
+            source_report,
             &report_template,
         )?
     };
@@ -1466,7 +1517,7 @@ fn render_task_packet(
     lease_id: &str,
     role: PacketRoleKind,
     report_path: &Path,
-    source_report_path: Option<&Path>,
+    source_report: Option<&str>,
     report_template: &str,
 ) -> OrchResult<String> {
     let policy = match lease.spec_policy() {
@@ -1551,13 +1602,8 @@ fn render_task_packet(
             "- Report path: {}",
             packet_inline_code(&relpath(report_path, root))
         ),
-        source_report_path
-            .map(|path| {
-                format!(
-                    "- Source report: {}",
-                    packet_inline_code(&relpath(path, root))
-                )
-            })
+        source_report
+            .map(|report| format!("- Source report: {}", packet_inline_code(report)))
             .unwrap_or_default(),
         format!("- Spec policy: {}", packet_inline_code(&policy_text)),
         String::new(),
@@ -1607,7 +1653,7 @@ fn render_bud_packet(
     lease_id: &str,
     role: PacketRoleKind,
     report_path: &Path,
-    source_report_path: Option<&Path>,
+    source_report: Option<&str>,
     report_template: &str,
 ) -> OrchResult<String> {
     let instructions_path = lease
@@ -1665,13 +1711,8 @@ fn render_bud_packet(
             "- Report path: {}",
             packet_inline_code(&relpath(report_path, root))
         ),
-        source_report_path
-            .map(|path| {
-                format!(
-                    "- Source report: {}",
-                    packet_inline_code(&relpath(path, root))
-                )
-            })
+        source_report
+            .map(|report| format!("- Source report: {}", packet_inline_code(report)))
             .unwrap_or_default(),
         String::new(),
         format!("## {} Report Contract", role.title()),
@@ -1856,6 +1897,71 @@ fn is_orchid_report_path(path: &Path) -> bool {
     is_report_path && components.next().is_none()
 }
 
+fn report_is_external(report_path: &ResolvedReportPath, expected_report_path: &Path) -> bool {
+    report_path.path != expected_report_path
+}
+
+fn validate_report_binding(
+    lease: &LeaseRecord,
+    report: &ReportFrontmatter,
+    external: bool,
+) -> OrchResult<Vec<Map<String, Value>>> {
+    let mut warnings = Vec::new();
+    if let Some(expected_started_at) = lease.get_str("started_at") {
+        match report.lease_started_at() {
+            Some(actual) if actual == expected_started_at => {}
+            None if !external => warnings.push(report_warning(
+                "report_lease_started_at_missing",
+                "field",
+                "lease_started_at",
+            )),
+            _ => {
+                return Err(OrchError::coded(
+                    "report belongs to a different lease instance",
+                    ErrorCode::ReportLeaseInstanceMismatch,
+                )
+                .detail("lease_id", lease.id().unwrap_or("").to_string())
+                .detail("expected_lease_started_at", expected_started_at.to_string())
+                .detail(
+                    "lease_started_at",
+                    report.lease_started_at().unwrap_or("").to_string(),
+                ))
+            }
+        }
+    }
+    if let Some(expected_revision) = lease.context_revision() {
+        match report.context_revision() {
+            Some(actual) if actual == expected_revision => {}
+            None if !external => warnings.push(report_warning(
+                "report_context_revision_missing",
+                "field",
+                "context_revision",
+            )),
+            _ => {
+                return Err(OrchError::coded(
+                    "report context revision does not match lease",
+                    ErrorCode::ReportContextMismatch,
+                )
+                .detail("lease_id", lease.id().unwrap_or("").to_string())
+                .detail("expected_context_revision", expected_revision.to_string())
+                .detail(
+                    "context_revision",
+                    report.context_revision().unwrap_or("").to_string(),
+                ))
+            }
+        }
+    }
+    Ok(warnings)
+}
+
+fn report_display_path(root: &Path, report_path: &ResolvedReportPath) -> String {
+    if report_path.path.starts_with(root) {
+        report_path.rel.clone()
+    } else {
+        path_to_string(&report_path.path)
+    }
+}
+
 pub(crate) fn report_check(
     root: &Path,
     request: &ReportCheckRequest,
@@ -1888,6 +1994,7 @@ pub(crate) fn report_check(
                 .detail("lease_id", lease_id),
         );
     }
+    let external = report_is_external(&report_path, &expected_report_path);
     if !report.status().is_valid() {
         return Err(
             OrchError::coded("invalid report status", ErrorCode::InvalidReportStatus)
@@ -1902,7 +2009,20 @@ pub(crate) fn report_check(
         .detail("verdict", report.validator_verdict().as_str()));
     }
 
-    let mut warnings = Vec::new();
+    if report.kind().is_validator() {
+        let expected_status = validator_status_for_verdict(report.validator_verdict());
+        if report.status().as_str() != expected_status {
+            return Err(OrchError::coded(
+                "validator status does not match verdict",
+                ErrorCode::ValidatorStatusMismatch,
+            )
+            .detail("verdict", report.validator_verdict().as_str())
+            .detail("expected_status", expected_status)
+            .detail("status", report.status().as_str()));
+        }
+    }
+
+    let mut warnings = validate_report_binding(&lease, &report, external)?;
     let commands_run_count = match report.commands_run_count() {
         Some(count) => count,
         None => {
@@ -1925,23 +2045,25 @@ pub(crate) fn report_check(
             warnings.push(report_warning(code, "section", heading));
         }
     }
-    if report.kind().is_validator() {
-        let expected_status = validator_status_for_verdict(report.validator_verdict());
-        if report.status().as_str() != expected_status {
-            let mut warning = Map::new();
-            insert(&mut warning, "code", "validator_status_mismatch");
-            insert(&mut warning, "expected_status", expected_status);
-            insert(&mut warning, "actual_status", report.status().as_str());
-            warnings.push(warning);
-        }
-    }
-    let recommended_action = report_recommended_action(&report);
-    let commands = report_recommended_commands(lease_id, recommended_action);
+    let recommended_action = report_recommended_action(&lease, &report);
+    let commands = report_recommended_commands(
+        lease_id,
+        recommended_action,
+        (recommended_action == "validate" && external)
+            .then(|| report_display_path(root, &report_path)),
+    );
 
     let mut payload = json_ok();
     insert(&mut payload, "lease_id", lease_id);
     insert(&mut payload, "task", lease.task_value());
     insert(&mut payload, "report", report_path.rel);
+    if external {
+        insert(
+            &mut payload,
+            "report_source",
+            path_to_string(&report_path.path),
+        );
+    }
     insert(&mut payload, "report_kind", report.kind().as_str());
     insert(&mut payload, "status", report.status().as_str());
     insert(&mut payload, "next", report.status().next_action());
@@ -2016,7 +2138,10 @@ fn validator_status_for_verdict(verdict: &ValidatorVerdict) -> &'static str {
     }
 }
 
-fn report_recommended_action(report: &ReportFrontmatter) -> &'static str {
+fn report_recommended_action(lease: &LeaseRecord, report: &ReportFrontmatter) -> &'static str {
+    if !lease.status().is_active() {
+        return "none";
+    }
     match report.kind() {
         ReportKind::Worker => match report.status() {
             ReportStatus::ReadyForValidation | ReportStatus::Done => "validate",
@@ -2048,19 +2173,28 @@ fn report_recommended_action(report: &ReportFrontmatter) -> &'static str {
     }
 }
 
-fn report_recommended_commands(lease_id: &str, action: &str) -> Vec<Vec<String>> {
+fn report_recommended_commands(
+    lease_id: &str,
+    action: &str,
+    source_report: Option<String>,
+) -> Vec<Vec<String>> {
     let role = match action {
         "validate" => "validator",
         "fix" => "worker",
         _ => return Vec::new(),
     };
-    vec![vec![
+    let mut command = vec![
         "packet".to_string(),
         "--lease".to_string(),
         lease_id.to_string(),
         "--role".to_string(),
         role.to_string(),
-    ]]
+    ];
+    if let Some(source_report) = source_report {
+        command.push("--source-report".to_string());
+        command.push(source_report);
+    }
+    vec![command]
 }
 
 pub(crate) fn git_status(root: &Path) -> OrchResult<Map<String, Value>> {

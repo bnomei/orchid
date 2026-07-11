@@ -6572,6 +6572,12 @@ fn role_specific_packets_and_reports_have_distinct_contracts() {
         "--lease-id",
         "l_role_reports",
     ]);
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_role_reports.json")).unwrap(),
+    )
+    .unwrap();
+    let lease_started_at = lease["started_at"].as_str().unwrap();
+    let context_revision = lease["context_snapshot"]["revision"].as_str().unwrap();
 
     for (role, report) in [
         ("worker", ".orchid/reports/l_role_reports.md"),
@@ -6613,7 +6619,9 @@ fn role_specific_packets_and_reports_have_distinct_contracts() {
 
     fs::write(
         repo.root.join(".orchid/reports/l_role_reports.md"),
-        "+++\nlease_id = \"l_role_reports\"\nkind = \"worker\"\nstatus = \"ready_for_validation\"\ncommands_run = [\"cargo test\"]\nresult = \"implemented\"\n+++\n\n## Summary\n\nImplemented.\n\n## Evidence\n\nTests pass.\n",
+        format!(
+            "+++\nlease_id = \"l_role_reports\"\nlease_started_at = \"{lease_started_at}\"\ncontext_revision = \"{context_revision}\"\nkind = \"worker\"\nstatus = \"ready_for_validation\"\ncommands_run = [\"cargo test\"]\nresult = \"implemented\"\n+++\n\n## Summary\n\nImplemented.\n\n## Evidence\n\nTests pass.\n"
+        ),
     )
     .unwrap();
     let worker = repo.run(&["report-check", ".orchid/reports/l_role_reports.md"]);
@@ -6639,7 +6647,7 @@ fn role_specific_packets_and_reports_have_distinct_contracts() {
         fs::write(
             &validator_path,
             format!(
-                "+++\nlease_id = \"l_role_reports\"\nkind = \"validator\"\nstatus = \"{status}\"\nverdict = \"{verdict}\"\ncommands_run = [\"cargo test\"]\nresult = \"checked\"\n+++\n\n## Summary\n\nValidated.\n\n## Evidence\n\nTests pass.\n"
+                "+++\nlease_id = \"l_role_reports\"\nlease_started_at = \"{lease_started_at}\"\ncontext_revision = \"{context_revision}\"\nkind = \"validator\"\nstatus = \"{status}\"\nverdict = \"{verdict}\"\ncommands_run = [\"cargo test\"]\nresult = \"checked\"\n+++\n\n## Summary\n\nValidated.\n\n## Evidence\n\nTests pass.\n"
             ),
         )
         .unwrap();
@@ -6669,7 +6677,7 @@ fn role_specific_packets_and_reports_have_distinct_contracts() {
         fs::write(
             repo.root.join(&path),
             format!(
-                "+++\nlease_id = \"l_role_reports\"\nkind = \"{kind}\"\nstatus = \"{status}\"\ncommands_run = []\nresult = \"done\"\n+++\n\n## Summary\n\nDone.\n\n## Evidence\n\nReviewed.\n"
+                "+++\nlease_id = \"l_role_reports\"\nlease_started_at = \"{lease_started_at}\"\ncontext_revision = \"{context_revision}\"\nkind = \"{kind}\"\nstatus = \"{status}\"\ncommands_run = []\nresult = \"done\"\n+++\n\n## Summary\n\nDone.\n\n## Evidence\n\nReviewed.\n"
             ),
         )
         .unwrap();
@@ -6713,12 +6721,81 @@ fn report_check_warns_on_thin_legacy_evidence_without_rejecting_it() {
     assert_eq!(
         codes,
         vec![
+            "report_lease_started_at_missing",
+            "report_context_revision_missing",
             "report_commands_run_invalid",
             "report_result_empty",
             "report_summary_missing_or_empty",
             "report_evidence_missing_or_empty"
         ]
     );
+}
+
+#[test]
+fn validator_report_requires_status_to_match_its_verdict() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:validator",
+        "--lease-id",
+        "l_validator_mismatch",
+    ]);
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_validator_mismatch.json")).unwrap(),
+    )
+    .unwrap();
+    let started_at = lease["started_at"].as_str().unwrap();
+    let revision = lease["context_snapshot"]["revision"].as_str().unwrap();
+    fs::write(
+        repo.root
+            .join(".orchid/reports/l_validator_mismatch-validator.md"),
+        format!(
+            "+++\nlease_id = \"l_validator_mismatch\"\nlease_started_at = \"{started_at}\"\ncontext_revision = \"{revision}\"\nkind = \"validator\"\nstatus = \"blocked\"\nverdict = \"passed\"\ncommands_run = []\nresult = \"contradictory\"\n+++\n\n## Summary\n\nDone.\n\n## Evidence\n\nChecked.\n"
+        ),
+    )
+    .unwrap();
+
+    let checked = repo.run_fail(&[
+        "report-check",
+        ".orchid/reports/l_validator_mismatch-validator.md",
+    ]);
+    assert_eq!(checked["code"], "validator_status_mismatch");
+    assert_eq!(checked["verdict"], "passed");
+    assert_eq!(checked["expected_status"], "done");
+}
+
+#[test]
+fn terminal_report_check_is_observational_without_packet_action() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:terminal",
+        "--lease-id",
+        "l_terminal_report",
+    ]);
+    fs::write(
+        repo.root.join(".orchid/reports/l_terminal_report.md"),
+        "+++\nlease_id = \"l_terminal_report\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"done\"\n+++\n\n## Summary\n\nDone.\n\n## Evidence\n\nChecked.\n",
+    )
+    .unwrap();
+    repo.run(&[
+        "complete",
+        "--lease",
+        "l_terminal_report",
+        "--verified-by",
+        "mayor",
+    ]);
+
+    let checked = repo.run(&["report-check", ".orchid/reports/l_terminal_report.md"]);
+    assert_eq!(checked["recommended_action"], "none");
+    assert_eq!(checked["commands"], serde_json::json!([]));
+    assert_eq!(checked["actions"], serde_json::json!([]));
 }
 
 #[test]
@@ -6975,6 +7052,12 @@ fn report_check_accepts_report_from_external_orchid_reports_dir() {
         "--lease-id",
         "l_test",
     ]);
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_test.json")).unwrap(),
+    )
+    .unwrap();
+    let lease_started_at = lease["started_at"].as_str().unwrap();
+    let context_revision = lease["context_snapshot"]["revision"].as_str().unwrap();
 
     let worktree = repo.root.parent().unwrap().join("other-worktree");
     git(
@@ -6985,20 +7068,60 @@ fn report_check_accepts_report_from_external_orchid_reports_dir() {
     let report_path = worktree.join(".orchid/reports/l_test.md");
     fs::write(
         &report_path,
-        "+++\nlease_id = \"l_test\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n",
+        format!(
+            "+++\nlease_id = \"l_test\"\nlease_started_at = \"{lease_started_at}\"\ncontext_revision = \"{context_revision}\"\nkind = \"worker\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n\nDone.\n\n## Evidence\n\nExternal worker report.\n"
+        ),
     )
     .unwrap();
+    let canonical_report_path = fs::canonicalize(&report_path).unwrap();
+    let canonical_report = canonical_report_path.to_str().unwrap();
 
     let payload = repo.run(&["report-check", report_path.to_str().unwrap()]);
     assert_eq!(payload["lease_id"], "l_test");
     assert_eq!(payload["report"], ".orchid/reports/l_test.md");
     assert_eq!(payload["next"], "validation");
+    assert_eq!(payload["report_source"], canonical_report);
+    assert_eq!(
+        payload["commands"][0],
+        serde_json::json!([
+            "packet",
+            "--lease",
+            "l_test",
+            "--role",
+            "validator",
+            "--source-report",
+            canonical_report
+        ])
+    );
+    let packet = repo.run(&[
+        "packet",
+        "--lease",
+        "l_test",
+        "--role",
+        "validator",
+        "--source-report",
+        report_path.to_str().unwrap(),
+    ]);
+    assert_eq!(packet["source_report"], canonical_report);
+    let packet_text =
+        fs::read_to_string(repo.root.join(packet["packet"].as_str().unwrap())).unwrap();
+    assert!(packet_text.contains(canonical_report));
 
     let relative_report_path = Path::new("..").join("other-worktree/.orchid/reports/l_test.md");
     let payload = repo.run_from_cwd(&["report-check", relative_report_path.to_str().unwrap()]);
     assert_eq!(payload["lease_id"], "l_test");
     assert_eq!(payload["report"], ".orchid/reports/l_test.md");
     assert_eq!(payload["next"], "validation");
+
+    fs::write(
+        &report_path,
+        format!(
+            "+++\nlease_id = \"l_test\"\nlease_started_at = \"old-instance\"\ncontext_revision = \"{context_revision}\"\nkind = \"worker\"\nstatus = \"ready_for_validation\"\ncommands_run = []\nresult = \"passed\"\n+++\n\n## Summary\n\nDone.\n\n## Evidence\n\nExternal worker report.\n"
+        ),
+    )
+    .unwrap();
+    let stale_instance = repo.run_fail(&["report-check", report_path.to_str().unwrap()]);
+    assert_eq!(stale_instance["code"], "report_lease_instance_mismatch");
 }
 
 #[test]
