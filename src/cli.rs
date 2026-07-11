@@ -90,10 +90,10 @@ enum Command {
     Packet(PacketArgs),
     #[command(
         name = "report-check",
-        about = "Validate a worker report before completion"
+        about = "Validate a role report and return evidence diagnostics"
     )]
     ReportCheck {
-        #[arg(help = "Report path, usually .orchid/reports/<lease>.md")]
+        #[arg(help = "Canonical worker, validator, reviewer, or loop-runner report path")]
         report: String,
     },
     #[command(name = "git-status", about = "Return compact Git status")]
@@ -539,13 +539,22 @@ fn finalize_json_ack(payload: &mut Map<String, Value>, command: &Command) -> boo
         "command".to_string(),
         Value::String(command.name().to_string()),
     );
-    if matches!(command, Command::Next(_)) {
-        finalize_next_actions(payload);
+    if matches!(command, Command::Next(_) | Command::ReportCheck { .. }) {
+        finalize_actions(payload);
+    }
+    if matches!(command, Command::Next(_)) && !payload.contains_key("recommended_action") {
+        if let Some(phase) = payload
+            .get("phase")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            payload.insert("recommended_action".to_string(), Value::String(phase));
+        }
     }
     ok
 }
 
-fn finalize_next_actions(payload: &mut Map<String, Value>) {
+fn finalize_actions(payload: &mut Map<String, Value>) {
     let commands = payload
         .get("commands")
         .and_then(Value::as_array)
@@ -571,12 +580,6 @@ fn finalize_next_actions(payload: &mut Map<String, Value>) {
     payload.insert("action_version".to_string(), Value::from(ACTION_VERSION));
     payload.insert("commands".to_string(), Value::Array(commands));
     payload.insert("actions".to_string(), Value::Array(actions));
-    if let Some(phase) = payload.get("phase").and_then(Value::as_str) {
-        payload.insert(
-            "recommended_action".to_string(),
-            Value::String(phase.to_string()),
-        );
-    }
 }
 
 fn cmd_capabilities() -> Map<String, Value> {
@@ -617,6 +620,7 @@ fn cmd_capabilities() -> Map<String, Value> {
             "leased_context_snapshots",
             "read_only_agent_status",
             "released_lease_attribution",
+            "role_specific_reports",
             "spec_scoped_next",
         ]),
     );

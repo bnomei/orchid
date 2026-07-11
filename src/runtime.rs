@@ -418,15 +418,29 @@ pub(crate) fn compact_lease(
 }
 
 pub(crate) fn report_path_for_lease(root: &Path, lease: &LeaseRecord) -> OrchResult<PathBuf> {
+    report_path_for_lease_role(root, lease, "worker")
+}
+
+pub(crate) fn report_path_for_lease_role(
+    root: &Path,
+    lease: &LeaseRecord,
+    role: &str,
+) -> OrchResult<PathBuf> {
     let lease_id = lease
         .id()
         .ok_or_else(|| OrchError::new("lease missing lease_id"))?;
     validate_lease_id(lease_id)?;
-    repo_path(
-        root,
-        reports_dir(root).join(format!("{lease_id}.md")),
-        "report_path",
-    )
+    let filename = match role {
+        "worker" => format!("{lease_id}.md"),
+        "validator" | "reviewer" | "loop-runner" => format!("{lease_id}-{role}.md"),
+        _ => {
+            return Err(
+                OrchError::coded("invalid report kind", ErrorCode::InvalidReportKind)
+                    .detail("kind", role),
+            )
+        }
+    };
+    repo_path(root, reports_dir(root).join(filename), "report_path")
 }
 
 fn remove_if_exists(path: &Path, root: &Path, deleted: &mut Vec<String>) -> OrchResult<()> {
@@ -500,11 +514,13 @@ pub(crate) fn close_lease_files(
         }
     }
 
-    remove_if_exists(
-        &reports_dir(root).join(format!("{lease_id}.md")),
-        root,
-        &mut deleted,
-    )?;
+    for role in ["worker", "validator", "reviewer", "loop-runner"] {
+        remove_if_exists(
+            &report_path_for_lease_role(root, lease, role)?,
+            root,
+            &mut deleted,
+        )?;
+    }
     remove_if_exists(
         &buds_dir(root).join(format!("{lease_id}.md")),
         root,

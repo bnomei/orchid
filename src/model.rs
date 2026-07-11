@@ -946,15 +946,107 @@ impl ReportStatus {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) enum ReportKind {
+    Worker,
+    Validator,
+    Reviewer,
+    LoopRunner,
+    Unknown(String),
+}
+
+impl ReportKind {
+    fn from_value(value: Option<&Value>) -> Self {
+        match value {
+            None => Self::Worker,
+            Some(Value::String(raw)) => match raw.as_str() {
+                "worker" => Self::Worker,
+                "validator" => Self::Validator,
+                "reviewer" => Self::Reviewer,
+                "loop-runner" => Self::LoopRunner,
+                _ => Self::Unknown(raw.clone()),
+            },
+            Some(_) => Self::Unknown("<non-string>".to_string()),
+        }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        match self {
+            Self::Worker => "worker",
+            Self::Validator => "validator",
+            Self::Reviewer => "reviewer",
+            Self::LoopRunner => "loop-runner",
+            Self::Unknown(raw) => raw,
+        }
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        !matches!(self, Self::Unknown(_))
+    }
+
+    pub(crate) fn is_validator(&self) -> bool {
+        matches!(self, Self::Validator)
+    }
+
+    pub(crate) fn is_worker(&self) -> bool {
+        matches!(self, Self::Worker)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ValidatorVerdict {
+    Passed,
+    Failed,
+    Blocked,
+    Unknown(String),
+}
+
+impl ValidatorVerdict {
+    fn from_value(value: Option<&Value>) -> Self {
+        match value {
+            Some(Value::String(raw)) => match raw.as_str() {
+                "passed" => Self::Passed,
+                "failed" => Self::Failed,
+                "blocked" => Self::Blocked,
+                _ => Self::Unknown(raw.clone()),
+            },
+            Some(_) => Self::Unknown("<non-string>".to_string()),
+            None => Self::Unknown(String::new()),
+        }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Blocked => "blocked",
+            Self::Unknown(raw) => raw,
+        }
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        !matches!(self, Self::Unknown(_))
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ReportFrontmatter {
     data: Map<String, Value>,
+    kind: ReportKind,
     status: ReportStatus,
+    validator_verdict: ValidatorVerdict,
 }
 
 impl ReportFrontmatter {
     pub(crate) fn from_map(data: Map<String, Value>) -> Self {
+        let kind = ReportKind::from_value(data.get("kind"));
         let status = ReportStatus::parse(data.get("status").and_then(Value::as_str).unwrap_or(""));
-        Self { data, status }
+        let validator_verdict = ValidatorVerdict::from_value(data.get("verdict"));
+        Self {
+            data,
+            kind,
+            status,
+            validator_verdict,
+        }
     }
 
     pub(crate) fn lease_id(&self) -> &str {
@@ -966,6 +1058,28 @@ impl ReportFrontmatter {
 
     pub(crate) fn status(&self) -> &ReportStatus {
         &self.status
+    }
+
+    pub(crate) fn kind(&self) -> &ReportKind {
+        &self.kind
+    }
+
+    pub(crate) fn validator_verdict(&self) -> &ValidatorVerdict {
+        &self.validator_verdict
+    }
+
+    pub(crate) fn commands_run_count(&self) -> Option<usize> {
+        self.data
+            .get("commands_run")?
+            .as_array()
+            .and_then(|items| items.iter().all(Value::is_string).then_some(items.len()))
+    }
+
+    pub(crate) fn result_is_non_empty(&self) -> bool {
+        self.data
+            .get("result")
+            .and_then(Value::as_str)
+            .is_some_and(|result| !result.trim().is_empty())
     }
 }
 

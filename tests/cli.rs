@@ -391,6 +391,10 @@ fn ack_v1_actions_and_capabilities_are_advertised() {
         capabilities["markdown_commands"],
         serde_json::json!(["goal"])
     );
+    assert!(capabilities["features"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("role_specific_reports".to_string())));
 
     let failed = repo.run_fail(&["next"]);
     assert_eq!(failed["ack_version"], 1);
@@ -6554,6 +6558,258 @@ fn report_check_accepts_terminal_leases() {
     assert_eq!(released["lease_id"], "l_released");
     assert_eq!(released["task"], "example/T005");
     assert_eq!(released["status"], "ready_for_validation");
+}
+
+#[test]
+fn role_specific_packets_and_reports_have_distinct_contracts() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:roles",
+        "--lease-id",
+        "l_role_reports",
+    ]);
+
+    for (role, report) in [
+        ("worker", ".orchid/reports/l_role_reports.md"),
+        ("validator", ".orchid/reports/l_role_reports-validator.md"),
+        ("reviewer", ".orchid/reports/l_role_reports-reviewer.md"),
+        (
+            "loop-runner",
+            ".orchid/reports/l_role_reports-loop-runner.md",
+        ),
+    ] {
+        let packet = repo.run(&["packet", "--lease", "l_role_reports", "--role", role]);
+        assert_eq!(packet["report_kind"], role);
+        assert_eq!(packet["report"], report);
+        let text = fs::read_to_string(repo.root.join(packet["packet"].as_str().unwrap())).unwrap();
+        assert!(text.contains(&format!("kind = \"{role}\"")));
+        assert!(text.contains(&format!(
+            "## {} Report Contract",
+            match role {
+                "worker" => "Worker",
+                "validator" => "Validator",
+                "reviewer" => "Reviewer",
+                "loop-runner" => "Loop-Runner",
+                _ => unreachable!(),
+            }
+        )));
+        if role == "worker" {
+            assert!(packet.get("source_report").is_none());
+            assert!(text.contains("status = \"ready_for_validation\""));
+        } else {
+            assert_eq!(packet["source_report"], ".orchid/reports/l_role_reports.md");
+            assert!(text.contains("status = \"done\""));
+            assert!(text.contains("- Source report: `.orchid/reports/l_role_reports.md`"));
+        }
+        if role == "validator" {
+            assert!(text.contains("verdict = \"\""));
+            assert!(text.contains("pair it with status done, needs_fix, or blocked respectively"));
+        }
+    }
+
+    fs::write(
+        repo.root.join(".orchid/reports/l_role_reports.md"),
+        "+++\nlease_id = \"l_role_reports\"\nkind = \"worker\"\nstatus = \"ready_for_validation\"\ncommands_run = [\"cargo test\"]\nresult = \"implemented\"\n+++\n\n## Summary\n\nImplemented.\n\n## Evidence\n\nTests pass.\n",
+    )
+    .unwrap();
+    let worker = repo.run(&["report-check", ".orchid/reports/l_role_reports.md"]);
+    assert_eq!(worker["report_kind"], "worker");
+    assert_eq!(worker["commands_run_count"], 1);
+    assert_eq!(worker["warnings"], serde_json::json!([]));
+    assert_eq!(worker["recommended_action"], "validate");
+    assert_eq!(worker["action_version"], 1);
+    assert_eq!(
+        worker["commands"][0],
+        serde_json::json!(["packet", "--lease", "l_role_reports", "--role", "validator"])
+    );
+    assert_eq!(worker["actions"][0]["argv"], worker["commands"][0]);
+
+    let validator_path = repo
+        .root
+        .join(".orchid/reports/l_role_reports-validator.md");
+    for (status, verdict, action, command_role) in [
+        ("done", "passed", "complete", None),
+        ("needs_fix", "failed", "fix", Some("worker")),
+        ("blocked", "blocked", "resolve_blocker", None),
+    ] {
+        fs::write(
+            &validator_path,
+            format!(
+                "+++\nlease_id = \"l_role_reports\"\nkind = \"validator\"\nstatus = \"{status}\"\nverdict = \"{verdict}\"\ncommands_run = [\"cargo test\"]\nresult = \"checked\"\n+++\n\n## Summary\n\nValidated.\n\n## Evidence\n\nTests pass.\n"
+            ),
+        )
+        .unwrap();
+        let checked = repo.run(&[
+            "report-check",
+            ".orchid/reports/l_role_reports-validator.md",
+        ]);
+        assert_eq!(checked["report_kind"], "validator");
+        assert_eq!(checked["verdict"], verdict);
+        assert_eq!(checked["recommended_action"], action);
+        assert_eq!(checked["warnings"], serde_json::json!([]));
+        assert_eq!(
+            checked["source_report"],
+            ".orchid/reports/l_role_reports.md"
+        );
+        match command_role {
+            Some(role) => assert_eq!(checked["commands"][0][4], role),
+            None => assert_eq!(checked["commands"], serde_json::json!([])),
+        }
+    }
+
+    for (kind, status, action) in [
+        ("reviewer", "done", "complete"),
+        ("loop-runner", "done", "continue"),
+    ] {
+        let path = format!(".orchid/reports/l_role_reports-{kind}.md");
+        fs::write(
+            repo.root.join(&path),
+            format!(
+                "+++\nlease_id = \"l_role_reports\"\nkind = \"{kind}\"\nstatus = \"{status}\"\ncommands_run = []\nresult = \"done\"\n+++\n\n## Summary\n\nDone.\n\n## Evidence\n\nReviewed.\n"
+            ),
+        )
+        .unwrap();
+        let checked = repo.run(&["report-check", &path]);
+        assert_eq!(checked["report_kind"], kind);
+        assert_eq!(checked["recommended_action"], action);
+        assert_eq!(
+            checked["source_report"],
+            ".orchid/reports/l_role_reports.md"
+        );
+    }
+}
+
+#[test]
+fn report_check_warns_on_thin_legacy_evidence_without_rejecting_it() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:legacy",
+        "--lease-id",
+        "l_legacy_report",
+    ]);
+    fs::write(
+        repo.root.join(".orchid/reports/l_legacy_report.md"),
+        "+++\nlease_id = \"l_legacy_report\"\nstatus = \"ready_for_validation\"\ncommands_run = \"not-an-array\"\nresult = \"\"\n+++\n\n## Summary\n\n## Notes\n\nThin legacy report.\n",
+    )
+    .unwrap();
+
+    let checked = repo.run(&["report-check", ".orchid/reports/l_legacy_report.md"]);
+    assert_eq!(checked["report_kind"], "worker");
+    assert_eq!(checked["commands_run_count"], 0);
+    let codes: Vec<&str> = checked["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|warning| warning["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        codes,
+        vec![
+            "report_commands_run_invalid",
+            "report_result_empty",
+            "report_summary_missing_or_empty",
+            "report_evidence_missing_or_empty"
+        ]
+    );
+}
+
+#[test]
+fn report_check_rejects_invalid_role_contracts() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:invalid-reports",
+        "--lease-id",
+        "l_invalid_report",
+    ]);
+
+    fs::write(
+        repo.root.join(".orchid/reports/l_invalid_report.md"),
+        "+++\nlease_id = \"l_invalid_report\"\nkind = \"unknown\"\nstatus = \"done\"\n+++\n",
+    )
+    .unwrap();
+    let invalid_kind = repo.run_fail(&["report-check", ".orchid/reports/l_invalid_report.md"]);
+    assert_eq!(invalid_kind["code"], "invalid_report_kind");
+
+    fs::write(
+        repo.root
+            .join(".orchid/reports/l_invalid_report-validator.md"),
+        "+++\nlease_id = \"l_invalid_report\"\nkind = \"validator\"\nstatus = \"done\"\ncommands_run = []\nresult = \"checked\"\n+++\n\n## Summary\n\nDone.\n\n## Evidence\n\nChecked.\n",
+    )
+    .unwrap();
+    let missing_verdict = repo.run_fail(&[
+        "report-check",
+        ".orchid/reports/l_invalid_report-validator.md",
+    ]);
+    assert_eq!(missing_verdict["code"], "invalid_validator_verdict");
+
+    fs::write(
+        repo.root
+            .join(".orchid/reports/l_invalid_report-validator.md"),
+        "+++\nlease_id = \"l_invalid_report\"\nkind = \"reviewer\"\nstatus = \"done\"\ncommands_run = []\nresult = \"checked\"\n+++\n\n## Summary\n\nDone.\n\n## Evidence\n\nChecked.\n",
+    )
+    .unwrap();
+    let forged_kind = repo.run_fail(&[
+        "report-check",
+        ".orchid/reports/l_invalid_report-validator.md",
+    ]);
+    assert_eq!(forged_kind["code"], "report_lease_mismatch");
+    assert_eq!(
+        forged_kind["expected_report"],
+        ".orchid/reports/l_invalid_report-reviewer.md"
+    );
+}
+
+#[test]
+fn validator_reports_do_not_trigger_worker_validation_and_cleanup_removes_all_roles() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:role-cleanup",
+        "--lease-id",
+        "l_role_cleanup",
+    ]);
+    for suffix in ["-validator", "-reviewer", "-loop-runner"] {
+        fs::write(
+            repo.root
+                .join(format!(".orchid/reports/l_role_cleanup{suffix}.md")),
+            "role report\n",
+        )
+        .unwrap();
+    }
+
+    let next = repo.run(&["next", "--spec", "example"]);
+    assert_eq!(next["phase"], "wait");
+
+    fs::write(
+        repo.root.join(".orchid/reports/l_role_cleanup.md"),
+        "worker report\n",
+    )
+    .unwrap();
+    let next = repo.run(&["next", "--spec", "example"]);
+    assert_eq!(next["phase"], "validate");
+
+    repo.run(&["close", "--lease", "l_role_cleanup", "--force"]);
+    for suffix in ["", "-validator", "-reviewer", "-loop-runner"] {
+        assert!(!repo
+            .root
+            .join(format!(".orchid/reports/l_role_cleanup{suffix}.md"))
+            .exists());
+    }
 }
 
 #[test]

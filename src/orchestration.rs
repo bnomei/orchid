@@ -18,7 +18,8 @@ use crate::gitstate::{
 };
 use crate::model::{
     lease_context_revision, validate_lease_id, ActiveLeaseRecordInput, LeaseId, LeaseMode,
-    LeaseRecord, ReasoningEffort, ReportFrontmatter, SpecPolicy,
+    LeaseRecord, ReasoningEffort, ReportFrontmatter, ReportKind, ReportStatus, SpecPolicy,
+    ValidatorVerdict,
 };
 use crate::paths::{
     atomic_write, buds_dir, ensure_runtime_dirs, leases_dir, packets_dir, path_to_string, relpath,
@@ -30,8 +31,8 @@ use crate::planner::{
 use crate::runtime::{
     active_leases, active_leases_lenient, all_leases, clean_spec_research, cleanup_runtime_leases,
     close_lease_files, compact_lease, lease_id_for, lease_stale, load_lease,
-    prune_empty_runtime_dirs, report_path_for_lease, runtime_lock, save_lease, scan_leases,
-    spec_research_dir, CorruptLeaseFile,
+    prune_empty_runtime_dirs, report_path_for_lease, report_path_for_lease_role, runtime_lock,
+    save_lease, scan_leases, spec_research_dir, CorruptLeaseFile,
 };
 use crate::specs::{
     dependency_block, effective_lease_scope, ensure_spec_dispatchable, inactive_spec_names,
@@ -161,6 +162,26 @@ impl PacketRoleKind {
                 "Review the committed or staged task changes and report actionable findings."
             }
             Self::LoopRunner => "Run exactly the leased loop cycle and return bounded evidence.",
+        }
+    }
+
+    fn report_status(self) -> &'static str {
+        match self {
+            Self::Worker => "ready_for_validation",
+            Self::Validator | Self::Reviewer | Self::LoopRunner => "done",
+        }
+    }
+
+    fn has_source_report(self) -> bool {
+        self != Self::Worker
+    }
+
+    fn report_guidance(self) -> Option<&'static str> {
+        match self {
+            Self::Validator => Some(
+                "Set verdict to passed, failed, or blocked; pair it with status done, needs_fix, or blocked respectively.",
+            ),
+            _ => None,
         }
     }
 }
@@ -1339,7 +1360,23 @@ pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<Str
     let mut payload = json_ok();
     insert(&mut payload, "lease_id", request.lease.clone());
     insert(&mut payload, "role", request.role.as_str());
+    insert(&mut payload, "report_kind", request.role.as_str());
     insert(&mut payload, "packet", packet);
+    insert(
+        &mut payload,
+        "report",
+        relpath(
+            &report_path_for_lease_role(root, &lease, request.role.as_str())?,
+            root,
+        ),
+    );
+    if request.role.has_source_report() {
+        insert(
+            &mut payload,
+            "source_report",
+            relpath(&report_path_for_lease(root, &lease)?, root),
+        );
+    }
     insert_worker_execution_metadata(
         &mut payload,
         lease
@@ -1359,21 +1396,44 @@ fn render_packet_for_lease(
     lease_id: &str,
     role: PacketRoleKind,
 ) -> OrchResult<String> {
-    let report_path = report_path_for_lease(root, lease)?;
+    let report_path = report_path_for_lease_role(root, lease, role.as_str())?;
+    let source_report_path = role
+        .has_source_report()
+        .then(|| report_path_for_lease(root, lease))
+        .transpose()?;
     let packet_path = repo_path(
         root,
         packets_dir(root).join(format!("{}-{}.md", lease_id, role.as_str())),
         "packet_path",
     )?;
+    let verdict = (role == PacketRoleKind::Validator).then_some("verdict = \"\"\n");
     let report_template = format!(
-        "+++\nlease_id = {}\nstatus = {}\ncommands_run = []\nresult = \"\"\n+++\n\n## Summary\n\n## Evidence\n\n## Notes\n",
+        "+++\nlease_id = {}\nkind = {}\nstatus = {}\n{}commands_run = []\nresult = \"\"\n+++\n\n## Summary\n\n## Evidence\n\n## Notes\n",
         quote_toml_string(lease_id),
-        quote_toml_string("ready_for_validation")
+        quote_toml_string(role.as_str()),
+        quote_toml_string(role.report_status()),
+        verdict.unwrap_or_default(),
     );
     let packet = if lease.is_bud() {
-        render_bud_packet(root, lease, lease_id, role, &report_path, &report_template)?
+        render_bud_packet(
+            root,
+            lease,
+            lease_id,
+            role,
+            &report_path,
+            source_report_path.as_deref(),
+            &report_template,
+        )?
     } else {
-        render_task_packet(root, lease, lease_id, role, &report_path, &report_template)?
+        render_task_packet(
+            root,
+            lease,
+            lease_id,
+            role,
+            &report_path,
+            source_report_path.as_deref(),
+            &report_template,
+        )?
     };
     atomic_write(&packet_path, &packet)?;
     let packet_rel = relpath(&packet_path, root);
@@ -1406,6 +1466,7 @@ fn render_task_packet(
     lease_id: &str,
     role: PacketRoleKind,
     report_path: &Path,
+    source_report_path: Option<&Path>,
     report_template: &str,
 ) -> OrchResult<String> {
     let policy = match lease.spec_policy() {
@@ -1490,16 +1551,27 @@ fn render_task_packet(
             "- Report path: {}",
             packet_inline_code(&relpath(report_path, root))
         ),
+        source_report_path
+            .map(|path| {
+                format!(
+                    "- Source report: {}",
+                    packet_inline_code(&relpath(path, root))
+                )
+            })
+            .unwrap_or_default(),
         format!("- Spec policy: {}", packet_inline_code(&policy_text)),
         String::new(),
-        "## Worker Report Contract".to_string(),
+        format!("## {} Report Contract", role.title()),
         String::new(),
-        "Write a Markdown report with TOML frontmatter to the report path. Minimal template:"
-            .to_string(),
+        format!(
+            "Write a Markdown {} report with TOML frontmatter to the report path. Minimal template:",
+            role.as_str()
+        ),
         String::new(),
         "```md".to_string(),
         report_template.trim_end().to_string(),
         "```".to_string(),
+        role.report_guidance().unwrap_or_default().to_string(),
         String::new(),
     ];
     packet.extend(untrusted_markdown_block(
@@ -1535,6 +1607,7 @@ fn render_bud_packet(
     lease_id: &str,
     role: PacketRoleKind,
     report_path: &Path,
+    source_report_path: Option<&Path>,
     report_template: &str,
 ) -> OrchResult<String> {
     let instructions_path = lease
@@ -1592,15 +1665,26 @@ fn render_bud_packet(
             "- Report path: {}",
             packet_inline_code(&relpath(report_path, root))
         ),
+        source_report_path
+            .map(|path| {
+                format!(
+                    "- Source report: {}",
+                    packet_inline_code(&relpath(path, root))
+                )
+            })
+            .unwrap_or_default(),
         String::new(),
-        "## Worker Report Contract".to_string(),
+        format!("## {} Report Contract", role.title()),
         String::new(),
-        "Write a Markdown report with TOML frontmatter to the report path. Minimal template:"
-            .to_string(),
+        format!(
+            "Write a Markdown {} report with TOML frontmatter to the report path. Minimal template:",
+            role.as_str()
+        ),
         String::new(),
         "```md".to_string(),
         report_template.trim_end().to_string(),
         "```".to_string(),
+        role.report_guidance().unwrap_or_default().to_string(),
         String::new(),
     ];
     packet.extend(untrusted_markdown_block(
@@ -1777,10 +1861,8 @@ pub(crate) fn report_check(
     request: &ReportCheckRequest,
 ) -> OrchResult<Map<String, Value>> {
     let report_path = report_path_from_request(root, &request.report)?;
-    let (meta, _) = split_frontmatter(
-        &crate::paths::read_text(&report_path.path)?,
-        &report_path.path,
-    )?;
+    let report_text = crate::paths::read_text(&report_path.path)?;
+    let (meta, body) = split_frontmatter(&report_text, &report_path.path)?;
     let report = ReportFrontmatter::from_map(meta);
     let lease_id = report.lease_id();
     if lease_id.is_empty() {
@@ -1789,8 +1871,14 @@ pub(crate) fn report_check(
                 .detail("report", report_path.rel),
         );
     }
+    if !report.kind().is_valid() {
+        return Err(
+            OrchError::coded("invalid report kind", ErrorCode::InvalidReportKind)
+                .detail("kind", report.kind().as_str()),
+        );
+    }
     let lease = load_lease(root, lease_id)?;
-    let expected_report_path = report_path_for_lease(root, &lease)?;
+    let expected_report_path = report_path_for_lease_role(root, &lease, report.kind().as_str())?;
     let expected_report = relpath(&expected_report_path, root);
     if expected_report != report_path.rel {
         return Err(
@@ -1806,12 +1894,84 @@ pub(crate) fn report_check(
                 .detail("status", report.status().as_str()),
         );
     }
+    if report.kind().is_validator() && !report.validator_verdict().is_valid() {
+        return Err(OrchError::coded(
+            "invalid validator verdict",
+            ErrorCode::InvalidValidatorVerdict,
+        )
+        .detail("verdict", report.validator_verdict().as_str()));
+    }
+
+    let mut warnings = Vec::new();
+    let commands_run_count = match report.commands_run_count() {
+        Some(count) => count,
+        None => {
+            warnings.push(report_warning(
+                "report_commands_run_invalid",
+                "field",
+                "commands_run",
+            ));
+            0
+        }
+    };
+    if !report.result_is_non_empty() {
+        warnings.push(report_warning("report_result_empty", "field", "result"));
+    }
+    for (heading, code) in [
+        ("## Summary", "report_summary_missing_or_empty"),
+        ("## Evidence", "report_evidence_missing_or_empty"),
+    ] {
+        if !markdown_section_has_content(&body, heading) {
+            warnings.push(report_warning(code, "section", heading));
+        }
+    }
+    if report.kind().is_validator() {
+        let expected_status = validator_status_for_verdict(report.validator_verdict());
+        if report.status().as_str() != expected_status {
+            let mut warning = Map::new();
+            insert(&mut warning, "code", "validator_status_mismatch");
+            insert(&mut warning, "expected_status", expected_status);
+            insert(&mut warning, "actual_status", report.status().as_str());
+            warnings.push(warning);
+        }
+    }
+    let recommended_action = report_recommended_action(&report);
+    let commands = report_recommended_commands(lease_id, recommended_action);
+
     let mut payload = json_ok();
     insert(&mut payload, "lease_id", lease_id);
     insert(&mut payload, "task", lease.task_value());
     insert(&mut payload, "report", report_path.rel);
+    insert(&mut payload, "report_kind", report.kind().as_str());
     insert(&mut payload, "status", report.status().as_str());
     insert(&mut payload, "next", report.status().next_action());
+    insert(
+        &mut payload,
+        "commands_run_count",
+        commands_run_count as i64,
+    );
+    insert(&mut payload, "warnings", objects_array(warnings));
+    insert(&mut payload, "recommended_action", recommended_action);
+    insert(
+        &mut payload,
+        "commands",
+        Value::Array(
+            commands
+                .into_iter()
+                .map(|command| Value::Array(command.into_iter().map(Value::String).collect()))
+                .collect(),
+        ),
+    );
+    if report.kind().is_validator() {
+        insert(&mut payload, "verdict", report.validator_verdict().as_str());
+    }
+    if !report.kind().is_worker() {
+        insert(
+            &mut payload,
+            "source_report",
+            relpath(&report_path_for_lease(root, &lease)?, root),
+        );
+    }
     insert_worker_execution_metadata(
         &mut payload,
         lease
@@ -1820,6 +1980,87 @@ pub(crate) fn report_check(
         lease.worker_model(),
     );
     Ok(payload)
+}
+
+fn report_warning(code: &str, location_kind: &str, location: &str) -> Map<String, Value> {
+    let mut warning = Map::new();
+    insert(&mut warning, "code", code);
+    insert(&mut warning, location_kind, location);
+    warning
+}
+
+fn markdown_section_has_content(body: &str, heading: &str) -> bool {
+    let mut in_section = false;
+    for line in body.lines() {
+        let line = line.trim();
+        if line == heading {
+            in_section = true;
+            continue;
+        }
+        if in_section && line.starts_with("## ") {
+            return false;
+        }
+        if in_section && !line.is_empty() {
+            return true;
+        }
+    }
+    false
+}
+
+fn validator_status_for_verdict(verdict: &ValidatorVerdict) -> &'static str {
+    match verdict {
+        ValidatorVerdict::Passed => "done",
+        ValidatorVerdict::Failed => "needs_fix",
+        ValidatorVerdict::Blocked => "blocked",
+        ValidatorVerdict::Unknown(_) => "",
+    }
+}
+
+fn report_recommended_action(report: &ReportFrontmatter) -> &'static str {
+    match report.kind() {
+        ReportKind::Worker => match report.status() {
+            ReportStatus::ReadyForValidation | ReportStatus::Done => "validate",
+            ReportStatus::NeedsFix => "fix",
+            ReportStatus::Blocked => "resolve_blocker",
+            ReportStatus::Unknown(_) => "",
+        },
+        ReportKind::Validator => match report.validator_verdict() {
+            ValidatorVerdict::Passed => "complete",
+            ValidatorVerdict::Failed => "fix",
+            ValidatorVerdict::Blocked => "resolve_blocker",
+            ValidatorVerdict::Unknown(_) => "",
+        },
+        ReportKind::Reviewer => match report.status() {
+            ReportStatus::Done => "complete",
+            ReportStatus::ReadyForValidation => "validate",
+            ReportStatus::NeedsFix => "fix",
+            ReportStatus::Blocked => "resolve_blocker",
+            ReportStatus::Unknown(_) => "",
+        },
+        ReportKind::LoopRunner => match report.status() {
+            ReportStatus::Done => "continue",
+            ReportStatus::ReadyForValidation => "validate",
+            ReportStatus::NeedsFix => "fix",
+            ReportStatus::Blocked => "resolve_blocker",
+            ReportStatus::Unknown(_) => "",
+        },
+        ReportKind::Unknown(_) => "",
+    }
+}
+
+fn report_recommended_commands(lease_id: &str, action: &str) -> Vec<Vec<String>> {
+    let role = match action {
+        "validate" => "validator",
+        "fix" => "worker",
+        _ => return Vec::new(),
+    };
+    vec![vec![
+        "packet".to_string(),
+        "--lease".to_string(),
+        lease_id.to_string(),
+        "--role".to_string(),
+        role.to_string(),
+    ]]
 }
 
 pub(crate) fn git_status(root: &Path) -> OrchResult<Map<String, Value>> {
