@@ -529,13 +529,6 @@ pub(crate) fn spec_research_dir(root: &Path, spec_id: &str) -> OrchResult<PathBu
     Ok(spec_research_root(root).join(safe_spec_id(spec_id)?))
 }
 
-pub(crate) fn completed_runtime_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
-    Ok(all_leases(root)?
-        .into_iter()
-        .filter(|lease| lease.status().is_completed())
-        .collect())
-}
-
 pub(crate) fn cleanup_runtime_leases(root: &Path) -> OrchResult<Vec<LeaseRecord>> {
     Ok(all_leases(root)?
         .into_iter()

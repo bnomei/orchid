@@ -4669,6 +4669,7 @@ fn next_dispatches_scope_disjoint_ready_tasks_with_parallel_flag() {
 #[test]
 fn next_cleans_released_lease_with_report_without_validation_commands() {
     let repo = Repo::new();
+    repo.init_git();
     let lease = repo.run(&[
         "lease",
         "example",
@@ -4705,6 +4706,7 @@ fn next_cleans_released_lease_with_report_without_validation_commands() {
 #[test]
 fn next_includes_released_lease_in_cleanup() {
     let repo = Repo::new();
+    repo.init_git();
     repo.run(&[
         "lease",
         "example",
@@ -4727,6 +4729,36 @@ fn next_includes_released_lease_in_cleanup() {
     assert_eq!(payload["cleanup"][0]["lease_id"], "l_released_cleanup");
     assert!(payload.get("stage").is_none());
     assert!(payload.get("reports_ready").is_none());
+}
+
+#[test]
+fn next_preflights_dirty_released_lease_before_cleanup() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_released_dirty",
+    ]);
+    fs::write(repo.root.join("src/feature/work.txt"), "released work\n").unwrap();
+    repo.run(&["release", "l_released_dirty", "--reason", "paused"]);
+
+    let payload = repo.run(&["next", "--spec", "example"]);
+    assert_eq!(payload["phase"], "stage");
+    assert_eq!(payload["stage"][0]["lease_id"], "l_released_dirty");
+    assert_eq!(
+        payload["stage"][0]["pathspecs"],
+        serde_json::json!([":(literal)src/feature/work.txt"])
+    );
+    assert_eq!(
+        payload["cmd"],
+        serde_json::json!(["git-stage-plan", "--lease", "l_released_dirty"])
+    );
+    assert!(payload.get("cleanup").is_none());
 }
 
 #[test]
@@ -6762,7 +6794,7 @@ fn stage_plan_marks_unsafe_when_git_unavailable() {
 }
 
 #[test]
-fn git_touched_rejects_released_lease() {
+fn git_touched_and_stage_plan_attribute_released_lease_window() {
     let repo = Repo::new();
     repo.init_git();
     repo.run(&[
@@ -6784,13 +6816,58 @@ fn git_touched_rejects_released_lease() {
 
     repo.run(&["release", "l_x", "--reason", "abandoned"]);
 
-    let touched_fail = repo.run_fail(&["git-touched", "--lease", "l_x"]);
-    assert_eq!(touched_fail["code"], "lease_not_active");
-    assert_eq!(touched_fail["status"], "released");
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_x.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        lease["released_changed"],
+        serde_json::json!(["src/feature/work.txt"])
+    );
 
-    let plan_fail = repo.run_fail(&["git-stage-plan", "--lease", "l_x"]);
-    assert_eq!(plan_fail["code"], "lease_not_active");
-    assert_eq!(plan_fail["status"], "released");
+    let touched = repo.run(&["git-touched", "--lease", "l_x"]);
+    assert_eq!(
+        touched["stage"],
+        serde_json::json!(["src/feature/work.txt"])
+    );
+
+    fs::write(repo.root.join("src/feature/after.txt"), "too late\n").unwrap();
+    let touched = repo.run(&["git-touched", "--lease", "l_x"]);
+    assert_eq!(
+        touched["stage"],
+        serde_json::json!(["src/feature/work.txt"])
+    );
+
+    let plan = repo.run(&["git-stage-plan", "--lease", "l_x"]);
+    assert_eq!(
+        plan["pathspecs"],
+        serde_json::json!([":(literal)src/feature/work.txt"])
+    );
+}
+
+#[test]
+fn released_lease_attribution_still_rejects_out_of_scope_work() {
+    let repo = Repo::new();
+    repo.init_git();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_released_scope",
+    ]);
+    fs::write(repo.root.join("src/other/work.txt"), "foreign work\n").unwrap();
+    repo.run(&["release", "l_released_scope", "--reason", "abandoned"]);
+
+    let touched = repo.run(&["git-touched", "--lease", "l_released_scope"]);
+    assert_eq!(touched["safe_to_stage"], false);
+    assert_eq!(
+        touched["blocked_by"]["out_of_scope"],
+        serde_json::json!(["src/other/work.txt"])
+    );
+    assert!(touched.get("stage").is_none());
 }
 
 #[test]

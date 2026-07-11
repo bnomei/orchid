@@ -15,9 +15,9 @@ use crate::core::{
     OrchError, OrchResult,
 };
 use crate::gitstate::{
-    append_completed_changed_path, apply_completed_changed_snapshot, baseline_fingerprints_value,
-    changed_paths_value, git_status_data, stage_plan_for_lease, status_records_value,
-    touched_for_lease,
+    append_completed_changed_path, apply_completed_changed_snapshot,
+    apply_released_changed_snapshot, baseline_fingerprints_value, changed_paths_value,
+    git_status_data, stage_plan_for_lease, status_records_value, touched_for_lease,
 };
 use crate::model::{
     validate_lease_id, ActiveLeaseRecordInput, LeaseId, LeaseMode, LeaseRecord, ReasoningEffort,
@@ -32,9 +32,9 @@ use crate::planner::{
 };
 use crate::runtime::{
     active_leases, active_leases_lenient, all_leases, clean_spec_research, cleanup_runtime_leases,
-    close_lease_files, compact_lease, completed_runtime_leases, lease_id_for, lease_stale,
-    load_lease, prune_empty_runtime_dirs, report_path_for_lease, runtime_lock, save_lease,
-    scan_leases, spec_research_dir, CorruptLeaseFile,
+    close_lease_files, compact_lease, lease_id_for, lease_stale, load_lease,
+    prune_empty_runtime_dirs, report_path_for_lease, runtime_lock, save_lease, scan_leases,
+    spec_research_dir, CorruptLeaseFile,
 };
 use crate::specs::{
     dependency_block, effective_lease_scope, ensure_spec_dispatchable, inactive_spec_names,
@@ -717,15 +717,11 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
             });
         }
     }
-    let completed: Vec<_> = completed_runtime_leases(root)?
-        .into_iter()
-        .filter(|lease| lease_in_selected_queue(lease, &selected_specs))
-        .collect();
     let cleanup_leases: Vec<_> = cleanup_runtime_leases(root)?
         .into_iter()
         .filter(|lease| lease_in_selected_queue(lease, &selected_specs))
         .collect();
-    let stage = completed
+    let stage = cleanup_leases
         .iter()
         .map(|lease| stage_plan_for_lease(root, lease))
         .collect::<OrchResult<Vec<_>>>()?;
@@ -1044,6 +1040,8 @@ pub(crate) fn release(root: &Path, lease_id: &str, reason: &str) -> OrchResult<M
     if !reason.is_empty() {
         lease.set("release_reason", reason);
     }
+    let released_status = git_status_data(root)?;
+    apply_released_changed_snapshot(&mut lease, &released_status);
     save_lease(root, &lease)?;
     let mut payload = json_ok();
     insert(&mut payload, "lease_id", lease_id);
@@ -1731,9 +1729,12 @@ pub(crate) fn git_status(root: &Path) -> OrchResult<Map<String, Value>> {
 }
 
 fn ensure_lease_for_git_attribution(lease: &LeaseRecord, lease_id: &str) -> OrchResult<()> {
-    if !lease.status().is_active() && !lease.status().is_completed() {
+    if !lease.status().is_active()
+        && !lease.status().is_completed()
+        && !lease.status().is_released()
+    {
         return Err(OrchError::coded(
-            "cannot attribute git changes for a lease that is not active or completed",
+            "cannot attribute git changes for a lease that is not active, completed, or released",
             ErrorCode::LeaseNotActive,
         )
         .detail("lease_id", lease_id)

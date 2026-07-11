@@ -155,6 +155,23 @@ pub(crate) fn lease_record_field_error(data: &Map<String, Value>) -> Option<Stri
             return Some(format!("lease file has invalid or missing {key} field"));
         }
     }
+    for key in ["completed_changed", "released_changed"] {
+        if data.get(key).is_some_and(|value| {
+            !value
+                .as_array()
+                .is_some_and(|items| items.iter().all(Value::is_string))
+        }) {
+            return Some(format!("lease file has invalid {key} field"));
+        }
+    }
+    for key in [
+        "completed_changed_unavailable",
+        "released_changed_unavailable",
+    ] {
+        if data.get(key).is_some_and(|value| !value.is_boolean()) {
+            return Some(format!("lease file has invalid {key} field"));
+        }
+    }
     if !data.get("baseline_status").is_some_and(|value| {
         value
             .as_array()
@@ -631,6 +648,11 @@ impl LeaseRecord {
 
     pub(crate) fn completed_changed(&self) -> Option<Vec<String>> {
         self.get("completed_changed")
+            .map(|value| string_list(Some(value)))
+    }
+
+    pub(crate) fn released_changed(&self) -> Option<Vec<String>> {
+        self.get("released_changed")
             .map(|value| string_list(Some(value)))
     }
 

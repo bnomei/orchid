@@ -484,6 +484,18 @@ pub(crate) fn apply_completed_changed_snapshot(
     }
 }
 
+/// Freeze the visible worktree window when a lease is released.
+pub(crate) fn apply_released_changed_snapshot(
+    lease: &mut LeaseRecord,
+    status: &Map<String, Value>,
+) {
+    if status.get("git").and_then(Value::as_bool).unwrap_or(false) {
+        lease.set("released_changed", changed_paths_value(status));
+    } else {
+        lease.set("released_changed_unavailable", true);
+    }
+}
+
 pub(crate) fn append_completed_changed_path(lease: &mut LeaseRecord, path: &str) {
     let mut paths: BTreeSet<String> = lease
         .completed_changed()
@@ -789,6 +801,10 @@ pub(crate) fn touched_for_lease(
     let completed_window: Option<BTreeSet<String>> = lease
         .completed_changed()
         .map(|paths| paths.into_iter().collect());
+    let released_window: Option<BTreeSet<String>> = lease
+        .released_changed()
+        .map(|paths| paths.into_iter().collect());
+    let terminal_window = completed_window.as_ref().or(released_window.as_ref());
     let completed_snapshot_missing = lease.status().is_completed() && completed_window.is_none();
     let records = git_status_records_from_status(&status);
     let scope = lease.scope();
@@ -836,7 +852,7 @@ pub(crate) fn touched_for_lease(
             continue;
         }
 
-        if let Some(window) = &completed_window {
+        if let Some(window) = terminal_window {
             if !paths.iter().any(|path| window.contains(path)) {
                 continue;
             }
