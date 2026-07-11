@@ -4,6 +4,7 @@
 //! and coordinator-facing ACK fields.
 
 use serde_json::{Map, Value};
+use sha1::{Digest, Sha1};
 
 use crate::core::{insert, string_list, value_to_string, ErrorCode, OrchError, OrchResult};
 
@@ -89,6 +90,32 @@ pub(crate) fn validate_lease_id(value: &str) -> OrchResult<()> {
 
 pub(crate) const LEASE_SCHEMA_VERSION: i64 = 1;
 pub(crate) const LEASE_CONTEXT_SCHEMA_VERSION: i64 = 1;
+
+pub(crate) fn lease_context_revision(kind: &str, fields: &[(&str, &str)]) -> String {
+    let mut hasher = Sha1::new();
+    hash_context_part(&mut hasher, "kind", kind);
+    for (key, value) in fields {
+        hash_context_part(&mut hasher, key, value);
+    }
+    format!("sha1:{}", hex_bytes(hasher.finalize().as_slice()))
+}
+
+fn hash_context_part(hasher: &mut Sha1, key: &str, value: &str) {
+    hasher.update((key.len() as u64).to_be_bytes());
+    hasher.update(key.as_bytes());
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
 
 pub(crate) fn lease_record_field_error(data: &Map<String, Value>) -> Option<String> {
     let schema_version = match data.get("schema_version") {
@@ -200,13 +227,19 @@ pub(crate) fn lease_record_field_error(data: &Map<String, Value>) -> Option<Stri
         {
             return Some("lease file has invalid context snapshot schema_version".to_string());
         }
-        let kind = snapshot.get("kind").and_then(Value::as_str);
-        if !snapshot.get("revision").is_some_and(Value::is_string) {
-            return Some("lease file has invalid context snapshot revision".to_string());
+        let Some(kind) = snapshot.get("kind").and_then(Value::as_str) else {
+            return Some("lease file has invalid context snapshot kind".to_string());
+        };
+        let outer_kind = data.get("kind").and_then(Value::as_str).unwrap_or("task");
+        if kind != outer_kind {
+            return Some("lease file context snapshot kind does not match lease kind".to_string());
         }
+        let Some(revision) = snapshot.get("revision").and_then(Value::as_str) else {
+            return Some("lease file has invalid context snapshot revision".to_string());
+        };
         let required = match kind {
-            Some("task") => ["task_source", "requirements", "design"].as_slice(),
-            Some("bud") => ["instructions"].as_slice(),
+            "task" => ["task_source", "requirements", "design"].as_slice(),
+            "bud" => ["instructions"].as_slice(),
             _ => return Some("lease file has invalid context snapshot kind".to_string()),
         };
         if let Some(key) = required
@@ -216,6 +249,24 @@ pub(crate) fn lease_record_field_error(data: &Map<String, Value>) -> Option<Stri
             return Some(format!(
                 "lease file has invalid context snapshot {key} field"
             ));
+        }
+        let expected_revision = match kind {
+            "task" => lease_context_revision(
+                kind,
+                &[
+                    ("task_source", snapshot["task_source"].as_str().unwrap()),
+                    ("requirements", snapshot["requirements"].as_str().unwrap()),
+                    ("design", snapshot["design"].as_str().unwrap()),
+                ],
+            ),
+            "bud" => lease_context_revision(
+                kind,
+                &[("instructions", snapshot["instructions"].as_str().unwrap())],
+            ),
+            _ => unreachable!(),
+        };
+        if revision != expected_revision {
+            return Some("lease file has invalid context snapshot revision".to_string());
         }
     }
     if let Some(value) = data.get("agent_id") {

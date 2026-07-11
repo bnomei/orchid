@@ -9,7 +9,6 @@ use std::path::{Component, Path, PathBuf};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Map, Value};
-use sha1::{Digest, Sha1};
 
 use crate::core::{insert, json_ok, now_iso, parse_duration, ErrorCode, OrchError, OrchResult};
 use crate::gitstate::{
@@ -18,8 +17,8 @@ use crate::gitstate::{
     git_status_data, stage_plan_for_lease, status_records_value, touched_for_lease,
 };
 use crate::model::{
-    validate_lease_id, ActiveLeaseRecordInput, LeaseId, LeaseMode, LeaseRecord, ReasoningEffort,
-    ReportFrontmatter, SpecPolicy,
+    lease_context_revision, validate_lease_id, ActiveLeaseRecordInput, LeaseId, LeaseMode,
+    LeaseRecord, ReasoningEffort, ReportFrontmatter, SpecPolicy,
 };
 use crate::paths::{
     atomic_write, buds_dir, ensure_runtime_dirs, leases_dir, packets_dir, path_to_string, relpath,
@@ -1409,8 +1408,6 @@ fn render_task_packet(
     report_path: &Path,
     report_template: &str,
 ) -> OrchResult<String> {
-    let task_path = repo_path(root, lease.task_path(), "task_path")?;
-    let spec_dir = task_path.parent().and_then(|p| p.parent()).unwrap_or(root);
     let policy = match lease.spec_policy() {
         Some(policy) => policy.clone(),
         None => {
@@ -1431,15 +1428,19 @@ fn render_task_packet(
             requirements.to_string(),
             design.to_string(),
         ),
-        _ => (
-            crate::paths::read_text(&task_path)?,
-            read_optional(&repo_path(
-                root,
-                spec_dir.join("requirements.md"),
-                "requirements_path",
-            )?)?,
-            read_optional(&repo_path(root, spec_dir.join("design.md"), "design_path")?)?,
-        ),
+        _ => {
+            let task_path = repo_path(root, lease.task_path(), "task_path")?;
+            let spec_dir = task_path.parent().and_then(|p| p.parent()).unwrap_or(root);
+            (
+                crate::paths::read_text(&task_path)?,
+                read_optional(&repo_path(
+                    root,
+                    spec_dir.join("requirements.md"),
+                    "requirements_path",
+                )?)?,
+                read_optional(&repo_path(root, spec_dir.join("design.md"), "design_path")?)?,
+            )
+        }
     };
     let policy_text = if policy.is_empty() {
         "{}".to_string()
@@ -1959,8 +1960,6 @@ fn task_context_snapshot(root: &Path, task: &Task) -> OrchResult<Value> {
 }
 
 fn context_snapshot_value(kind: &str, fields: &[(&str, &str)]) -> Value {
-    let mut hasher = Sha1::new();
-    hash_context_part(&mut hasher, "kind", kind);
     let mut snapshot = Map::new();
     insert(
         &mut snapshot,
@@ -1969,32 +1968,14 @@ fn context_snapshot_value(kind: &str, fields: &[(&str, &str)]) -> Value {
     );
     insert(&mut snapshot, "kind", kind);
     for (key, value) in fields {
-        hash_context_part(&mut hasher, key, value);
         insert(&mut snapshot, key, *value);
     }
     insert(
         &mut snapshot,
         "revision",
-        format!("sha1:{}", hex_bytes(hasher.finalize().as_slice())),
+        lease_context_revision(kind, fields),
     );
     Value::Object(snapshot)
-}
-
-fn hash_context_part(hasher: &mut Sha1, key: &str, value: &str) {
-    hasher.update((key.len() as u64).to_be_bytes());
-    hasher.update(key.as_bytes());
-    hasher.update((value.len() as u64).to_be_bytes());
-    hasher.update(value.as_bytes());
-}
-
-fn hex_bytes(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
 }
 
 fn compact_leases(leases: Vec<LeaseRecord>) -> OrchResult<Value> {

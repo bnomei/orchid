@@ -4271,6 +4271,12 @@ fn task_packets_use_lease_time_context_and_revision_after_source_drift() {
     assert!(revision.starts_with("sha1:"));
 
     fs::remove_file(&task_path).unwrap();
+    let outside_task = repo.root.parent().unwrap().join("outside-task.md");
+    fs::write(&outside_task, "outside task secret\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside_task, &task_path).unwrap();
+    #[cfg(not(unix))]
+    fs::write(&task_path, "changed task\n").unwrap();
     fs::write(
         repo.root.join("specs/contextspec/requirements.md"),
         "# Changed requirements\n",
@@ -4288,6 +4294,8 @@ fn task_packets_use_lease_time_context_and_revision_after_source_drift() {
     assert!(text.contains("## Original task context"));
     assert!(text.contains("# Original requirements"));
     assert!(text.contains("# Original design"));
+    assert!(!text.contains("outside task secret"));
+    assert!(!text.contains("changed task"));
     assert!(!text.contains("Changed requirements"));
     assert!(!text.contains("Changed design"));
     assert!(text.contains(&format!("- Context revision: `{revision}`")));
@@ -4327,6 +4335,68 @@ fn malformed_versioned_context_snapshot_fails_closed() {
         .contains("context snapshot task_source"));
     let packet = repo.run_fail(&["packet", "--lease", "l_bad_context"]);
     assert_eq!(packet["code"], "corrupt_lease_file");
+}
+
+#[test]
+fn tampered_context_snapshot_content_or_revision_fails_closed() {
+    for mutation in ["content", "revision"] {
+        let repo = Repo::new();
+        repo.run(&[
+            "lease",
+            "example",
+            "T001",
+            "--owner",
+            "worker:a",
+            "--lease-id",
+            "l_tampered_context",
+        ]);
+        let lease_path = repo.root.join(".orchid/leases/l_tampered_context.json");
+        let mut lease: Value =
+            serde_json::from_str(&fs::read_to_string(&lease_path).unwrap()).unwrap();
+        match mutation {
+            "content" => lease["context_snapshot"]["requirements"] = Value::from("tampered\n"),
+            "revision" => lease["context_snapshot"]["revision"] = Value::from("banana"),
+            _ => unreachable!(),
+        }
+        fs::write(&lease_path, serde_json::to_string(&lease).unwrap()).unwrap();
+
+        let running = repo.run(&["running"]);
+        assert_eq!(running["leases"], serde_json::json!([]), "{mutation}");
+        assert!(running["corrupt_leases"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("invalid context snapshot revision"));
+    }
+}
+
+#[test]
+fn context_snapshot_kind_must_match_lease_kind() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_context_kind",
+    ]);
+    let lease_path = repo.root.join(".orchid/leases/l_context_kind.json");
+    let mut lease: Value = serde_json::from_str(&fs::read_to_string(&lease_path).unwrap()).unwrap();
+    lease["context_snapshot"] = serde_json::json!({
+        "schema_version": 1,
+        "kind": "bud",
+        "instructions": "tampered",
+        "revision": "sha1:0000000000000000000000000000000000000000"
+    });
+    fs::write(&lease_path, serde_json::to_string(&lease).unwrap()).unwrap();
+
+    let running = repo.run(&["running"]);
+    assert_eq!(running["leases"], serde_json::json!([]));
+    assert!(running["corrupt_leases"][0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("kind does not match lease kind"));
 }
 
 #[test]
