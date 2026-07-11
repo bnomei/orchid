@@ -90,6 +90,7 @@ pub(crate) fn validate_lease_id(value: &str) -> OrchResult<()> {
 
 pub(crate) const LEASE_SCHEMA_VERSION: i64 = 1;
 pub(crate) const LEASE_CONTEXT_SCHEMA_VERSION: i64 = 1;
+pub(crate) const COMPLETION_INTENT_SCHEMA_VERSION: i64 = 1;
 
 pub(crate) fn lease_context_revision(kind: &str, fields: &[(&str, &str)]) -> String {
     let mut hasher = Sha1::new();
@@ -98,6 +99,10 @@ pub(crate) fn lease_context_revision(kind: &str, fields: &[(&str, &str)]) -> Str
         hash_context_part(&mut hasher, key, value);
     }
     format!("sha1:{}", hex_bytes(hasher.finalize().as_slice()))
+}
+
+pub(crate) fn content_revision(kind: &str, content: &str) -> String {
+    lease_context_revision(kind, &[("content", content)])
 }
 
 fn hash_context_part(hasher: &mut Sha1, key: &str, value: &str) {
@@ -168,6 +173,69 @@ fn lease_context_snapshot_field_error(data: &Map<String, Value>) -> Option<Strin
         .then(|| "lease file has invalid context snapshot revision".to_string())
 }
 
+fn completion_intent_field_error(data: &Map<String, Value>) -> Option<String> {
+    let intent = data.get("completion_intent")?;
+    let Some(intent) = intent.as_object() else {
+        return Some("lease file has invalid completion_intent field".to_string());
+    };
+    if data.get("kind").and_then(Value::as_str) != Some("task") {
+        return Some("only task leases may contain a completion intent".to_string());
+    }
+    if intent.get("schema_version").and_then(Value::as_i64)
+        != Some(COMPLETION_INTENT_SCHEMA_VERSION)
+    {
+        return Some("lease file has invalid completion intent schema_version".to_string());
+    }
+    let state = intent.get("state").and_then(Value::as_str);
+    match (state, data.get("status").and_then(Value::as_str)) {
+        (Some("prepared"), Some("active")) | (Some("committed"), Some("completed")) => {}
+        _ => return Some("lease file has invalid completion intent state".to_string()),
+    }
+    for key in [
+        "task_path",
+        "task_before_revision",
+        "task_after_revision",
+        "task_after",
+        "completed_at",
+        "implemented_by",
+        "verified_by",
+        "verification_status",
+        "report",
+        "commit",
+        "commit_review",
+    ] {
+        if !intent.get(key).is_some_and(Value::is_string) {
+            return Some(format!(
+                "lease file has invalid completion intent {key} field"
+            ));
+        }
+    }
+    if intent
+        .get("clean_spec_research")
+        .and_then(Value::as_bool)
+        .is_none()
+    {
+        return Some(
+            "lease file has invalid completion intent clean_spec_research field".to_string(),
+        );
+    }
+    if intent.get("task_path").and_then(Value::as_str)
+        != data.get("task_path").and_then(Value::as_str)
+    {
+        return Some("lease file completion intent task_path does not match lease".to_string());
+    }
+    if intent.get("verification_status").and_then(Value::as_str) != Some("passed") {
+        return Some("lease file has invalid completion intent verification_status".to_string());
+    }
+    let after = intent.get("task_after").and_then(Value::as_str).unwrap();
+    if intent.get("task_after_revision").and_then(Value::as_str)
+        != Some(content_revision("completion-task", after).as_str())
+    {
+        return Some("lease file has invalid completion intent task_after_revision".to_string());
+    }
+    None
+}
+
 pub(crate) fn lease_record_field_error(data: &Map<String, Value>) -> Option<String> {
     let schema_version = match data.get("schema_version") {
         None => None,
@@ -206,6 +274,9 @@ pub(crate) fn lease_record_field_error(data: &Map<String, Value>) -> Option<Stri
         }
     }
     if let Some(error) = lease_context_snapshot_field_error(data) {
+        return Some(error);
+    }
+    if let Some(error) = completion_intent_field_error(data) {
         return Some(error);
     }
     schema_version?;
@@ -762,6 +833,10 @@ impl LeaseRecord {
 
     pub(crate) fn context_text(&self, key: &str) -> Option<&str> {
         self.context_snapshot()?.get(key).and_then(Value::as_str)
+    }
+
+    pub(crate) fn completion_intent(&self) -> Option<&Map<String, Value>> {
+        self.get("completion_intent").and_then(Value::as_object)
     }
 
     pub(crate) fn report_path(&self) -> Option<&str> {

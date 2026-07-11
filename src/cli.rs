@@ -113,6 +113,14 @@ enum Command {
     },
     #[command(about = "Record verified work as complete")]
     Complete(CompleteArgs),
+    #[command(
+        name = "completion-recover",
+        about = "Finish an interrupted task completion"
+    )]
+    CompletionRecover {
+        #[arg(long, help = "Lease id with a prepared completion intent")]
+        lease: String,
+    },
     #[command(about = "Mark a task blocked with a reason")]
     Block(BlockArgs),
     #[command(about = "Validate spec and task-file structure")]
@@ -493,6 +501,9 @@ fn run_command(root: &Path, command: &Command) -> OrchResult<CommandOutput> {
         Command::GitTouched { lease } => cmd_git_touched(root, lease).map(Into::into),
         Command::GitStagePlan { lease } => cmd_git_stage_plan(root, lease).map(Into::into),
         Command::Complete(args) => cmd_complete(root, args).map(Into::into),
+        Command::CompletionRecover { lease } => {
+            orchestration::completion_recover(root, lease).map(Into::into)
+        }
         Command::Block(args) => cmd_block(root, args).map(Into::into),
         Command::Lint => cmd_lint(root).map(Into::into),
         Command::Goal(args) => cmd_goal(root, args).map(CommandOutput::Markdown),
@@ -523,6 +534,7 @@ impl Command {
             Self::GitTouched { .. } => "git-touched",
             Self::GitStagePlan { .. } => "git-stage-plan",
             Self::Complete(_) => "complete",
+            Self::CompletionRecover { .. } => "completion-recover",
             Self::Block(_) => "block",
             Self::Lint => "lint",
             Self::Goal(_) => "goal",

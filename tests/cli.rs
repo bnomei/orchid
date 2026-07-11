@@ -5991,7 +5991,29 @@ fn complete_rolls_back_lease_when_task_write_fails() {
     .unwrap();
     assert_eq!(lease["status"], "active");
     assert!(lease.get("completed_at").is_none());
-    assert!(lease.get("completed_changed").is_none());
+    assert!(lease.get("completed_changed").is_some());
+    assert_eq!(lease["completion_intent"]["state"], "prepared");
+
+    let next = repo.run(&["next", "--spec", "example"]);
+    assert_eq!(next["phase"], "recover");
+    assert_eq!(next["code"], "completion_incomplete");
+    assert_eq!(
+        next["cmd"],
+        serde_json::json!(["completion-recover", "--lease", "l_task_write"])
+    );
+
+    let recovered = repo.run(&["completion-recover", "--lease", "l_task_write"]);
+    assert_eq!(recovered["lease_id"], "l_task_write");
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "done"
+    );
+    let lease: Value = serde_json::from_str(
+        &fs::read_to_string(repo.root.join(".orchid/leases/l_task_write.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lease["status"], "completed");
+    assert_eq!(lease["completion_intent"]["state"], "committed");
 }
 
 #[test]

@@ -383,10 +383,17 @@ fn dump_frontmatter_with_array_styles(
 }
 
 pub(crate) fn write_task_frontmatter(task: &Task, frontmatter: TaskFrontmatter) -> OrchResult<()> {
-    atomic_write(
-        &task.path,
-        &(dump_frontmatter_with_array_styles(&frontmatter.raw, &frontmatter.array_styles)?
-            + &task.body),
+    atomic_write(&task.path, &render_task_frontmatter(task, &frontmatter)?)
+}
+
+/// Render the exact task Markdown that [`write_task_frontmatter`] would atomically persist.
+pub(crate) fn render_task_frontmatter(
+    task: &Task,
+    frontmatter: &TaskFrontmatter,
+) -> OrchResult<String> {
+    Ok(
+        dump_frontmatter_with_array_styles(&frontmatter.raw, &frontmatter.array_styles)?
+            + &task.body,
     )
 }
 

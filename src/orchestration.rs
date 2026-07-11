@@ -40,7 +40,8 @@ use crate::specs::{
     select_tasks, selected_task_counts, status_set, task_by_ref, task_key,
 };
 use crate::taskfile::{
-    load_task, quote_toml_string, read_optional, split_frontmatter, write_task_frontmatter, Task,
+    load_task, quote_toml_string, read_optional, render_task_frontmatter, split_frontmatter,
+    write_task_frontmatter, Task,
 };
 
 pub(crate) struct LeaseRequest {
@@ -770,6 +771,40 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
         return Ok(payload);
     }
     let active = active_scan.leases;
+    if let Some(lease) = active.iter().find(|lease| {
+        lease_in_selected_queue(lease, &selected_specs) && lease.completion_intent().is_some()
+    }) {
+        let lease_id = lease.id().unwrap_or("").to_string();
+        let mut recovery = Map::new();
+        insert(&mut recovery, "lease_id", lease_id.clone());
+        insert(&mut recovery, "task", lease.task_value());
+        insert(&mut recovery, "code", "completion_incomplete");
+        let mut payload = json_ok();
+        insert(&mut payload, "phase", "recover");
+        insert(&mut payload, "code", "completion_incomplete");
+        insert(
+            &mut payload,
+            "recovery",
+            Value::Array(vec![Value::Object(recovery)]),
+        );
+        insert(
+            &mut payload,
+            "cmd",
+            Value::Array(
+                ["completion-recover", "--lease", lease_id.as_str()]
+                    .into_iter()
+                    .map(|part| Value::String(part.to_string()))
+                    .collect(),
+            ),
+        );
+        insert(
+            &mut payload,
+            "counts",
+            Value::Object(selected_task_counts(&tasks)),
+        );
+        insert(&mut payload, "snapshot_at", snapshot_timestamp(now));
+        return Ok(payload);
+    }
     let (ready, blocked) = if all_open_exhausted {
         (Vec::new(), Vec::new())
     } else {
@@ -909,6 +944,9 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     };
     let _lock = runtime_lock(root)?;
     let mut lease = load_lease(root, &request.lease)?;
+    if lease.completion_intent().is_some() {
+        return resume_completion_intent(root, &mut lease, &request.lease);
+    }
     if !lease.status().is_active() {
         return Err(OrchError::coded(
             "cannot complete a lease that is not active",
@@ -972,7 +1010,7 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     } else {
         request.implemented_by.clone()
     };
-    insert(meta, "implemented_by", implemented_by);
+    insert(meta, "implemented_by", implemented_by.clone());
     insert(meta, "verified_by", request.verified_by.clone());
     insert(meta, "last_lease_id", request.lease.clone());
     if request.report.is_empty() {
@@ -988,16 +1026,48 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     }
     let completed_status = git_status_data(root)?;
     let completed_at = meta.get("completed_at").cloned().unwrap_or(Value::Null);
-    let original_lease = lease.clone();
-    lease.set("status", "completed");
-    lease.set("completed_at", completed_at);
+    let task_before = crate::paths::read_text(&task.path)?;
+    let task_after = render_task_frontmatter(&task, &frontmatter)?;
+    let mut intent = Map::new();
+    insert(
+        &mut intent,
+        "schema_version",
+        crate::model::COMPLETION_INTENT_SCHEMA_VERSION,
+    );
+    insert(&mut intent, "state", "prepared");
+    insert(&mut intent, "task_path", task_path.clone());
+    insert(
+        &mut intent,
+        "task_before_revision",
+        crate::model::content_revision("completion-task", &task_before),
+    );
+    insert(
+        &mut intent,
+        "task_after_revision",
+        crate::model::content_revision("completion-task", &task_after),
+    );
+    insert(&mut intent, "task_after", task_after);
+    insert(&mut intent, "completed_at", completed_at.clone());
+    insert(&mut intent, "implemented_by", implemented_by.clone());
+    insert(&mut intent, "verified_by", request.verified_by.clone());
+    insert(
+        &mut intent,
+        "verification_status",
+        verification_status.clone(),
+    );
+    insert(&mut intent, "report", request.report.clone());
+    insert(&mut intent, "commit", request.commit.clone());
+    insert(&mut intent, "commit_review", request.commit_review.clone());
+    insert(
+        &mut intent,
+        "clean_spec_research",
+        request.clean_spec_research,
+    );
     apply_completed_changed_snapshot(&mut lease, &completed_status);
     append_completed_changed_path(&mut lease, &task_path);
+    lease.set("completion_intent", Value::Object(intent));
     save_lease(root, &lease)?;
-    if let Err(err) = write_task_frontmatter(&task, frontmatter) {
-        let _ = save_lease(root, &original_lease);
-        return Err(err);
-    }
+    resume_completion_intent(root, &mut lease, &request.lease)?;
     let mut payload = json_ok();
     insert(&mut payload, "lease_id", request.lease.clone());
     insert(&mut payload, "task", task_key(&task));
@@ -1023,6 +1093,96 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
             }
         }
     }
+    Ok(payload)
+}
+
+pub(crate) fn completion_recover(root: &Path, lease_id: &str) -> OrchResult<Map<String, Value>> {
+    validate_lease_id(lease_id)?;
+    let _lock = runtime_lock(root)?;
+    let mut lease = load_lease(root, lease_id)?;
+    if lease.is_bud() {
+        return Err(OrchError::coded(
+            "bud leases do not use completion intents",
+            ErrorCode::CompletionIntentMissing,
+        )
+        .detail("lease_id", lease_id));
+    }
+    resume_completion_intent(root, &mut lease, lease_id)
+}
+
+fn resume_completion_intent(
+    root: &Path,
+    lease: &mut LeaseRecord,
+    lease_id: &str,
+) -> OrchResult<Map<String, Value>> {
+    let intent = lease.completion_intent().cloned().ok_or_else(|| {
+        OrchError::coded(
+            "lease has no completion intent",
+            ErrorCode::CompletionIntentMissing,
+        )
+        .detail("lease_id", lease_id)
+    })?;
+    let state = intent.get("state").and_then(Value::as_str).unwrap_or("");
+    if state == "committed" && lease.status().is_completed() {
+        let mut payload = json_ok();
+        insert(&mut payload, "lease_id", lease_id);
+        insert(&mut payload, "task", lease.task_value());
+        insert(&mut payload, "already_completed", true);
+        return Ok(payload);
+    }
+    let task_path = intent
+        .get("task_path")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let task_path_abs = repo_path(root, task_path, "task_path")?;
+    let actual = crate::paths::read_text(&task_path_abs)?;
+    let before = intent
+        .get("task_before_revision")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let after = intent
+        .get("task_after_revision")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let actual_revision = crate::model::content_revision("completion-task", &actual);
+    if actual_revision == before {
+        let target = intent
+            .get("task_after")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        atomic_write(&task_path_abs, target)?;
+        let written = crate::paths::read_text(&task_path_abs)?;
+        if crate::model::content_revision("completion-task", &written) != after {
+            return Err(OrchError::coded(
+                "completion intent task write did not match its target",
+                ErrorCode::CompletionIntentConflict,
+            )
+            .detail("lease_id", lease_id));
+        }
+    } else if actual_revision != after {
+        return Err(OrchError::coded(
+            "task changed outside the prepared completion intent",
+            ErrorCode::CompletionIntentConflict,
+        )
+        .detail("lease_id", lease_id)
+        .detail("task_path", task_path)
+        .detail("task_revision", actual_revision));
+    }
+    let mut committed = intent;
+    insert(&mut committed, "state", "committed");
+    lease.set("status", "completed");
+    lease.set(
+        "completed_at",
+        committed
+            .get("completed_at")
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    lease.set("completion_intent", Value::Object(committed));
+    save_lease(root, lease)?;
+    let mut payload = json_ok();
+    insert(&mut payload, "lease_id", lease_id);
+    insert(&mut payload, "task", lease.task_value());
     Ok(payload)
 }
 
