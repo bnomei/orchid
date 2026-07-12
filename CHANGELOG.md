@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-07-12
+
+### Added
+
+- Added audited mayor acceptance for exact, ambiguous paths already inside a
+  frozen lease scope: `complete --accept-attribution <path> --reason <reason>`.
+- Packet generation now creates the canonical role report stub when it is absent.
+
+### Changed
+
+- Simplified normal JSON output to compact phase-local facts; use `--explain`
+  for record-level diagnostics.
+- Moved ordinary attribution reconciliation into the mayor workflow rather than
+  a manifest, recovery lease, or reconciliation worker.
+
+### Fixed
+
+- Pre-existing unrelated dirty paths no longer block an otherwise safe lease close.
+
 ## [0.6.0] - 2026-07-11
 
 ### Added

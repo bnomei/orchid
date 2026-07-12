@@ -224,6 +224,25 @@ fn completion_intent_field_error(data: &Map<String, Value>) -> Option<String> {
             "lease file has invalid completion intent clean_spec_research field".to_string(),
         );
     }
+    if intent
+        .get("accepted_attribution_paths")
+        .is_some_and(|value| {
+            !value
+                .as_array()
+                .is_some_and(|items| items.iter().all(Value::is_string))
+        })
+    {
+        return Some(
+            "lease file has invalid completion intent accepted_attribution_paths field".to_string(),
+        );
+    }
+    for key in ["attribution_reason", "attribution_accepted_by"] {
+        if intent.get(key).is_some_and(|value| !value.is_string()) {
+            return Some(format!(
+                "lease file has invalid completion intent {key} field"
+            ));
+        }
+    }
     if intent.get("task_path").and_then(Value::as_str)
         != data.get("task_path").and_then(Value::as_str)
     {
@@ -348,6 +367,18 @@ pub(crate) fn lease_record_field_error(data: &Map<String, Value>) -> Option<Stri
         .is_some_and(|value| !value.is_object())
     {
         return Some("lease file has invalid released_fingerprints field".to_string());
+    }
+    if data.get("accepted_attribution_paths").is_some_and(|value| {
+        !value
+            .as_array()
+            .is_some_and(|items| items.iter().all(Value::is_string))
+    }) {
+        return Some("lease file has invalid accepted_attribution_paths field".to_string());
+    }
+    for key in ["attribution_reason", "attribution_accepted_by"] {
+        if data.get(key).is_some_and(|value| !value.is_string()) {
+            return Some(format!("lease file has invalid {key} field"));
+        }
     }
     if let Some(value) = data.get("agent_id") {
         if !value.is_string() {
@@ -834,6 +865,10 @@ impl LeaseRecord {
         self.get("released_fingerprints").and_then(Value::as_object)
     }
 
+    pub(crate) fn accepted_attribution_paths(&self) -> Vec<String> {
+        string_list(self.get("accepted_attribution_paths"))
+    }
+
     pub(crate) fn context_snapshot(&self) -> Option<&Map<String, Value>> {
         self.get("context_snapshot").and_then(Value::as_object)
     }
@@ -1168,6 +1203,10 @@ impl ReportFrontmatter {
 
     pub(crate) fn validator_verdict(&self) -> &ValidatorVerdict {
         &self.validator_verdict
+    }
+
+    pub(crate) fn is_draft(&self) -> bool {
+        self.data.get("draft").and_then(Value::as_bool) == Some(true)
     }
 
     pub(crate) fn commands_run_count(&self) -> Option<usize> {

@@ -11,7 +11,6 @@ use serde_json::{Map, Value};
 use crate::core::{emit, emit_markdown, json_fail, OrchResult, DEFAULT_STALE_AFTER};
 use crate::gitstate;
 use crate::goal::{self, GoalDirection, GoalId, GoalInitRequest};
-use crate::model::LEASE_SCHEMA_VERSION;
 use crate::orchestration::{
     self, AttachAgentRequest, BlockRequest, BudRequest, CleanupRequest, CloseRequest,
     CompleteRequest, LeaseRequest, NextRequest, PacketRequest, PacketRoleKind, ReportCheckRequest,
@@ -99,25 +98,16 @@ enum Command {
         name = "report-check",
         about = "Validate a role report and return evidence diagnostics"
     )]
-    ReportCheck {
-        #[arg(help = "Canonical worker, validator, reviewer, or loop-runner report path")]
-        report: String,
-    },
+    ReportCheck(ReportCheckArgs),
     #[command(name = "git-status", about = "Return compact Git status")]
     GitStatus,
     #[command(
         name = "git-touched",
         about = "Compare Git changes against a lease scope"
     )]
-    GitTouched {
-        #[arg(long, help = "Lease id to inspect")]
-        lease: String,
-    },
+    GitTouched(GitTouchedArgs),
     #[command(name = "git-stage-plan", about = "Plan safe Git pathspecs for a lease")]
-    GitStagePlan {
-        #[arg(long, help = "Lease id to plan staging for")]
-        lease: String,
-    },
+    GitStagePlan(GitStagePlanArgs),
     #[command(about = "Record verified work as complete")]
     Complete(CompleteArgs),
     #[command(
@@ -317,7 +307,6 @@ struct CleanupArgs {
 }
 
 #[derive(Args)]
-#[command(group = clap::ArgGroup::new("detail").args(["explain", "brief"]).multiple(false))]
 struct NextArgs {
     #[arg(long, action = clap::ArgAction::Append, help = "Limit next action to a spec id; repeatable")]
     spec: Vec<String>,
@@ -325,14 +314,32 @@ struct NextArgs {
     all_open: bool,
     #[arg(long, default_value = DEFAULT_STALE_AFTER, help = "Minimum lease age for recover/stale decisions")]
     older_than: String,
-    #[arg(
-        long,
-        hide = true,
-        help = "Include recommended action, queues, and blockers; default behavior"
-    )]
+    #[arg(long, help = "Include queue candidates and detailed blocker evidence")]
     explain: bool,
-    #[arg(long, help = "Omit secondary queues and blockers")]
-    brief: bool,
+}
+
+#[derive(Args)]
+struct ReportCheckArgs {
+    #[arg(help = "Canonical worker, validator, reviewer, or loop-runner report path")]
+    report: String,
+    #[arg(long, help = "Include report warnings and command-count diagnostics")]
+    explain: bool,
+}
+
+#[derive(Args)]
+struct GitTouchedArgs {
+    #[arg(long, help = "Lease id to inspect")]
+    lease: String,
+    #[arg(long, help = "Include Git record-level attribution diagnostics")]
+    explain: bool,
+}
+
+#[derive(Args)]
+struct GitStagePlanArgs {
+    #[arg(long, help = "Lease id to plan staging for")]
+    lease: String,
+    #[arg(long, help = "Include Git record-level staging diagnostics")]
+    explain: bool,
 }
 
 #[derive(Args)]
@@ -411,6 +418,18 @@ struct CompleteArgs {
     commit_review: String,
     #[arg(long, help = "Delete .orchid/spec-research/<spec-id> after completion")]
     clean_spec_research: bool,
+    #[arg(
+        long = "accept-attribution",
+        action = clap::ArgAction::Append,
+        help = "Accept one exact ambiguous in-scope path as mayor-owned work; repeatable"
+    )]
+    accept_attribution: Vec<String>,
+    #[arg(
+        long,
+        default_value = "",
+        help = "Required mayor reason when accepting ambiguous attribution"
+    )]
+    reason: String,
 }
 
 #[derive(Args)]
@@ -505,10 +524,10 @@ fn run_command(root: &Path, command: &Command) -> OrchResult<CommandOutput> {
         Command::ResearchPath(args) => cmd_research_path(root, args).map(Into::into),
         Command::ResearchClean { spec } => cmd_research_clean(root, spec).map(Into::into),
         Command::Packet(args) => cmd_packet(root, args).map(Into::into),
-        Command::ReportCheck { report } => cmd_report_check(root, report).map(Into::into),
+        Command::ReportCheck(args) => cmd_report_check(root, args).map(Into::into),
         Command::GitStatus => cmd_git_status(root).map(Into::into),
-        Command::GitTouched { lease } => cmd_git_touched(root, lease).map(Into::into),
-        Command::GitStagePlan { lease } => cmd_git_stage_plan(root, lease).map(Into::into),
+        Command::GitTouched(args) => cmd_git_touched(root, args).map(Into::into),
+        Command::GitStagePlan(args) => cmd_git_stage_plan(root, args).map(Into::into),
         Command::Complete(args) => cmd_complete(root, args).map(Into::into),
         Command::CompletionRecover { lease } => {
             orchestration::completion_recover(root, lease).map(Into::into)
@@ -540,10 +559,10 @@ impl Command {
             Self::ResearchPath(_) => "research-path",
             Self::ResearchClean { .. } => "research-clean",
             Self::Packet(_) => "packet",
-            Self::ReportCheck { .. } => "report-check",
+            Self::ReportCheck(_) => "report-check",
             Self::GitStatus => "git-status",
-            Self::GitTouched { .. } => "git-touched",
-            Self::GitStagePlan { .. } => "git-stage-plan",
+            Self::GitTouched(_) => "git-touched",
+            Self::GitStagePlan(_) => "git-stage-plan",
             Self::Complete(_) => "complete",
             Self::CompletionRecover { .. } => "completion-recover",
             Self::Block(_) => "block",
@@ -553,24 +572,17 @@ impl Command {
     }
 }
 
-const ACK_VERSION: i64 = 1;
-const ACTION_VERSION: i64 = 1;
-
-// ACK envelope: stable ok/command fields plus action hints for next and report-check.
+// Compact JSON envelope. Detailed, phase-specific evidence is opt-in via `--explain`.
 fn finalize_json_ack(payload: &mut Map<String, Value>, command: &Command) -> bool {
     let ok = payload
         .get("ok")
         .and_then(Value::as_bool)
         .unwrap_or_else(|| !payload.contains_key("error"));
-    payload.insert("ack_version".to_string(), Value::from(ACK_VERSION));
     payload.insert("ok".to_string(), Value::Bool(ok));
     payload.insert(
         "command".to_string(),
         Value::String(command.name().to_string()),
     );
-    if matches!(command, Command::Next(_) | Command::ReportCheck { .. }) {
-        finalize_actions(payload);
-    }
     if matches!(command, Command::Next(_)) && !payload.contains_key("recommended_action") {
         if let Some(phase) = payload
             .get("phase")
@@ -583,48 +595,12 @@ fn finalize_json_ack(payload: &mut Map<String, Value>, command: &Command) -> boo
     ok
 }
 
-fn finalize_actions(payload: &mut Map<String, Value>) {
-    let commands = payload
-        .get("commands")
-        .and_then(Value::as_array)
-        .cloned()
-        .or_else(|| payload.get("cmds").and_then(Value::as_array).cloned())
-        .or_else(|| {
-            payload
-                .get("cmd")
-                .and_then(Value::as_array)
-                .cloned()
-                .map(|command| vec![Value::Array(command)])
-        })
-        .unwrap_or_default();
-    let actions = commands
-        .iter()
-        .map(|argv| {
-            let mut action = Map::new();
-            action.insert("type".to_string(), Value::String("command".to_string()));
-            action.insert("argv".to_string(), argv.clone());
-            Value::Object(action)
-        })
-        .collect();
-    payload.insert("action_version".to_string(), Value::from(ACTION_VERSION));
-    payload.insert("commands".to_string(), Value::Array(commands));
-    payload.insert("actions".to_string(), Value::Array(actions));
-}
-
 fn cmd_capabilities() -> Map<String, Value> {
-    let mut protocols = Map::new();
-    protocols.insert("ack".to_string(), Value::from(ACK_VERSION));
-    protocols.insert("actions".to_string(), Value::from(ACTION_VERSION));
-    protocols.insert(
-        "lease_schema".to_string(),
-        Value::from(LEASE_SCHEMA_VERSION),
-    );
     let command_names: Vec<String> = Cli::command()
         .get_subcommands()
         .map(|command| command.get_name().to_string())
         .collect();
     let mut payload = Map::new();
-    payload.insert("protocols".to_string(), Value::Object(protocols));
     payload.insert(
         "json_commands".to_string(),
         owned_string_values(
@@ -645,12 +621,11 @@ fn cmd_capabilities() -> Map<String, Value> {
     payload.insert(
         "features".to_string(),
         string_values(&[
-            "typed_blocker_codes",
+            "compact_phase_output",
             "leased_context_snapshots",
-            "read_only_agent_status",
-            "released_lease_attribution",
+            "mayor_attribution_acceptance",
             "role_specific_reports",
-            "runtime_observability_v1",
+            "runtime_observability",
             "spec_scoped_next",
         ]),
     );
@@ -848,7 +823,7 @@ fn cmd_next(root: &Path, args: &NextArgs) -> OrchResult<Map<String, Value>> {
             specs: args.spec.clone(),
             all_open: args.all_open,
             older_than: args.older_than.clone(),
-            explain: args.explain || !args.brief,
+            explain: args.explain,
         },
     )
 }
@@ -864,11 +839,12 @@ fn cmd_packet(root: &Path, args: &PacketArgs) -> OrchResult<Map<String, Value>> 
     )
 }
 
-fn cmd_report_check(root: &Path, report: &str) -> OrchResult<Map<String, Value>> {
+fn cmd_report_check(root: &Path, args: &ReportCheckArgs) -> OrchResult<Map<String, Value>> {
     orchestration::report_check(
         root,
         &ReportCheckRequest {
-            report: report.to_string(),
+            report: args.report.clone(),
+            explain: args.explain,
         },
     )
 }
@@ -877,12 +853,12 @@ fn cmd_git_status(root: &Path) -> OrchResult<Map<String, Value>> {
     orchestration::git_status(root)
 }
 
-fn cmd_git_touched(root: &Path, lease_id: &str) -> OrchResult<Map<String, Value>> {
-    orchestration::git_touched(root, lease_id)
+fn cmd_git_touched(root: &Path, args: &GitTouchedArgs) -> OrchResult<Map<String, Value>> {
+    orchestration::git_touched(root, &args.lease, args.explain)
 }
 
-fn cmd_git_stage_plan(root: &Path, lease_id: &str) -> OrchResult<Map<String, Value>> {
-    orchestration::git_stage_plan(root, lease_id)
+fn cmd_git_stage_plan(root: &Path, args: &GitStagePlanArgs) -> OrchResult<Map<String, Value>> {
+    orchestration::git_stage_plan(root, &args.lease, args.explain)
 }
 
 fn cmd_complete(root: &Path, args: &CompleteArgs) -> OrchResult<Map<String, Value>> {
@@ -897,6 +873,8 @@ fn cmd_complete(root: &Path, args: &CompleteArgs) -> OrchResult<Map<String, Valu
             commit: args.commit.clone(),
             commit_review: args.commit_review.clone(),
             clean_spec_research: args.clean_spec_research,
+            accept_attribution: args.accept_attribution.clone(),
+            attribution_reason: args.reason.clone(),
         },
     )
 }

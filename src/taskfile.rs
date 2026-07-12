@@ -38,6 +38,9 @@ const TASK_FIELD_ORDER: &[&str] = &[
     "blocked_reason",
     "last_lease_id",
     "report",
+    "attribution_accepted_paths",
+    "attribution_reason",
+    "attribution_accepted_by",
 ];
 
 /// Frontmatter plus per-field array style so write-back preserves hand-authored formatting.

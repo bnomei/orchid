@@ -261,10 +261,19 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
             ),
         );
         insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
+        let unsafe_attribution = !first.safe_to_stage;
         return NextDecision {
-            phase: Phase::Stage,
+            phase: if unsafe_attribution {
+                Phase::Recover
+            } else {
+                Phase::Stage
+            },
             commands: vec![vec![
-                "git-stage-plan".to_string(),
+                if unsafe_attribution {
+                    "git-touched".to_string()
+                } else {
+                    "git-stage-plan".to_string()
+                },
                 "--lease".to_string(),
                 first.lease_id.clone(),
             ]],
@@ -630,8 +639,8 @@ mod tests {
                 }),
             ),
             (
-                "unsafe stage/stage",
-                Phase::Stage,
+                "unsafe stage/recover",
+                Phase::Recover,
                 Box::new(|input| {
                     input.stage = vec![stage_plan(false, Vec::new())];
                     input.cleanup = vec![cleanup_candidate()];

@@ -38,8 +38,8 @@ use crate::runtime::{
 };
 use crate::specs::{
     dependency_block, effective_lease_scope, ensure_spec_dispatchable, inactive_spec_names,
-    load_all_tasks, load_spec_policy, load_tasks, ready_tasks, resolve_task, scopes_overlap,
-    select_tasks, selected_task_counts, status_set, task_by_ref, task_key,
+    load_all_tasks, load_spec_policy, load_tasks, path_in_scope, ready_tasks, resolve_task,
+    scopes_overlap, select_tasks, selected_task_counts, status_set, task_by_ref, task_key,
 };
 use crate::taskfile::{
     load_task, quote_toml_string, read_optional, render_task_frontmatter, split_frontmatter,
@@ -117,6 +117,8 @@ pub(crate) struct CompleteRequest {
     pub(crate) commit: String,
     pub(crate) commit_review: String,
     pub(crate) clean_spec_research: bool,
+    pub(crate) accept_attribution: Vec<String>,
+    pub(crate) attribution_reason: String,
 }
 
 /// CLI inputs for marking a task blocked with a recorded reason.
@@ -187,10 +189,6 @@ impl PacketRoleKind {
         }
     }
 
-    fn has_source_report(self) -> bool {
-        self != Self::Worker
-    }
-
     fn report_guidance(self) -> Option<&'static str> {
         match self {
             Self::Validator => Some(
@@ -211,6 +209,7 @@ pub(crate) struct PacketRequest {
 /// CLI inputs for validating a role report and returning evidence diagnostics.
 pub(crate) struct ReportCheckRequest {
     pub(crate) report: String,
+    pub(crate) explain: bool,
 }
 
 /// List dispatchable tasks and selection blockers for the requested spec scope.
@@ -866,7 +865,7 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
             continue;
         }
         let report = report_path_for_lease(root, lease)?;
-        if report.exists() {
+        if report.exists() && !report_path_is_draft(&report)? {
             reports_ready.push(ReportReady {
                 lease_id: lease.id().unwrap_or("").to_string(),
                 task: lease.get_str("task").unwrap_or("").to_string(),
@@ -946,8 +945,30 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
         explain: request.explain,
     })
     .to_payload();
+    if !request.explain {
+        payload = compact_next_payload(payload);
+    }
     insert(&mut payload, "snapshot_at", snapshot_timestamp(now));
     Ok(payload)
+}
+
+fn compact_next_payload(full: Map<String, Value>) -> Map<String, Value> {
+    let mut compact = Map::new();
+    for key in ["phase", "code", "reason"] {
+        if let Some(value) = full.get(key) {
+            insert(&mut compact, key, value.clone());
+        }
+    }
+    let argv = full.get("cmd").cloned().or_else(|| {
+        full.get("cmds")
+            .and_then(Value::as_array)
+            .and_then(|commands| commands.first())
+            .cloned()
+    });
+    if let Some(argv) = argv {
+        insert(&mut compact, "argv", argv);
+    }
+    compact
 }
 
 /// Record verified work as complete, stage scoped paths, and update the task file.
@@ -989,7 +1010,7 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
         .detail("lease_id", request.lease.clone())
         .detail("status", lease.get_str("status").unwrap_or("").to_string()));
     }
-    ensure_lease_safe_to_complete(root, &lease)?;
+    let accepted_attribution = ensure_lease_safe_to_complete(root, &lease, request)?;
     if lease.is_bud() {
         let completed_at = now_iso();
         let implemented_by = if request.implemented_by.is_empty() {
@@ -1002,6 +1023,14 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
         lease.set("implemented_by", implemented_by);
         lease.set("verified_by", request.verified_by.clone());
         lease.set("verification_status", verification_status.clone());
+        if !accepted_attribution.is_empty() {
+            lease.set(
+                "accepted_attribution_paths",
+                string_values(accepted_attribution.clone()),
+            );
+            lease.set("attribution_reason", request.attribution_reason.clone());
+            lease.set("attribution_accepted_by", request.verified_by.clone());
+        }
         if !request.report.is_empty() {
             lease.set("report", request.report.clone());
         }
@@ -1049,6 +1078,19 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     insert(meta, "implemented_by", implemented_by.clone());
     insert(meta, "verified_by", request.verified_by.clone());
     insert(meta, "last_lease_id", request.lease.clone());
+    if !accepted_attribution.is_empty() {
+        insert(
+            meta,
+            "attribution_accepted_paths",
+            string_values(accepted_attribution.clone()),
+        );
+        insert(
+            meta,
+            "attribution_reason",
+            request.attribution_reason.clone(),
+        );
+        insert(meta, "attribution_accepted_by", request.verified_by.clone());
+    }
     if request.report.is_empty() {
         meta.remove("report");
     } else {
@@ -1103,11 +1145,34 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     insert(&mut intent, "commit_review", request.commit_review.clone());
     insert(
         &mut intent,
+        "accepted_attribution_paths",
+        string_values(accepted_attribution.clone()),
+    );
+    insert(
+        &mut intent,
+        "attribution_reason",
+        request.attribution_reason.clone(),
+    );
+    insert(
+        &mut intent,
+        "attribution_accepted_by",
+        request.verified_by.clone(),
+    );
+    insert(
+        &mut intent,
         "clean_spec_research",
         request.clean_spec_research,
     );
     apply_completed_changed_snapshot(&mut lease, &completed_status);
     append_completed_changed_path(&mut lease, &task_path);
+    if !accepted_attribution.is_empty() {
+        lease.set(
+            "accepted_attribution_paths",
+            string_values(accepted_attribution),
+        );
+        lease.set("attribution_reason", request.attribution_reason.clone());
+        lease.set("attribution_accepted_by", request.verified_by.clone());
+    }
     lease.set("completion_intent", Value::Object(intent));
     save_lease(root, &lease)?;
     resume_completion_intent(root, &mut lease, &request.lease)
@@ -1618,12 +1683,17 @@ pub(crate) fn cleanup(root: &Path, request: &CleanupRequest) -> OrchResult<Map<S
     Ok(payload)
 }
 
-fn ensure_lease_safe_to_complete(root: &Path, lease: &LeaseRecord) -> OrchResult<()> {
+fn ensure_lease_safe_to_complete(
+    root: &Path,
+    lease: &LeaseRecord,
+    request: &CompleteRequest,
+) -> OrchResult<Vec<String>> {
     let touched = touched_for_lease(root, lease)?;
     if !lease.has_git_baseline() && touched.get("git").and_then(Value::as_bool) == Some(false) {
-        return Ok(());
+        return Ok(Vec::new());
     }
-    if lease_completion_is_unsafe(&touched) {
+    let accepted = accepted_attribution_paths(&touched, lease, request)?;
+    if lease_completion_is_unsafe(&touched, &accepted) {
         let mut err = OrchError::coded(
             "cannot complete while git-touched reports unsafe staging",
             ErrorCode::CompleteUnsafeToStage,
@@ -1634,10 +1704,58 @@ fn ensure_lease_safe_to_complete(root: &Path, lease: &LeaseRecord) -> OrchResult
         }
         return Err(err);
     }
-    Ok(())
+    Ok(accepted)
 }
 
-fn lease_completion_is_unsafe(touched: &Map<String, Value>) -> bool {
+fn accepted_attribution_paths(
+    touched: &Map<String, Value>,
+    lease: &LeaseRecord,
+    request: &CompleteRequest,
+) -> OrchResult<Vec<String>> {
+    let mut accepted = request.accept_attribution.clone();
+    accepted.sort();
+    accepted.dedup();
+    if accepted.is_empty() {
+        if nonempty_trimmed(&request.attribution_reason).is_some() {
+            return Err(OrchError::coded(
+                "attribution reason requires accepted paths",
+                ErrorCode::CompleteUnsafeToStage,
+            ));
+        }
+        return Ok(accepted);
+    }
+    if nonempty_trimmed(&request.attribution_reason).is_none() {
+        return Err(OrchError::coded(
+            "accepted attribution requires a reason",
+            ErrorCode::CompleteUnsafeToStage,
+        ));
+    }
+    let ambiguous = touched
+        .get("blocked_by")
+        .and_then(Value::as_object)
+        .and_then(|blocked| blocked.get("ambiguous"))
+        .map(|value| crate::core::string_list(Some(value)))
+        .unwrap_or_default();
+    for path in &accepted {
+        if path.contains('*') || path.contains('?') || path.contains('[') || path.contains(']') {
+            return Err(OrchError::coded(
+                "accepted attribution path must be literal",
+                ErrorCode::CompleteUnsafeToStage,
+            )
+            .detail("path", path.clone()));
+        }
+        if !path_in_scope(path, &lease.scope()) || !ambiguous.iter().any(|item| item == path) {
+            return Err(OrchError::coded(
+                "accepted attribution path is not a current ambiguous in-scope path",
+                ErrorCode::CompleteUnsafeToStage,
+            )
+            .detail("path", path.clone()));
+        }
+    }
+    Ok(accepted)
+}
+
+fn lease_completion_is_unsafe(touched: &Map<String, Value>, accepted: &[String]) -> bool {
     if touched.get("git").and_then(Value::as_bool) == Some(false) {
         return true;
     }
@@ -1646,15 +1764,29 @@ fn lease_completion_is_unsafe(touched: &Map<String, Value>) -> bool {
         return false;
     };
 
-    ["out_of_scope", "ambiguous", "completion_snapshot_missing"]
-        .iter()
-        .any(|key| {
-            blocked_by
-                .get(*key)
-                .and_then(Value::as_array)
-                .map(|paths| !paths.is_empty())
-                .unwrap_or(false)
+    [
+        "out_of_scope",
+        "completion_snapshot_missing",
+        "release_snapshot_missing",
+        "changed_after_release",
+    ]
+    .iter()
+    .any(|key| {
+        blocked_by
+            .get(*key)
+            .and_then(Value::as_array)
+            .map(|paths| !paths.is_empty())
+            .unwrap_or(false)
+    }) || blocked_by
+        .get("ambiguous")
+        .and_then(Value::as_array)
+        .map(|paths| {
+            paths
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|path| !accepted.iter().any(|accepted_path| accepted_path == path))
         })
+        .unwrap_or(false)
 }
 
 fn ensure_completed_lease_is_safe_to_close(root: &Path, lease: &LeaseRecord) -> OrchResult<()> {
@@ -1673,7 +1805,7 @@ fn ensure_completed_lease_is_safe_to_close(root: &Path, lease: &LeaseRecord) -> 
 }
 
 fn stage_plan_blocks_close(plan: &crate::model::StagePlan) -> bool {
-    !plan.pathspecs.is_empty() || !plan.excluded.is_empty() || !plan.safe_to_stage
+    !plan.pathspecs.is_empty() || !plan.safe_to_stage
 }
 
 fn cleanup_lease_needs_stage_guard(lease: &LeaseRecord) -> bool {
@@ -1723,9 +1855,14 @@ pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<Str
         request.role,
         source_report.as_deref(),
     )?;
-    if request.role.has_source_report() && request.source_report.is_some() {
+    if request.source_report.is_some() {
         if let Some(source_report) = source_report.as_deref() {
-            lease.set("source_report_path", source_report);
+            let key = if request.role == PacketRoleKind::Worker {
+                "prior_report_path"
+            } else {
+                "source_report_path"
+            };
+            lease.set(key, source_report);
         }
     }
     save_lease(root, &lease)?;
@@ -1742,7 +1879,7 @@ pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<Str
             root,
         ),
     );
-    if request.role.has_source_report() {
+    if request.role != PacketRoleKind::Worker {
         insert(
             &mut payload,
             "source_report",
@@ -1768,37 +1905,42 @@ fn resolve_packet_source_report(
     role: PacketRoleKind,
     source_report: Option<&str>,
 ) -> OrchResult<Option<String>> {
-    if !role.has_source_report() {
-        if source_report.is_some() {
-            return Err(OrchError::coded(
-                "worker packets do not accept a source report",
-                ErrorCode::ReportLeaseMismatch,
-            ));
-        }
-        return Ok(None);
-    }
     let source_report = source_report.or_else(|| {
-        lease
-            .get_str("source_report_path")
-            .filter(|path| !path.is_empty())
+        let key = if role == PacketRoleKind::Worker {
+            "prior_report_path"
+        } else {
+            "source_report_path"
+        };
+        lease.get_str(key).filter(|path| !path.is_empty())
     });
     let Some(source_report) = source_report else {
-        return Ok(Some(relpath(&report_path_for_lease(root, lease)?, root)));
+        return if role == PacketRoleKind::Worker {
+            Ok(None)
+        } else {
+            Ok(Some(relpath(&report_path_for_lease(root, lease)?, root)))
+        };
     };
     let report_path = report_path_from_request(root, source_report)?;
     let text = crate::paths::read_text(&report_path.path)?;
     let (meta, _) = split_frontmatter(&text, &report_path.path)?;
     let report = ReportFrontmatter::from_map(meta);
-    if report.lease_id() != lease.id().unwrap_or("") || !report.kind().is_worker() {
+    let expected_kind = if role == PacketRoleKind::Worker {
+        PacketRoleKind::Validator
+    } else {
+        PacketRoleKind::Worker
+    };
+    if report.lease_id() != lease.id().unwrap_or("")
+        || report.kind().as_str() != expected_kind.as_str()
+    {
         return Err(OrchError::coded(
-            "source report does not match worker lease",
+            "source report does not match lease role",
             ErrorCode::ReportLeaseMismatch,
         )
         .detail("lease_id", lease.id().unwrap_or("").to_string())
         .detail("source_lease_id", report.lease_id().to_string())
         .detail("source_report_kind", report.kind().as_str()));
     }
-    let expected_path = report_path_for_lease(root, lease)?;
+    let expected_path = report_path_for_lease_role(root, lease, expected_kind.as_str())?;
     let expected_report = relpath(&expected_path, root);
     if expected_report != report_path.rel {
         return Err(OrchError::coded(
@@ -1829,7 +1971,7 @@ fn render_packet_for_lease(
     )?;
     let verdict = (role == PacketRoleKind::Validator).then_some("verdict = \"\"\n");
     let report_template = format!(
-        "+++\nlease_id = {}\nlease_started_at = {}\ncontext_revision = {}\nkind = {}\nstatus = {}\n{}commands_run = []\nresult = \"\"\n+++\n\n## Summary\n\n## Evidence\n\n## Notes\n",
+        "+++\nlease_id = {}\nlease_started_at = {}\ncontext_revision = {}\nkind = {}\nstatus = {}\ndraft = true\n{}commands_run = []\nresult = \"\"\n+++\n\n## Summary\n\n## Evidence\n\n## Notes\n",
         quote_toml_string(lease_id),
         quote_toml_string(lease.get_str("started_at").unwrap_or("")),
         quote_toml_string(lease.context_revision().unwrap_or("")),
@@ -1837,6 +1979,9 @@ fn render_packet_for_lease(
         quote_toml_string(role.report_status()),
         verdict.unwrap_or_default(),
     );
+    if !report_path.exists() {
+        atomic_write(&report_path, &report_template)?;
+    }
     let packet = if lease.is_bud() {
         render_bud_packet(
             root,
@@ -1982,7 +2127,7 @@ fn render_task_packet(
         format!("## {} Report Contract", role.title()),
         String::new(),
         format!(
-            "Write a Markdown {} report with TOML frontmatter to the report path. Minimal template:",
+            "Complete the Markdown {} report at the report path. Set `draft = false` when it is ready for the coordinator. Minimal template:",
             role.as_str()
         ),
         String::new(),
@@ -2334,6 +2479,14 @@ fn report_display_path(root: &Path, report_path: &ResolvedReportPath) -> String 
     }
 }
 
+fn report_path_is_draft(report_path: &Path) -> OrchResult<bool> {
+    let text = crate::paths::read_text(report_path)?;
+    match split_frontmatter(&text, report_path) {
+        Ok((meta, _)) => Ok(ReportFrontmatter::from_map(meta).is_draft()),
+        Err(_) => Ok(false),
+    }
+}
+
 /// Validate a role report against lease context and return evidence diagnostics.
 pub(crate) fn report_check(
     root: &Path,
@@ -2422,8 +2575,9 @@ pub(crate) fn report_check(
     let commands = report_recommended_commands(
         lease_id,
         recommended_action,
-        (recommended_action == "validate" && external && report.kind().is_worker())
-            .then(|| report_display_path(root, &report_path)),
+        ((recommended_action == "validate" && external && report.kind().is_worker())
+            || (recommended_action == "fix" && report.kind().is_validator()))
+        .then(|| report_display_path(root, &report_path)),
     );
 
     let mut payload = json_ok();
@@ -2440,27 +2594,22 @@ pub(crate) fn report_check(
     insert(&mut payload, "report_kind", report.kind().as_str());
     insert(&mut payload, "status", report.status().as_str());
     insert(&mut payload, "next", report.status().next_action());
-    insert(
-        &mut payload,
-        "commands_run_count",
-        commands_run_count as i64,
-    );
-    insert(&mut payload, "warnings", objects_array(warnings));
     insert(&mut payload, "recommended_action", recommended_action);
-    insert(
-        &mut payload,
-        "commands",
-        Value::Array(
-            commands
-                .into_iter()
-                .map(|command| Value::Array(command.into_iter().map(Value::String).collect()))
-                .collect(),
-        ),
-    );
+    if let Some(argv) = commands.first() {
+        insert(&mut payload, "argv", string_values(argv.clone()));
+    }
     if report.kind().is_validator() {
         insert(&mut payload, "verdict", report.validator_verdict().as_str());
     }
-    if !report.kind().is_worker() {
+    if request.explain {
+        insert(
+            &mut payload,
+            "commands_run_count",
+            commands_run_count as i64,
+        );
+        insert(&mut payload, "warnings", objects_array(warnings));
+    }
+    if request.explain && !report.kind().is_worker() {
         let source_report = match lease
             .get_str("source_report_path")
             .filter(|path| !path.is_empty())
@@ -2470,13 +2619,15 @@ pub(crate) fn report_check(
         };
         insert(&mut payload, "source_report", source_report);
     }
-    insert_worker_execution_metadata(
-        &mut payload,
-        lease
-            .worker_reasoning_effort()
-            .unwrap_or(ReasoningEffort::Medium.as_str()),
-        lease.worker_model(),
-    );
+    if request.explain {
+        insert_worker_execution_metadata(
+            &mut payload,
+            lease
+                .worker_reasoning_effort()
+                .unwrap_or(ReasoningEffort::Medium.as_str()),
+            lease.worker_model(),
+        );
+    }
     Ok(payload)
 }
 
@@ -2604,25 +2755,86 @@ fn ensure_lease_for_git_attribution(lease: &LeaseRecord, lease_id: &str) -> Orch
 }
 
 /// Compare Git changes since the lease baseline against effective write scope.
-pub(crate) fn git_touched(root: &Path, lease_id: &str) -> OrchResult<Map<String, Value>> {
+pub(crate) fn git_touched(
+    root: &Path,
+    lease_id: &str,
+    explain: bool,
+) -> OrchResult<Map<String, Value>> {
     validate_lease_id(lease_id)?;
     let _lock = runtime_lock(root)?;
     let lease = load_lease(root, lease_id)?;
     ensure_lease_for_git_attribution(&lease, lease_id)?;
     let data = touched_for_lease(root, &lease)?;
     let mut payload = json_ok();
-    payload.extend(data);
+    payload.extend(compact_touched_payload(data, explain));
     Ok(payload)
 }
 
+fn compact_touched_payload(data: Map<String, Value>, explain: bool) -> Map<String, Value> {
+    let mut payload = Map::new();
+    for key in [
+        "lease_id",
+        "task",
+        "git",
+        "safe_to_stage",
+        "stage",
+        "blocked_by",
+    ] {
+        if let Some(value) = data.get(key) {
+            insert(&mut payload, key, value.clone());
+        }
+    }
+    if explain {
+        for key in [
+            "records",
+            "stage_records",
+            "blocked_by_records",
+            "preexisting_dirty",
+            "completion_snapshot_missing",
+            "release_snapshot_missing",
+        ] {
+            if let Some(value) = data.get(key) {
+                insert(&mut payload, key, value.clone());
+            }
+        }
+    }
+    payload
+}
+
+fn stage_plan_payload(plan: crate::model::StagePlan, explain: bool) -> Map<String, Value> {
+    let mut payload = Map::new();
+    insert(&mut payload, "lease_id", plan.lease_id);
+    insert(&mut payload, "task", plan.task);
+    insert(&mut payload, "git", plan.git_available);
+    insert(&mut payload, "safe_to_stage", plan.safe_to_stage);
+    insert_non_empty(&mut payload, "pathspecs", string_values(plan.pathspecs));
+    insert_non_empty(&mut payload, "excluded", Value::Object(plan.excluded));
+    if explain {
+        insert_non_empty(&mut payload, "records", Value::Array(plan.records));
+        insert_non_empty(
+            &mut payload,
+            "excluded_records",
+            Value::Object(plan.excluded_records),
+        );
+    }
+    payload
+}
+
 /// Plan safe Git pathspecs for completing a lease without staging out-of-scope edits.
-pub(crate) fn git_stage_plan(root: &Path, lease_id: &str) -> OrchResult<Map<String, Value>> {
+pub(crate) fn git_stage_plan(
+    root: &Path,
+    lease_id: &str,
+    explain: bool,
+) -> OrchResult<Map<String, Value>> {
     validate_lease_id(lease_id)?;
     let _lock = runtime_lock(root)?;
     let lease = load_lease(root, lease_id)?;
     ensure_lease_for_git_attribution(&lease, lease_id)?;
     let mut payload = json_ok();
-    payload.extend(stage_plan_for_lease(root, &lease)?.to_payload());
+    payload.extend(stage_plan_payload(
+        stage_plan_for_lease(root, &lease)?,
+        explain,
+    ));
     Ok(payload)
 }
 

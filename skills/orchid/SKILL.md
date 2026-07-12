@@ -12,9 +12,9 @@ ACKs from the CLI instead of parsing generated Markdown or Git porcelain. For
 goal loops, follow the Markdown prompt printed by `orchid goal`; that command is
 Markdown-first by design.
 
-At the start of an orchestration run, call `orchid capabilities`. When it
-advertises ACK/action support, follow the returned `actions` or `commands` from
-`next` and `report-check` instead of reconstructing command arguments.
+At the start of an orchestration run, call `orchid capabilities` once. Follow
+the compact `recommended_action` and `argv` returned by `next` and
+`report-check`; use `--explain` only when a mayor must interpret an exception.
 
 ## Mayor Loop
 
@@ -26,8 +26,6 @@ Start by observing only the user-authorized scope:
 
 ```sh
 orchid next --spec SPEC_ID
-orchid ready --spec SPEC_ID
-orchid status --spec SPEC_ID
 ```
 
 Use `--all-open` only when the user explicitly authorizes work across open
@@ -36,8 +34,8 @@ stop and report. Do not broaden scope on your own.
 
 Phase guide:
 
-- `dispatch`: inspect `next`/`ready` worker metadata, spawn the correctly sized
-  worker, then lease one ready task and create the packet.
+- `dispatch`: use `next --explain` only when worker-routing detail is needed,
+  then spawn the correctly sized worker and create the packet.
 - `wait`: poll `orchid status --spec SPEC_ID` with backoff; do not ask workers
   for routine progress.
 - `validate`: check the report, touched files, and task-specific evidence.
@@ -60,10 +58,9 @@ primitive.
 
 ## Command Flow
 
-Inspect before spawning. `next`/`ready` surface the candidate task's
-`worker_reasoning_effort` and non-empty `worker_model`; use that to decide the
-worker settings before creating an agent. Their detailed ACKs are the default;
-use `--brief` only for compact machine polling.
+Inspect before spawning. Use `next --explain` or `ready --explain` only when
+the candidate's worker routing is not already known. Normal ACKs are compact;
+do not turn routine observation into a diagnostic command chain.
 
 After spawning the worker with those settings, lease and create the packet:
 
@@ -118,13 +115,17 @@ When a worker returns, ingest the report and verify the claim:
 ```sh
 orchid report-check REPORT_PATH
 orchid git-touched --lease LEASE_ID
-orchid git-status
 ```
 
-Treat worker reports as claims until validation passes. If touched files are
-outside scope, classify before proceeding: fix an obviously missing narrow
-scope only when authorized; otherwise pause and report. If validation fails,
-fix inside scope or return the task to the worker before completion.
+Treat worker reports as claims until validation passes. The mayor owns
+attribution judgment: when Git reports an ambiguous path already inside the
+frozen scope, inspect `git-touched --explain`, the worker/validator evidence,
+and the exact path. If that evidence resolves ownership, complete with
+`--accept-attribution <path> --reason "..."`; do not dispatch a reconciliation
+worker or build a manifest. Out-of-scope paths, changed-after-release paths,
+missing snapshots, and unrecoverable evidence remain hard stops. If validation
+fails within scope, regenerate the worker packet with the validator report as
+its source so the repair starts from the exact failed criterion.
 
 Use a role-specific packet when delegating validation or review. Pass a
 canonical worker report with `--source-report` when the role needs that claim;
@@ -151,6 +152,16 @@ After commit/review state is durable, close runtime files:
 orchid close --lease LEASE_ID
 orchid cleanup --completed
 ```
+
+### Mayor recovery rule
+
+Do not create a recovery-only worker or validator. The mayor classifies the
+existing evidence:
+
+- `preexisting_dirty` only: informational; it must not block an otherwise safe close.
+- in-scope `ambiguous`: mayor may accept exact paths with a reason after worker and validator evidence.
+- `out_of_scope`, `changed_after_release`, missing snapshots, corrupt runtime state: stop and repair/escalate.
+- validator `needs_fix`: regenerate a worker packet with that validator report as source; no new lease is needed.
 
 ## Goal Loop
 

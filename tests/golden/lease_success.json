@@ -1,5 +1,4 @@
 {
-  "ack_version": 1,
   "command": "lease",
   "ok": true,
   "context_revision": "<context_revision>",

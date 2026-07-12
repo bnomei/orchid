@@ -251,9 +251,8 @@ orchid close --lease <LEASE_ID>
 orchid cleanup --completed
 ```
 
-`next` returns the recommended phase: `dispatch`, `wait`, `validate`, `stage`,
-`cleanup`, `recover`, `blocked`, or `done`. Detailed `next` and `ready` output
-is the default. Use `--brief` only for compact polling.
+`next` returns the recommended phase and one `argv` action. Use `--explain`
+only when the mayor needs queue candidates or attribution diagnostics.
 
 Use repeatable `--spec` flags to select explicit specs. Use `--all-open` to
 select the first active spec with unfinished work by numerical prefix; it does
@@ -486,7 +485,7 @@ read.
 
 ### Role report contracts
 
-Generated packets provide the canonical report path and a small role-specific
+Generated packets create the canonical report stub with its role-specific
 frontmatter template. Worker reports use `.orchid/reports/<LEASE_ID>.md`.
 Validator, reviewer, and loop-runner reports use the same name with their role
 suffix, for example `.orchid/reports/<LEASE_ID>-validator.md`.
@@ -620,6 +619,9 @@ Coordinators should:
 - Treat worker reports as claims until validation passes.
 - Run `report-check`, `git-touched`, and project-specific validation before
   `complete`.
+- Resolve ordinary in-scope attribution ambiguity as mayor-owned work with
+  `complete --accept-attribution <path> --reason "..."`; do not dispatch a
+  reconciliation-only worker.
 - Stage only the pathspecs from `git-stage-plan`; do not use `git add .` in a
   shared worktree.
 - Close or clean completed runtime files after commit or review state is
@@ -674,12 +676,14 @@ Inspect both contracts before changing task state:
 
 ```sh
 orchid report-check .orchid/reports/<LEASE_ID>.md
-orchid git-touched --lease <LEASE_ID> --pretty
-orchid git-status --pretty
+orchid git-touched --lease <LEASE_ID> --explain
 ```
 
-Resolve out-of-scope, conflicted, or unrelated changes first. Do not bypass the
-returned staging plan with `git add .`.
+`preexisting_dirty` alone is informational. The mayor may accept exact,
+evidence-backed ambiguous paths already in frozen scope with
+`complete --accept-attribution`; out-of-scope, changed-after-release, and
+missing-snapshot evidence remains a hard stop. Do not bypass the returned
+staging plan with `git add .`.
 
 ## Included skills
 

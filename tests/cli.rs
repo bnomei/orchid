@@ -33,6 +33,23 @@ impl Repo {
             .arg("--root")
             .arg(&self.root)
             .args(args)
+            .args(detail_args(args))
+            .output()
+            .expect("run orchid");
+        assert!(
+            output.status.success(),
+            "orchid failed\nstdout:{}\nstderr:{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("json stdout")
+    }
+
+    fn run_compact(&self, args: &[&str]) -> Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_orchid"))
+            .arg("--root")
+            .arg(&self.root)
+            .args(args)
             .output()
             .expect("run orchid");
         assert!(
@@ -68,6 +85,7 @@ impl Repo {
         let output = Command::new(env!("CARGO_BIN_EXE_orchid"))
             .current_dir(cwd)
             .args(args)
+            .args(detail_args(args))
             .output()
             .expect("run orchid");
         assert!(
@@ -84,6 +102,7 @@ impl Repo {
             .arg("--root")
             .arg(&self.root)
             .args(args)
+            .args(detail_args(args))
             .output()
             .expect("run orchid");
         assert!(
@@ -132,6 +151,16 @@ impl Repo {
         )
         .expect("write task");
         path
+    }
+}
+
+fn detail_args(args: &[&str]) -> Vec<&'static str> {
+    if args.contains(&"--explain") {
+        return Vec::new();
+    }
+    match args.first().copied() {
+        Some("next" | "report-check" | "git-touched" | "git-stage-plan") => vec!["--explain"],
+        _ => Vec::new(),
     }
 }
 
@@ -373,16 +402,12 @@ fn canonical_binary_json_contracts_are_stable() {
 }
 
 #[test]
-fn ack_v1_actions_and_capabilities_are_advertised() {
+fn compact_actions_and_capabilities_are_advertised() {
     let repo = Repo::new();
 
     let capabilities = repo.run(&["capabilities"]);
-    assert_eq!(capabilities["ack_version"], 1);
     assert_eq!(capabilities["ok"], true);
     assert_eq!(capabilities["command"], "capabilities");
-    assert_eq!(capabilities["protocols"]["ack"], 1);
-    assert_eq!(capabilities["protocols"]["actions"], 1);
-    assert_eq!(capabilities["protocols"]["lease_schema"], 1);
     assert!(capabilities["json_commands"]
         .as_array()
         .unwrap()
@@ -397,25 +422,17 @@ fn ack_v1_actions_and_capabilities_are_advertised() {
         .contains(&Value::String("role_specific_reports".to_string())));
 
     let failed = repo.run_fail(&["next"]);
-    assert_eq!(failed["ack_version"], 1);
     assert_eq!(failed["ok"], false);
     assert_eq!(failed["command"], "next");
     assert_eq!(failed["code"], "scope_required");
     assert_eq!(failed["error"], "next requires --spec or --all-open");
-    assert_eq!(failed["action_version"], 1);
-    assert_eq!(failed["commands"], serde_json::json!([]));
-    assert_eq!(failed["actions"], serde_json::json!([]));
 
-    let next = repo.run(&["next", "--spec", "example"]);
-    assert_eq!(next["ack_version"], 1);
+    let next = repo.run_compact(&["next", "--spec", "example"]);
     assert_eq!(next["ok"], true);
     assert_eq!(next["command"], "next");
-    assert_eq!(next["action_version"], 1);
     assert_eq!(next["recommended_action"], "dispatch");
-    assert_eq!(next["commands"], serde_json::json!([next["cmd"].clone()]));
-    assert_eq!(next["actions"][0]["type"], "command");
-    assert_eq!(next["actions"][0]["argv"], next["cmd"]);
-    assert_eq!(next["blocked"][0]["code"], "unmet_dependency");
+    assert!(next["argv"].is_array());
+    assert!(next.get("blocked").is_none());
 }
 
 #[test]
@@ -425,14 +442,14 @@ fn pretty_can_be_passed_after_subcommand() {
 
     assert_eq!(
         stdout,
-        "{\n  \"ack_version\": 1,\n  \"command\": \"lint\",\n  \"ok\": true,\n  \"tasks\": 3\n}\n"
+        "{\n  \"command\": \"lint\",\n  \"ok\": true,\n  \"tasks\": 3\n}\n"
     );
 
     let stdout = repo.run_stdout(&["lint", "--pretty"]);
 
     assert_eq!(
         stdout,
-        "{\n  \"ack_version\": 1,\n  \"command\": \"lint\",\n  \"ok\": true,\n  \"tasks\": 3\n}\n"
+        "{\n  \"command\": \"lint\",\n  \"ok\": true,\n  \"tasks\": 3\n}\n"
     );
 }
 
@@ -1956,8 +1973,7 @@ fn next_all_open_reports_done_when_no_open_spec_exists() {
 
     assert_eq!(payload["phase"], "done");
     assert_eq!(payload["recommended_action"], "done");
-    assert_eq!(payload["commands"], serde_json::json!([]));
-    assert_eq!(payload["actions"], serde_json::json!([]));
+    assert!(payload.get("cmd").is_none());
 }
 
 #[test]
@@ -1977,9 +1993,8 @@ fn next_all_open_exhaustion_still_advances_terminal_leases() {
 
     let payload = repo.run(&["next", "--all-open"]);
 
-    assert_eq!(payload["phase"], "stage");
-    assert_eq!(payload["stage"][0]["lease_id"], "l_done");
-    assert_eq!(payload["recommended_action"], "stage");
+    assert_eq!(payload["phase"], "recover");
+    assert_eq!(payload["recommended_action"], "recover");
 }
 
 #[test]
@@ -3039,7 +3054,7 @@ fn serial_and_scope_conflicts_are_rejected() {
 }
 
 #[test]
-fn bud_creates_runtime_packet_without_report_stub() {
+fn bud_creates_runtime_packet_with_report_stub() {
     let repo = Repo::new();
     let instructions = repo.root.join("bud-instructions.md");
     fs::write(
@@ -3079,7 +3094,9 @@ fn bud_creates_runtime_packet_without_report_stub() {
     assert_eq!(payload["report"], ".orchid/reports/l_bud.md");
     assert!(repo.root.join(".orchid/leases/l_bud.json").exists());
     assert!(repo.root.join(".orchid/buds/l_bud.md").exists());
-    assert!(!repo.root.join(".orchid/reports/l_bud.md").exists());
+    let report = fs::read_to_string(repo.root.join(".orchid/reports/l_bud.md")).unwrap();
+    assert!(report.contains("lease_id = \"l_bud\""));
+    assert!(report.contains("kind = \"worker\""));
 
     let packet = fs::read_to_string(repo.root.join(".orchid/packets/l_bud-worker.md")).unwrap();
     assert!(packet.contains("## Bud Instructions"));
@@ -3127,6 +3144,25 @@ fn bud_creates_runtime_packet_without_report_stub() {
     assert_eq!(validator_packet["worker_reasoning_effort"], "low");
     let status = repo.run(&["status", "--agent-id", "agent_123"]);
     assert_eq!(status["packet"], ".orchid/packets/l_bud-worker.md");
+}
+
+#[test]
+fn worker_report_stub_does_not_make_next_validate_early() {
+    let repo = Repo::new();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:agent_123",
+        "--lease-id",
+        "l_draft_report",
+    ]);
+    repo.run(&["packet", "--lease", "l_draft_report", "--role", "worker"]);
+
+    let next = repo.run(&["next", "--spec", "example"]);
+    assert_eq!(next["phase"], "wait");
+    assert!(next.get("reports_ready").is_none());
 }
 
 #[test]
@@ -3356,9 +3392,6 @@ fn next_moves_through_dispatch_wait_validate_and_recover() {
         payload["cmd"],
         serde_json::json!(["lease", "example", "T001", "--owner", "worker:<agent-id>"])
     );
-    let brief = repo.run(&["next", "--spec", "example", "--brief"]);
-    assert_eq!(brief["phase"], "dispatch");
-    assert!(brief.get("blocked").is_none());
     let explain = repo.run(&["next", "--spec", "example", "--explain"]);
     assert_eq!(explain["blocked"][0]["reason"], "unmet dependency:T001");
 
@@ -3559,7 +3592,7 @@ fn complete_updates_only_task_and_next_finds_stage_or_cleanup() {
     );
 
     let payload = repo.run(&["next", "--spec", "example"]);
-    assert_eq!(payload["phase"], "stage");
+    assert_eq!(payload["phase"], "recover");
     assert_eq!(payload["stage"][0]["lease_id"], "l_test");
     assert_eq!(payload["stage"][0]["git"], false);
 
@@ -5145,7 +5178,7 @@ fn next_spec_does_not_surface_foreign_spec_cleanup() {
     assert!(payload.get("cleanup").is_none());
 
     let other = repo.run(&["next", "--spec", "other", "--explain"]);
-    assert_eq!(other["phase"], "stage");
+    assert_eq!(other["phase"], "recover");
     assert_eq!(other["stage"][0]["lease_id"], "l_other");
     assert_eq!(other["stage"][0]["git"], false);
 }
@@ -5488,6 +5521,38 @@ fn close_succeeds_after_changes_are_committed() {
 }
 
 #[test]
+fn close_ignores_unrelated_preexisting_dirty_work() {
+    let repo = Repo::new();
+    repo.init_git();
+    fs::write(repo.root.join("src/other/preexisting.txt"), "user work\n").unwrap();
+    repo.run(&[
+        "lease",
+        "example",
+        "T001",
+        "--owner",
+        "worker:a",
+        "--lease-id",
+        "l_preexisting",
+    ]);
+    repo.run(&[
+        "complete",
+        "--lease",
+        "l_preexisting",
+        "--verified-by",
+        "mayor",
+    ]);
+    git(&repo.root, &["add", "specs/example/tasks/T001.md"]);
+    git(&repo.root, &["commit", "-m", "complete task"]);
+
+    let closed = repo.run(&["close", "--lease", "l_preexisting"]);
+    assert_eq!(closed["lease_id"], "l_preexisting");
+    assert_eq!(
+        fs::read_to_string(repo.root.join("src/other/preexisting.txt")).unwrap(),
+        "user work\n"
+    );
+}
+
+#[test]
 fn close_force_records_audit_trail_on_active_task() {
     let repo = Repo::new();
     repo.run(&[
@@ -5579,7 +5644,7 @@ fn release_and_heartbeat_reject_completed_leases() {
     let released = repo.run_fail(&["release", "l_abc", "--reason", "superseded"]);
     assert_eq!(released["code"], "lease_not_active");
     let next = repo.run(&["next", "--spec", "example", "--explain"]);
-    assert_eq!(next["phase"], "stage");
+    assert_eq!(next["phase"], "recover");
     assert_eq!(next["stage"][0]["lease_id"], "l_abc");
     assert_eq!(next["stage"][0]["git"], false);
 
@@ -6112,7 +6177,7 @@ fn doctor_and_inspect_are_read_only_runtime_observability() {
     assert_eq!(inspect["status"], "active");
     assert_eq!(inspect["task_path"], "specs/example/tasks/T001.md");
     assert_eq!(inspect["report"], ".orchid/reports/l_inspect.md");
-    assert_eq!(inspect["report_exists"], false);
+    assert_eq!(inspect["report_exists"], true);
     assert_eq!(inspect["worker_packet_exists"], true);
     assert!(inspect["context_revision"].as_str().is_some());
     assert_eq!(inspect["lease"]["id"], "l_inspect");
@@ -6784,12 +6849,10 @@ fn role_specific_packets_and_reports_have_distinct_contracts() {
     assert_eq!(worker["commands_run_count"], 1);
     assert_eq!(worker["warnings"], serde_json::json!([]));
     assert_eq!(worker["recommended_action"], "validate");
-    assert_eq!(worker["action_version"], 1);
     assert_eq!(
-        worker["commands"][0],
+        worker["argv"],
         serde_json::json!(["packet", "--lease", "l_role_reports", "--role", "validator"])
     );
-    assert_eq!(worker["actions"][0]["argv"], worker["commands"][0]);
 
     let validator_path = repo
         .root
@@ -6819,8 +6882,8 @@ fn role_specific_packets_and_reports_have_distinct_contracts() {
             ".orchid/reports/l_role_reports.md"
         );
         match command_role {
-            Some(role) => assert_eq!(checked["commands"][0][4], role),
-            None => assert_eq!(checked["commands"], serde_json::json!([])),
+            Some(role) => assert_eq!(checked["argv"][4], role),
+            None => assert!(checked.get("argv").is_none()),
         }
     }
 
@@ -6951,7 +7014,7 @@ fn reviewer_and_loop_runner_ready_reports_do_not_fabricate_validator_handoffs() 
         .unwrap();
         let checked = repo.run(&["report-check", &path]);
         assert_eq!(checked["recommended_action"], "none");
-        assert_eq!(checked["commands"], serde_json::json!([]));
+        assert!(checked.get("argv").is_none());
     }
 }
 
@@ -6982,8 +7045,7 @@ fn terminal_report_check_is_observational_without_packet_action() {
 
     let checked = repo.run(&["report-check", ".orchid/reports/l_terminal_report.md"]);
     assert_eq!(checked["recommended_action"], "none");
-    assert_eq!(checked["commands"], serde_json::json!([]));
-    assert_eq!(checked["actions"], serde_json::json!([]));
+    assert!(checked.get("argv").is_none());
 }
 
 #[test]
@@ -7270,7 +7332,7 @@ fn report_check_accepts_report_from_external_orchid_reports_dir() {
     assert_eq!(payload["next"], "validation");
     assert_eq!(payload["report_source"], canonical_report);
     assert_eq!(
-        payload["commands"][0],
+        payload["argv"],
         serde_json::json!([
             "packet",
             "--lease",
@@ -7604,6 +7666,53 @@ fn complete_rejects_ambiguous_baseline_dirty_paths() {
     )
     .unwrap();
     assert_eq!(lease["status"], "active");
+
+    let missing_reason = repo.run_fail(&[
+        "complete",
+        "--lease",
+        "l_test",
+        "--verified-by",
+        "mayor",
+        "--accept-attribution",
+        "src/feature/preexisting.txt",
+    ]);
+    assert_eq!(missing_reason["code"], "complete_unsafe_to_stage");
+
+    let completed = repo.run(&[
+        "complete",
+        "--lease",
+        "l_test",
+        "--verified-by",
+        "mayor",
+        "--accept-attribution",
+        "src/feature/preexisting.txt",
+        "--reason",
+        "mayor accepts retained in-scope work",
+    ]);
+    assert_eq!(completed["lease_id"], "l_test");
+    assert_eq!(
+        task_status(&repo.root, "specs/example/tasks/T001.md"),
+        "done"
+    );
+    let task = task_frontmatter(&repo.root, "specs/example/tasks/T001.md");
+    assert_eq!(
+        task["attribution_accepted_paths"],
+        toml::Value::Array(vec![toml::Value::String(
+            "src/feature/preexisting.txt".to_string()
+        )])
+    );
+    assert_eq!(
+        task["attribution_reason"].as_str(),
+        Some("mayor accepts retained in-scope work")
+    );
+    let plan = repo.run(&["git-stage-plan", "--lease", "l_test"]);
+    assert_eq!(
+        plan["pathspecs"],
+        serde_json::json!([
+            ":(literal)specs/example/tasks/T001.md",
+            ":(literal)src/feature/preexisting.txt"
+        ])
+    );
 }
 
 #[test]
@@ -7878,7 +7987,7 @@ fn released_lease_attribution_rejects_edits_to_captured_paths() {
     assert!(touched.get("stage").is_none());
 
     let next = repo.run(&["next", "--spec", "example"]);
-    assert_eq!(next["phase"], "stage");
+    assert_eq!(next["phase"], "recover");
     assert_eq!(
         next["stage"][0]["excluded"]["changed_after_release"],
         serde_json::json!(["src/feature/work.txt"])
@@ -8498,12 +8607,13 @@ fn security_lock_and_help_contracts() {
     assert!(!help.contains("--explain"));
     assert!(help.contains("--brief"));
     let help = repo.run_help(&["next"]);
-    assert!(!help.contains("--explain"));
-    assert!(help.contains("--brief"));
+    assert!(help.contains("--explain"));
+    assert!(!help.contains("--brief"));
     assert!(help.contains("--older-than"));
     let help = repo.run_help(&["complete"]);
     assert!(help.contains("Independent review reference for the commit"));
     assert!(help.contains("--clean-spec-research"));
+    assert!(help.contains("--accept-attribution"));
 }
 
 #[test]

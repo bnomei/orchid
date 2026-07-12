@@ -861,6 +861,8 @@ pub(crate) fn touched_for_lease(
     let status = git_status_data(root)?;
     let git_available = status.get("git").and_then(Value::as_bool).unwrap_or(false);
     let baseline: BTreeSet<String> = lease.baseline_changed().into_iter().collect();
+    let accepted_attribution: BTreeSet<String> =
+        lease.accepted_attribution_paths().into_iter().collect();
     let completed_window: Option<BTreeSet<String>> = lease
         .completed_changed()
         .map(|paths| paths.into_iter().collect());
@@ -904,8 +906,18 @@ pub(crate) fn touched_for_lease(
                 break;
             }
         }
-        if !baseline_paths.is_empty() && !all_baseline_paths_committed {
-            for path in paths {
+        let accepted_baseline_paths =
+            !paths.is_empty() && paths.iter().all(|path| accepted_attribution.contains(path));
+        if !baseline_paths.is_empty() && !all_baseline_paths_committed && !accepted_baseline_paths {
+            let relevant_paths: Vec<String> = paths
+                .iter()
+                .filter(|path| path_in_scope(path, &scope))
+                .cloned()
+                .collect();
+            if relevant_paths.is_empty() {
+                continue;
+            }
+            for path in relevant_paths {
                 ambiguous.insert(path);
             }
             ambiguous_records.push(record);
@@ -1077,9 +1089,6 @@ pub(crate) fn stage_plan_for_lease(root: &Path, lease: &LeaseRecord) -> OrchResu
     let mut excluded = Map::new();
     if let Some(blocked_by) = data.get("blocked_by").and_then(Value::as_object) {
         excluded.extend(blocked_by.clone());
-    }
-    if let Some(preexisting_dirty) = data.get("preexisting_dirty") {
-        excluded.insert("preexisting_dirty".to_string(), preexisting_dirty.clone());
     }
     let mut excluded_records = Map::new();
     if let Some(blocked_by_records) = data.get("blocked_by_records").and_then(Value::as_object) {

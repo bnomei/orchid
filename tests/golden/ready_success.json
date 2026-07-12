@@ -1,5 +1,4 @@
 {
-  "ack_version": 1,
   "command": "ready",
   "ok": true,
   "ready": [
