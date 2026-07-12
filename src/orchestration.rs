@@ -20,8 +20,9 @@ use crate::gitstate::{
     touched_for_lease,
 };
 use crate::model::{
-    lease_context_revision, validate_lease_id, ActiveLeaseRecordInput, LeaseId, LeaseMode,
-    LeaseRecord, ReasoningEffort, ReportFrontmatter, ReportKind, ReportStatus, ValidatorVerdict,
+    content_revision, lease_context_revision, validate_lease_id, ActiveLeaseRecordInput, LeaseId,
+    LeaseMode, LeaseRecord, ReasoningEffort, ReportFrontmatter, ReportKind, ReportStatus,
+    ValidatorVerdict,
 };
 use crate::paths::{
     atomic_write, buds_dir, ensure_runtime_dirs, leases_dir, packets_dir, path_to_string, relpath,
@@ -672,6 +673,7 @@ pub(crate) fn bud(root: &Path, request: &BudRequest) -> OrchResult<Map<String, V
         &lease_id_text,
         PacketRoleKind::Worker,
         None,
+        false,
     )?;
     if let Err(err) = save_lease(root, &lease) {
         rollback_bud_artifacts(root, &instructions_path, &packet);
@@ -746,6 +748,7 @@ pub(crate) fn lease_attach_agent(
             &request.lease,
             role,
             source_report.as_deref(),
+            false,
         )?;
     }
     save_lease(root, &lease)?;
@@ -819,15 +822,16 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
             "recovery",
             Value::Array(vec![Value::Object(recovery)]),
         );
+        let command = Value::Array(
+            ["completion-recover", "--lease", lease_id.as_str()]
+                .into_iter()
+                .map(|part| Value::String(part.to_string()))
+                .collect(),
+        );
         insert(
             &mut payload,
-            "cmd",
-            Value::Array(
-                ["completion-recover", "--lease", lease_id.as_str()]
-                    .into_iter()
-                    .map(|part| Value::String(part.to_string()))
-                    .collect(),
-            ),
+            if request.explain { "cmd" } else { "argv" },
+            command,
         );
         insert(
             &mut payload,
@@ -860,6 +864,8 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
         }
     }
     let mut reports_ready = Vec::new();
+    let mut blocked_reports = Vec::new();
+    let mut repair_reports = Vec::new();
     for lease in &active {
         if !lease_in_selected_queue(lease, &selected_specs) {
             continue;
@@ -870,6 +876,61 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
                 lease_id: lease.id().unwrap_or("").to_string(),
                 task: lease.get_str("task").unwrap_or("").to_string(),
                 report: relpath(&report, root),
+                worker_reasoning_effort: lease
+                    .worker_reasoning_effort()
+                    .unwrap_or(ReasoningEffort::Medium.as_str())
+                    .to_string(),
+                worker_model: lease.worker_model().map(str::to_string),
+            });
+        }
+        let validator =
+            report_path_for_lease_role(root, lease, PacketRoleKind::Validator.as_str())?;
+        let validator_rel = relpath(&validator, root);
+        if !report.exists()
+            || report_path_is_draft(&report)?
+            || !validator.exists()
+            || report_path_is_draft(&validator)?
+        {
+            continue;
+        }
+        let validator_text = crate::paths::read_text(&validator)?;
+        let Ok((validator_meta, _)) = split_frontmatter(&validator_text, &validator) else {
+            continue;
+        };
+        let validator_report = ReportFrontmatter::from_map(validator_meta);
+        if !validator_report.kind().is_validator()
+            || validator_report.status().as_str()
+                != validator_status_for_verdict(validator_report.validator_verdict())
+            || validate_report_binding(lease, &validator_report, false).is_err()
+        {
+            continue;
+        }
+        if validator_report.kind().is_validator()
+            && matches!(
+                validator_report.validator_verdict(),
+                ValidatorVerdict::Blocked
+            )
+        {
+            blocked_reports.push(ReportReady {
+                lease_id: lease.id().unwrap_or("").to_string(),
+                task: lease.get_str("task").unwrap_or("").to_string(),
+                report: validator_rel,
+                worker_reasoning_effort: lease
+                    .worker_reasoning_effort()
+                    .unwrap_or(ReasoningEffort::Medium.as_str())
+                    .to_string(),
+                worker_model: lease.worker_model().map(str::to_string),
+            });
+        } else if matches!(
+            validator_report.validator_verdict(),
+            ValidatorVerdict::Failed
+        ) && lease.get_str("repair_validator_report_revision")
+            != Some(content_revision("repair-validator-report", &validator_text).as_str())
+        {
+            repair_reports.push(ReportReady {
+                lease_id: lease.id().unwrap_or("").to_string(),
+                task: lease.get_str("task").unwrap_or("").to_string(),
+                report: validator_rel,
                 worker_reasoning_effort: lease
                     .worker_reasoning_effort()
                     .unwrap_or(ReasoningEffort::Medium.as_str())
@@ -931,6 +992,8 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
         .collect();
     let mut payload = decide_next(NextInput {
         stale,
+        blocked_reports,
+        repair_reports,
         reports_ready,
         active: active
             .iter()
@@ -1866,12 +1929,23 @@ pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<Str
     }
     let source_report =
         resolve_packet_source_report(root, &lease, request.role, request.source_report.as_deref())?;
+    let repair_validator_report_revision =
+        if request.role == PacketRoleKind::Worker && request.source_report.is_some() {
+            let path = report_path_from_request(root, source_report.as_deref().unwrap_or(""))?;
+            Some(content_revision(
+                "repair-validator-report",
+                &crate::paths::read_text(&path.path)?,
+            ))
+        } else {
+            None
+        };
     let packet = render_packet_for_lease(
         root,
         &mut lease,
         &request.lease,
         request.role,
         source_report.as_deref(),
+        request.role == PacketRoleKind::Worker && request.source_report.is_some(),
     )?;
     if request.source_report.is_some() {
         if let Some(source_report) = source_report.as_deref() {
@@ -1882,6 +1956,9 @@ pub(crate) fn packet(root: &Path, request: &PacketRequest) -> OrchResult<Map<Str
             };
             lease.set(key, source_report);
         }
+    }
+    if let Some(revision) = repair_validator_report_revision {
+        lease.set("repair_validator_report_revision", revision);
     }
     save_lease(root, &lease)?;
     let mut payload = json_ok();
@@ -1980,6 +2057,7 @@ fn render_packet_for_lease(
     lease_id: &str,
     role: PacketRoleKind,
     source_report: Option<&str>,
+    reset_worker_report: bool,
 ) -> OrchResult<String> {
     let report_path = report_path_for_lease_role(root, lease, role.as_str())?;
     let packet_path = repo_path(
@@ -1997,7 +2075,7 @@ fn render_packet_for_lease(
         quote_toml_string(role.report_status()),
         verdict.unwrap_or_default(),
     );
-    if !report_path.exists() || (role == PacketRoleKind::Worker && source_report.is_some()) {
+    if !report_path.exists() || reset_worker_report {
         atomic_write(&report_path, &report_template)?;
     }
     let packet = if lease.is_bud() {
