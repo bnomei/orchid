@@ -36,8 +36,10 @@ Phase guide:
 
 - `dispatch`: use `next --explain` only when worker-routing detail is needed,
   then spawn the correctly sized worker and create the packet.
-- `wait`: poll `orchid status --spec SPEC_ID` with backoff; do not ask workers
-  for routine progress.
+- `wait`: wait for the worker or validator to return. Do not poll or ask for
+  routine progress while the agent wait is active. If no completion event
+  arrives after 15 minutes, run one quiet `orchid status --spec SPEC_ID`;
+  return to waiting for another 15 minutes when it remains healthy.
 - `validate`: check the report, touched files, and task-specific evidence.
 - `repair`: regenerate the worker packet from the failed validator report, then
   dispatch the focused repair worker.
