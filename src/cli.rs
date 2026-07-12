@@ -3,6 +3,7 @@
 //! Subcommands emit compact JSON ACKs by default; goal-related commands may render
 //! Markdown prompts for agent-facing workflows.
 
+use std::env;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -447,6 +448,10 @@ struct BlockArgs {
 /// Parse CLI arguments, resolve the repository root, run the requested subcommand, and
 /// print JSON or Markdown output. Returns a process exit code: `0` on success, `1` on failure.
 pub fn run() -> i32 {
+    if matches!(env::args().nth(1).as_deref(), Some("--version" | "-V")) {
+        println!("orchid {}", env!("CARGO_PKG_VERSION"));
+        return 0;
+    }
     let cli = Cli::parse();
     let root = match root_from_arg(cli.root.as_deref()) {
         Ok(root) => root,

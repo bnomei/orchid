@@ -3157,7 +3157,7 @@ fn worker_report_stub_does_not_make_next_validate_early() {
     ]);
     repo.run(&["packet", "--lease", "l_draft_report", "--role", "worker"]);
 
-    let next = repo.run(&["next", "--spec", "example"]);
+    let next = repo.run_compact(&["next", "--spec", "example"]);
     assert_eq!(next["phase"], "wait");
     assert!(next.get("reports_ready").is_none());
     let draft = repo.run_fail(&["report-check", ".orchid/reports/l_draft_report.md"]);
@@ -3201,10 +3201,25 @@ fn repair_packet_resets_the_worker_report_to_a_draft() {
     fs::write(
         repo.root.join(".orchid/reports/l_repair_report-validator.md"),
         format!(
-            "+++\nlease_id = \"l_repair_report\"\nlease_started_at = \"{started_at}\"\ncontext_revision = \"{revision}\"\nkind = \"validator\"\nstatus = \"done\"\nverdict = \"needs_fix\"\ncommands_run = []\nresult = \"fix the edge case\"\n+++\n\n## Summary\n\nNeeds repair.\n"
+            "+++\nlease_id = \"l_repair_report\"\nlease_started_at = \"{started_at}\"\ncontext_revision = \"{revision}\"\nkind = \"validator\"\nstatus = \"needs_fix\"\nverdict = \"failed\"\ncommands_run = []\nresult = \"fix the edge case\"\n+++\n\n## Summary\n\nNeeds repair.\n"
         ),
     )
     .unwrap();
+
+    let next = repo.run_compact(&["next", "--spec", "example"]);
+    assert_eq!(next["phase"], "repair");
+    assert_eq!(
+        next["argv"],
+        serde_json::json!([
+            "packet",
+            "--lease",
+            "l_repair_report",
+            "--role",
+            "worker",
+            "--source-report",
+            ".orchid/reports/l_repair_report-validator.md"
+        ])
+    );
 
     repo.run(&[
         "packet",
@@ -3220,6 +3235,66 @@ fn repair_packet_resets_the_worker_report_to_a_draft() {
     let next = repo.run(&["next", "--spec", "example"]);
     assert_eq!(next["phase"], "wait");
     assert!(next.get("reports_ready").is_none());
+
+    let report_path = repo.root.join(".orchid/reports/l_repair_report.md");
+    fs::write(
+        &report_path,
+        report
+            .replace("draft = true", "draft = false")
+            .replace("result = \"\"", "result = \"repair complete\""),
+    )
+    .unwrap();
+    repo.run(&[
+        "lease-attach-agent",
+        "--lease",
+        "l_repair_report",
+        "--agent-id",
+        "agent_repair",
+    ]);
+    let report = fs::read_to_string(report_path).unwrap();
+    assert!(report.contains("draft = false"));
+    assert!(report.contains("repair complete"));
+
+    let next = repo.run_compact(&["next", "--spec", "example"]);
+    assert_eq!(next["phase"], "validate");
+    let validator_path = repo
+        .root
+        .join(".orchid/reports/l_repair_report-validator.md");
+    let validator = fs::read_to_string(&validator_path).unwrap();
+    fs::write(
+        &validator_path,
+        validator.replace("fix the edge case", "fix the second edge case"),
+    )
+    .unwrap();
+    let next = repo.run_compact(&["next", "--spec", "example"]);
+    assert_eq!(next["phase"], "repair");
+
+    let validator = fs::read_to_string(&validator_path).unwrap();
+    fs::write(
+        &validator_path,
+        validator
+            .replace("status = \"needs_fix\"", "status = \"blocked\"")
+            .replace("verdict = \"failed\"", "verdict = \"blocked\""),
+    )
+    .unwrap();
+    let next = repo.run_compact(&["next", "--spec", "example"]);
+    assert_eq!(next["phase"], "blocked");
+    assert_eq!(
+        next["cmd"],
+        serde_json::json!([
+            "report-check",
+            ".orchid/reports/l_repair_report-validator.md"
+        ])
+    );
+
+    let validator = fs::read_to_string(&validator_path).unwrap();
+    fs::write(
+        &validator_path,
+        validator.replace("status = \"blocked\"", "status = \"done\""),
+    )
+    .unwrap();
+    let next = repo.run_compact(&["next", "--spec", "example"]);
+    assert_eq!(next["phase"], "validate");
 }
 
 #[test]
@@ -6143,6 +6218,11 @@ fn complete_rolls_back_lease_when_task_write_fails() {
         next["cmd"],
         serde_json::json!(["completion-recover", "--lease", "l_task_write"])
     );
+    let compact = repo.run_compact(&["next", "--spec", "example"]);
+    assert_eq!(
+        compact["argv"],
+        serde_json::json!(["completion-recover", "--lease", "l_task_write"])
+    );
 
     let recovered = repo.run(&["completion-recover", "--lease", "l_task_write"]);
     assert_eq!(recovered["lease_id"], "l_task_write");
@@ -8647,6 +8727,13 @@ fn security_lock_and_help_contracts() {
     let help = repo.run_help(&[]);
     assert!(help.contains("List ready task files"));
     assert!(help.contains("Generate a worker, validator, reviewer, or loop-runner packet"));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_orchid"))
+        .arg("--version")
+        .output()
+        .expect("run orchid version");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "orchid 0.8.0\n");
 
     let help = repo.run_help(&["lease"]);
     assert!(help.contains("Task target: SPEC with TASK_ID"));

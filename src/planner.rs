@@ -1,6 +1,6 @@
 //! Priority state machine that decides the next coordinator action from lease/task snapshots.
 //!
-//! [`decide_next`] ranks recover, validate, stage, cleanup, dispatch, and wait phases
+//! [`decide_next`] ranks recover, repair, validate, stage, cleanup, dispatch, and wait phases
 //! so `orchid next` can drive the harness loop without bespoke coordinator logic.
 
 use serde_json::{Map, Value};
@@ -121,6 +121,7 @@ pub(crate) enum Phase {
     Dispatch,
     Done,
     Recover,
+    Repair,
     Stage,
     Validate,
     Wait,
@@ -134,6 +135,7 @@ impl Phase {
             Phase::Dispatch => "dispatch",
             Phase::Done => "done",
             Phase::Recover => "recover",
+            Phase::Repair => "repair",
             Phase::Stage => "stage",
             Phase::Validate => "validate",
             Phase::Wait => "wait",
@@ -144,6 +146,8 @@ impl Phase {
 /// Snapshot inputs assembled before ranking the next coordinator action.
 pub(crate) struct NextInput {
     pub(crate) stale: Vec<CompactLease>,
+    pub(crate) blocked_reports: Vec<ReportReady>,
+    pub(crate) repair_reports: Vec<ReportReady>,
     pub(crate) reports_ready: Vec<ReportReady>,
     pub(crate) active: Vec<CompactLease>,
     pub(crate) stage: Vec<StagePlan>,
@@ -202,6 +206,8 @@ impl NextDecision {
 pub(crate) fn decide_next(input: NextInput) -> NextDecision {
     let NextInput {
         stale,
+        blocked_reports,
+        repair_reports,
         reports_ready,
         active,
         stage,
@@ -224,6 +230,40 @@ pub(crate) fn decide_next(input: NextInput) -> NextDecision {
                 "stale".to_string(),
                 "--older-than".to_string(),
                 older_than,
+            ]],
+            details,
+        };
+    }
+    if !blocked_reports.is_empty() {
+        let report = blocked_reports[0].report.clone();
+        let mut details = Map::new();
+        details.insert(
+            "blocked_reports".to_string(),
+            reports_array(blocked_reports),
+        );
+        insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
+        return NextDecision {
+            phase: Phase::Blocked,
+            commands: vec![vec!["report-check".to_string(), report]],
+            details,
+        };
+    }
+    if !repair_reports.is_empty() {
+        let lease_id = repair_reports[0].lease_id.clone();
+        let report = repair_reports[0].report.clone();
+        let mut details = Map::new();
+        details.insert("repair_reports".to_string(), reports_array(repair_reports));
+        insert_non_empty(&mut details, "blocked", blocked_array(visible_blocked));
+        return NextDecision {
+            phase: Phase::Repair,
+            commands: vec![vec![
+                "packet".to_string(),
+                "--lease".to_string(),
+                lease_id,
+                "--role".to_string(),
+                "worker".to_string(),
+                "--source-report".to_string(),
+                report,
             ]],
             details,
         };
@@ -448,6 +488,8 @@ mod tests {
     fn input() -> NextInput {
         NextInput {
             stale: Vec::new(),
+            blocked_reports: Vec::new(),
+            repair_reports: Vec::new(),
             reports_ready: Vec::new(),
             active: Vec::new(),
             stage: Vec::new(),

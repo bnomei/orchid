@@ -2,13 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.7.0] - 2026-07-12
+## [0.8.0] - 2026-07-12
 
 ### Added
 
 - Added audited mayor acceptance for exact, ambiguous paths already inside a
   frozen lease scope: `complete --accept-attribution <path> --reason <reason>`.
 - Packet generation now creates the canonical role report stub when it is absent.
+- `next` now routes failed validator evidence directly into a worker repair
+  packet with that report as its source.
+- Added `orchid --version` for release and installation checks.
 
 ### Changed
 
@@ -16,10 +19,14 @@ All notable changes to this project will be documented in this file.
   for record-level diagnostics.
 - Moved ordinary attribution reconciliation into the mayor workflow rather than
   a manifest, recovery lease, or reconciliation worker.
+- Kept worker packets focused on the task, scope, evidence, and report contract;
+  worker routing metadata and policy remain coordinator-side.
 
 ### Fixed
 
 - Pre-existing unrelated dirty paths no longer block an otherwise safe lease close.
+- Draft reports cannot advance validation, accepted attribution is tied to the
+  reviewed content, and retry packet refreshes preserve fresh worker evidence.
 
 ## [0.6.0] - 2026-07-11
 

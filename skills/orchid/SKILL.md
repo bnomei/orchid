@@ -39,6 +39,8 @@ Phase guide:
 - `wait`: poll `orchid status --spec SPEC_ID` with backoff; do not ask workers
   for routine progress.
 - `validate`: check the report, touched files, and task-specific evidence.
+- `repair`: regenerate the worker packet from the failed validator report, then
+  dispatch the focused repair worker.
 - `stage`: ask Orchid for the staging plan, then stage only returned pathspecs.
 - `cleanup`: close completed leases after durable commit/review state exists.
 - `recover`: inspect stale leases, release or continue them, or report the blocker.

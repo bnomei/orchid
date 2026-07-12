@@ -64,6 +64,7 @@ Verify the install:
 
 ```sh
 orchid --help
+orchid --version
 ```
 
 Expected output starts with:
@@ -199,6 +200,7 @@ safe staging work:
 | Phase | Coordinator action |
 | --- | --- |
 | `recover` | Inspect a stale lease before dispatching more work. |
+| `repair` | Regenerate the worker packet from the failed validator report. |
 | `validate` | Check a worker report and compare touched paths with the lease. |
 | `stage` | Request the safe pathspec plan for completed work. |
 | `dispatch` | Lease the returned ready task; parallel dispatch includes `--allow-parallel`. |
@@ -287,8 +289,8 @@ orchid release <LEASE_ID> --reason "worker exited before handoff"
 ```
 
 `orchid next --older-than <DURATION>` uses the same duration syntax (`10m`,
-`2h`, or `1d`). A stale lease that already has a report is routed to validation
-instead of recovery.
+`2h`, or `1d`). A stale lease with a finished report is routed to validation;
+a generated draft is still routed to recovery.
 
 ### Bud delegation
 
@@ -306,8 +308,7 @@ orchid bud \
 ```
 
 `bud` snapshots the instruction file under `.orchid/buds/`, creates a lease,
-generates a worker packet, and returns the packet and report paths. It does not
-pre-create the report file.
+generates a worker packet and draft report stub, and returns both paths.
 
 ### Spec research workspaces
 
@@ -466,9 +467,9 @@ reference (`002-other/T001` or `specs/002-other/T001`), or `-` as a placeholder.
 Only a dependency with `status = "done"` is satisfied.
 
 Task routing metadata does not spawn an agent. `worker_reasoning_effort` and the
-opaque `worker_model` string flow through `ready`, `next`, the lease, generated
-packets, and report checks so the coordinator can choose the worker. Explicit
-`lease` or `bud` flags override task metadata.
+opaque `worker_model` string flow through `ready`, `next`, and the lease so the
+coordinator can choose the worker. They stay out of worker packets and reports;
+explicit `lease` or `bud` flags override task metadata.
 
 ### Spec policy
 
@@ -480,8 +481,7 @@ packets, and report checks so the coordinator can choose the worker. Explicit
 | `human_checkpoint = "before-implementation"` | Blocks dispatch until the policy changes. |
 | `fanout_policy = "serial"` | Rejects `--allow-parallel` leases for the spec. |
 
-Other policy keys are preserved and copied into generated packets for agents to
-read.
+Other policy keys are preserved in the lease record for coordinator inspection.
 
 ### Role report contracts
 
@@ -500,6 +500,7 @@ lease_started_at = "<LEASE_START_TIME>"
 context_revision = "<CONTEXT_REVISION>"
 kind = "worker"
 status = "ready_for_validation"
+draft = true
 commands_run = []
 result = ""
 +++
@@ -516,6 +517,10 @@ What proves it.
 
 Anything the coordinator must know.
 ```
+
+Workers replace the stub with their evidence and set `draft = false` before the
+report is ready. `report-check` rejects drafts, so they cannot accidentally
+advance validation.
 
 Valid statuses are `ready_for_validation`, `needs_fix`, `blocked`, and `done`.
 Validator reports also set `verdict = "passed"`, `"failed"`, or `"blocked"`;
