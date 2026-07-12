@@ -1,0 +1,20 @@
+{
+  "name": "@bnomei/orchid",
+  "version": "0.7.0",
+  "description": "Thin launcher for the Orchid scoped coding-agent orchestration CLI",
+  "homepage": "https://github.com/bnomei/orchid",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bnomei/orchid.git"
+  },
+  "license": "MIT",
+  "bin": {
+    "orchid": "bin/orchid.js"
+  },
+  "files": [
+    "bin/orchid.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

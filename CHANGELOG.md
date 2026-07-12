@@ -12,6 +12,8 @@ All notable changes to this project will be documented in this file.
 - `next` now routes failed validator evidence directly into a worker repair
   packet with that report as its source.
 - Added `orchid --version` for release and installation checks.
+- Added verified npm wrapper and GHCR Docker image installation paths for the
+  `0.7.0` release assets.
 
 ### Changed
 

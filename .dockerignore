@@ -1,0 +1,5 @@
+.git
+.orchid
+dist
+npm/orchid/node_modules
+target

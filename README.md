@@ -34,8 +34,8 @@ only when a goal-loop cycle is kept.
 
 ## Install
 
-Use a release archive when you only need the binary, or use Cargo when Rust is
-already part of your toolchain.
+Use a release archive, the npm wrapper, or the Docker image when you only need
+the binary. Use Cargo when Rust is already part of your toolchain.
 
 ### GitHub Releases
 
@@ -43,13 +43,45 @@ Download an archive from
 [GitHub Releases](https://github.com/bnomei/orchid/releases), extract it, and
 put the `orchid` binary on your `PATH`.
 
-Release archives target x86-64 GNU/Linux, x86-64 and Apple Silicon macOS, and
-x86-64 Windows with MSVC.
+Release archives target x86-64 and arm64 musl Linux, x86-64 and Apple Silicon
+macOS, and x86-64 Windows with MSVC.
 
 ### Crates.io
 
 ```sh
 cargo install orchid-cli
+```
+
+### npm wrapper
+
+Requires Node.js 18 or newer. The wrapper supports Linux and macOS on x64 or
+arm64, plus Windows on x64. Linux and macOS also need `tar` to extract the
+downloaded release archive.
+
+```sh
+npx @bnomei/orchid --version
+```
+
+The npm package is a thin wrapper. On first run it downloads the matching
+GitHub Release binary, verifies its published `.sha256` checksum, caches it
+locally, and forwards arguments to Orchid.
+
+### Docker
+
+The container image supports Linux x86-64 and arm64 and runs the published musl
+release binary as a non-root user.
+
+```sh
+docker run --rm ghcr.io/bnomei/orchid:0.7.0 --version
+```
+
+Mount a repository for normal Orchid work. On Unix hosts, pass your user ID so
+the container can write its `.orchid/` runtime directory in the bind mount:
+
+```sh
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v "$PWD:/workspace" -w /workspace \
+  ghcr.io/bnomei/orchid:0.7.0 status
 ```
 
 ### From source
@@ -740,4 +772,8 @@ Source anchors for README claims:
 - [`src/goal.rs`](src/goal.rs) implements the goal loop.
 - [`tests/cli.rs`](tests/cli.rs) exercises the end-to-end CLI contracts.
 - [`.github/workflows/release.yml`](.github/workflows/release.yml) defines the
-  published archive targets.
+  published archives, npm wrapper, and GHCR image targets.
+- [`Dockerfile`](Dockerfile) builds the GHCR image from verified Linux release
+  assets.
+- [`npm/orchid`](npm/orchid) contains the npm launcher and its release-asset
+  checksum verification.
