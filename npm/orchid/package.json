@@ -1,6 +1,6 @@
 {
   "name": "@bnomei/orchid",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Thin launcher for the Orchid scoped coding-agent orchestration CLI",
   "homepage": "https://github.com/bnomei/orchid",
   "repository": {

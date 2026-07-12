@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.1] - 2026-07-12
+
+### Fixed
+
+- Fixed compact repair-phase command coverage so cross-platform CI validates the
+  `argv` contract rather than explained-output fields.
+
 ## [0.7.0] - 2026-07-12
 
 ### Added

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG ORCHID_VERSION=0.7.0
+ARG ORCHID_VERSION=0.7.1
 ARG ORCHID_REPOSITORY=bnomei/orchid
 ARG ORCHID_RUNTIME_IMAGE=gcr.io/distroless/static-debian13:nonroot
 

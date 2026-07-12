@@ -72,7 +72,7 @@ The container image supports Linux x86-64 and arm64 and runs the published musl
 release binary as a non-root user.
 
 ```sh
-docker run --rm ghcr.io/bnomei/orchid:0.7.0 --version
+docker run --rm ghcr.io/bnomei/orchid:0.7.1 --version
 ```
 
 Mount a repository for normal Orchid work. On Unix hosts, pass your user ID so
@@ -81,7 +81,7 @@ the container can write its `.orchid/` runtime directory in the bind mount:
 ```sh
 docker run --rm --user "$(id -u):$(id -g)" \
   -v "$PWD:/workspace" -w /workspace \
-  ghcr.io/bnomei/orchid:0.7.0 status
+  ghcr.io/bnomei/orchid:0.7.1 status
 ```
 
 ### From source

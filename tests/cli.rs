@@ -3280,7 +3280,7 @@ fn repair_packet_resets_the_worker_report_to_a_draft() {
     let next = repo.run_compact(&["next", "--spec", "example"]);
     assert_eq!(next["phase"], "blocked");
     assert_eq!(
-        next["cmd"],
+        next["argv"],
         serde_json::json!([
             "report-check",
             ".orchid/reports/l_repair_report-validator.md"
@@ -8733,7 +8733,7 @@ fn security_lock_and_help_contracts() {
         .output()
         .expect("run orchid version");
     assert!(output.status.success());
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), "orchid 0.7.0\n");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "orchid 0.7.1\n");
 
     let help = repo.run_help(&["lease"]);
     assert!(help.contains("Task target: SPEC with TASK_ID"));
