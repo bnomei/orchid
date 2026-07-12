@@ -236,6 +236,15 @@ fn completion_intent_field_error(data: &Map<String, Value>) -> Option<String> {
             "lease file has invalid completion intent accepted_attribution_paths field".to_string(),
         );
     }
+    if intent
+        .get("accepted_attribution_fingerprints")
+        .is_some_and(|value| !value.is_object())
+    {
+        return Some(
+            "lease file has invalid completion intent accepted_attribution_fingerprints field"
+                .to_string(),
+        );
+    }
     for key in ["attribution_reason", "attribution_accepted_by"] {
         if intent.get(key).is_some_and(|value| !value.is_string()) {
             return Some(format!(
@@ -374,6 +383,12 @@ pub(crate) fn lease_record_field_error(data: &Map<String, Value>) -> Option<Stri
             .is_some_and(|items| items.iter().all(Value::is_string))
     }) {
         return Some("lease file has invalid accepted_attribution_paths field".to_string());
+    }
+    if data
+        .get("accepted_attribution_fingerprints")
+        .is_some_and(|value| !value.is_object())
+    {
+        return Some("lease file has invalid accepted_attribution_fingerprints field".to_string());
     }
     for key in ["attribution_reason", "attribution_accepted_by"] {
         if data.get(key).is_some_and(|value| !value.is_string()) {
@@ -869,6 +884,11 @@ impl LeaseRecord {
         string_list(self.get("accepted_attribution_paths"))
     }
 
+    pub(crate) fn accepted_attribution_fingerprints(&self) -> Option<&Map<String, Value>> {
+        self.get("accepted_attribution_fingerprints")
+            .and_then(Value::as_object)
+    }
+
     pub(crate) fn context_snapshot(&self) -> Option<&Map<String, Value>> {
         self.get("context_snapshot").and_then(Value::as_object)
     }
@@ -889,10 +909,6 @@ impl LeaseRecord {
 
     pub(crate) fn report_path(&self) -> Option<&str> {
         self.get_str("report_path").filter(|path| !path.is_empty())
-    }
-
-    pub(crate) fn spec_policy(&self) -> Option<&Map<String, Value>> {
-        self.get("spec_policy").and_then(Value::as_object)
     }
 
     pub(crate) fn worker_reasoning_effort(&self) -> Option<&str> {

@@ -16,12 +16,12 @@ use crate::core::{
 use crate::gitstate::{
     append_completed_changed_path, apply_completed_changed_snapshot,
     apply_released_changed_snapshot, baseline_fingerprints_value, changed_paths_value,
-    git_status_data, stage_plan_for_lease, status_records_value, touched_for_lease,
+    fingerprints_for_paths, git_status_data, stage_plan_for_lease, status_records_value,
+    touched_for_lease,
 };
 use crate::model::{
     lease_context_revision, validate_lease_id, ActiveLeaseRecordInput, LeaseId, LeaseMode,
-    LeaseRecord, ReasoningEffort, ReportFrontmatter, ReportKind, ReportStatus, SpecPolicy,
-    ValidatorVerdict,
+    LeaseRecord, ReasoningEffort, ReportFrontmatter, ReportKind, ReportStatus, ValidatorVerdict,
 };
 use crate::paths::{
     atomic_write, buds_dir, ensure_runtime_dirs, leases_dir, packets_dir, path_to_string, relpath,
@@ -848,17 +848,17 @@ pub(crate) fn next(root: &Path, request: &NextRequest) -> OrchResult<Map<String,
         )?;
         (ready, blocked)
     };
-    let stale = active
-        .iter()
-        .filter(|lease| lease_in_selected_queue(lease, &selected_specs))
-        .filter(|lease| lease_stale(lease, now, stale_after))
-        .filter(|lease| {
-            !report_path_for_lease(root, lease)
-                .map(|path| path.exists())
-                .unwrap_or(false)
-        })
-        .map(|lease| compact_lease(lease, Some(now), Some(stale_after)))
-        .collect::<OrchResult<Vec<_>>>()?;
+    let mut stale = Vec::new();
+    for lease in &active {
+        if !lease_in_selected_queue(lease, &selected_specs) || !lease_stale(lease, now, stale_after)
+        {
+            continue;
+        }
+        let report = report_path_for_lease(root, lease)?;
+        if !report.exists() || report_path_is_draft(&report)? {
+            stale.push(compact_lease(lease, Some(now), Some(stale_after))?);
+        }
+    }
     let mut reports_ready = Vec::new();
     for lease in &active {
         if !lease_in_selected_queue(lease, &selected_specs) {
@@ -1011,6 +1011,11 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
         .detail("status", lease.get_str("status").unwrap_or("").to_string()));
     }
     let accepted_attribution = ensure_lease_safe_to_complete(root, &lease, request)?;
+    let accepted_attribution_fingerprints = if accepted_attribution.is_empty() {
+        Value::Object(Map::new())
+    } else {
+        fingerprints_for_paths(root, accepted_attribution.clone())?
+    };
     if lease.is_bud() {
         let completed_at = now_iso();
         let implemented_by = if request.implemented_by.is_empty() {
@@ -1027,6 +1032,10 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
             lease.set(
                 "accepted_attribution_paths",
                 string_values(accepted_attribution.clone()),
+            );
+            lease.set(
+                "accepted_attribution_fingerprints",
+                accepted_attribution_fingerprints.clone(),
             );
             lease.set("attribution_reason", request.attribution_reason.clone());
             lease.set("attribution_accepted_by", request.verified_by.clone());
@@ -1150,6 +1159,11 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
     );
     insert(
         &mut intent,
+        "accepted_attribution_fingerprints",
+        accepted_attribution_fingerprints.clone(),
+    );
+    insert(
+        &mut intent,
         "attribution_reason",
         request.attribution_reason.clone(),
     );
@@ -1169,6 +1183,10 @@ pub(crate) fn complete(root: &Path, request: &CompleteRequest) -> OrchResult<Map
         lease.set(
             "accepted_attribution_paths",
             string_values(accepted_attribution),
+        );
+        lease.set(
+            "accepted_attribution_fingerprints",
+            accepted_attribution_fingerprints,
         );
         lease.set("attribution_reason", request.attribution_reason.clone());
         lease.set("attribution_accepted_by", request.verified_by.clone());
@@ -1979,7 +1997,7 @@ fn render_packet_for_lease(
         quote_toml_string(role.report_status()),
         verdict.unwrap_or_default(),
     );
-    if !report_path.exists() {
+    if !report_path.exists() || (role == PacketRoleKind::Worker && source_report.is_some()) {
         atomic_write(&report_path, &report_template)?;
     }
     let packet = if lease.is_bud() {
@@ -2037,16 +2055,6 @@ fn render_task_packet(
     source_report: Option<&str>,
     report_template: &str,
 ) -> OrchResult<String> {
-    let policy = match lease.spec_policy() {
-        Some(policy) => policy.clone(),
-        None => {
-            let spec_id = lease
-                .get_str("task")
-                .and_then(|task| task.split_once('/').map(|(spec, _)| spec))
-                .unwrap_or("");
-            load_spec_policy(root, spec_id).map(SpecPolicy::into_map)?
-        }
-    };
     let (task_source, requirements, design) = match (
         lease.context_text("task_source"),
         lease.context_text("requirements"),
@@ -2071,11 +2079,6 @@ fn render_task_packet(
             )
         }
     };
-    let policy_text = if policy.is_empty() {
-        "{}".to_string()
-    } else {
-        serde_json::to_string(&Value::Object(policy)).expect("json encoding")
-    };
     let scope = lease.scope().join(", ");
     let mut packet = vec![
         format!("# {} Packet - {}", role.title(), lease_id),
@@ -2094,26 +2097,6 @@ fn render_task_packet(
             .context_revision()
             .map(|revision| format!("- Context revision: {}", packet_inline_code(revision)))
             .unwrap_or_default(),
-        format!(
-            "- Owner: {}",
-            packet_inline_code(lease.get_str("owner").unwrap_or(""))
-        ),
-        format!(
-            "- Worker reasoning effort: {}",
-            packet_inline_code(
-                lease
-                    .worker_reasoning_effort()
-                    .unwrap_or(ReasoningEffort::Medium.as_str())
-            )
-        ),
-        lease
-            .worker_model()
-            .map(|model| format!("- Worker model: {}", packet_inline_code(model)))
-            .unwrap_or_default(),
-        lease
-            .agent_id()
-            .map(|agent_id| format!("- Agent id: {}", packet_inline_code(agent_id)))
-            .unwrap_or_default(),
         format!("- Scope: {}", packet_inline_code(&scope)),
         format!(
             "- Report path: {}",
@@ -2122,7 +2105,6 @@ fn render_task_packet(
         source_report
             .map(|report| format!("- Source report: {}", packet_inline_code(report)))
             .unwrap_or_default(),
-        format!("- Spec policy: {}", packet_inline_code(&policy_text)),
         String::new(),
         format!("## {} Report Contract", role.title()),
         String::new(),
@@ -2181,10 +2163,6 @@ fn render_bud_packet(
         None => crate::paths::read_text(&repo_path(root, instructions_path, "instructions_path")?)?,
     };
     let scope = lease.scope().join(", ");
-    let agent_line = lease
-        .agent_id()
-        .map(|agent_id| format!("- Agent id: {}", packet_inline_code(agent_id)))
-        .unwrap_or_default();
     let mut packet = vec![
         format!("# {} Packet - {}", role.title(), lease_id),
         String::new(),
@@ -2206,23 +2184,6 @@ fn render_bud_packet(
             "- Title: {}",
             packet_inline_code(lease.title().unwrap_or(""))
         ),
-        format!(
-            "- Owner: {}",
-            packet_inline_code(lease.get_str("owner").unwrap_or(""))
-        ),
-        format!(
-            "- Worker reasoning effort: {}",
-            packet_inline_code(
-                lease
-                    .worker_reasoning_effort()
-                    .unwrap_or(ReasoningEffort::Medium.as_str())
-            )
-        ),
-        lease
-            .worker_model()
-            .map(|model| format!("- Worker model: {}", packet_inline_code(model)))
-            .unwrap_or_default(),
-        agent_line,
         format!("- Scope: {}", packet_inline_code(&scope)),
         format!(
             "- Report path: {}",
@@ -2517,6 +2478,13 @@ pub(crate) fn report_check(
             OrchError::coded("report lease mismatch", ErrorCode::ReportLeaseMismatch)
                 .detail("report", report_path.rel)
                 .detail("expected_report", expected_report)
+                .detail("lease_id", lease_id),
+        );
+    }
+    if report.is_draft() {
+        return Err(
+            OrchError::coded("report is still a generated draft", ErrorCode::ReportDraft)
+                .detail("report", report_path.rel)
                 .detail("lease_id", lease_id),
         );
     }

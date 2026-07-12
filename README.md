@@ -681,8 +681,9 @@ orchid git-touched --lease <LEASE_ID> --explain
 
 `preexisting_dirty` alone is informational. The mayor may accept exact,
 evidence-backed ambiguous paths already in frozen scope with
-`complete --accept-attribution`; out-of-scope, changed-after-release, and
-missing-snapshot evidence remains a hard stop. Do not bypass the returned
+`complete --accept-attribution`. Orchid fingerprints that accepted content, so
+any later edit is again unsafe to stage; out-of-scope, changed-after-release,
+and missing-snapshot evidence remains a hard stop. Do not bypass the returned
 staging plan with `git add .`.
 
 ## Included skills

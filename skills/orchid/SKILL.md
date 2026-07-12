@@ -121,9 +121,10 @@ Treat worker reports as claims until validation passes. The mayor owns
 attribution judgment: when Git reports an ambiguous path already inside the
 frozen scope, inspect `git-touched --explain`, the worker/validator evidence,
 and the exact path. If that evidence resolves ownership, complete with
-`--accept-attribution <path> --reason "..."`; do not dispatch a reconciliation
-worker or build a manifest. Out-of-scope paths, changed-after-release paths,
-missing snapshots, and unrecoverable evidence remain hard stops. If validation
+`--accept-attribution <path> --reason "..."`; Orchid binds that decision to the
+current content, so a later edit becomes unsafe again. Do not dispatch a
+reconciliation worker or build a manifest. Out-of-scope paths,
+changed-after-release paths, missing snapshots, and unrecoverable evidence remain hard stops. If validation
 fails within scope, regenerate the worker packet with the validator report as
 its source so the repair starts from the exact failed criterion.
 

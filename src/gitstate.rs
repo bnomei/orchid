@@ -541,12 +541,19 @@ pub(crate) fn baseline_fingerprints_value(
     root: &Path,
     status: &Map<String, Value>,
 ) -> OrchResult<Value> {
-    let mut fingerprints = Map::new();
     if !status.get("git").and_then(Value::as_bool).unwrap_or(false) {
-        return Ok(Value::Object(fingerprints));
+        return Ok(Value::Object(Map::new()));
     }
+    fingerprints_for_paths(root, changed_paths(status))
+}
 
-    for path in changed_paths(status) {
+/// Snapshot current contents for a small, explicit set of worktree paths.
+pub(crate) fn fingerprints_for_paths(
+    root: &Path,
+    paths: impl IntoIterator<Item = String>,
+) -> OrchResult<Value> {
+    let mut fingerprints = Map::new();
+    for path in paths {
         let mut entry = Map::new();
         if root.join(&path).is_file() {
             if let Some(oid) = worktree_blob_oid(root, &path)? {
@@ -653,11 +660,29 @@ fn path_matches_released_fingerprint(
     lease: &LeaseRecord,
     path: &str,
 ) -> OrchResult<bool> {
-    let Some(expected) = lease
-        .released_fingerprints()
-        .and_then(|fingerprints| fingerprints.get(path))
-        .and_then(Value::as_object)
-    else {
+    let Some(fingerprints) = lease.released_fingerprints() else {
+        return Ok(false);
+    };
+    path_matches_fingerprint_map(root, fingerprints, path)
+}
+
+fn path_matches_accepted_attribution_fingerprint(
+    root: &Path,
+    lease: &LeaseRecord,
+    path: &str,
+) -> OrchResult<bool> {
+    let Some(fingerprints) = lease.accepted_attribution_fingerprints() else {
+        return Ok(false);
+    };
+    path_matches_fingerprint_map(root, fingerprints, path)
+}
+
+fn path_matches_fingerprint_map(
+    root: &Path,
+    fingerprints: &Map<String, Value>,
+    path: &str,
+) -> OrchResult<bool> {
+    let Some(expected) = fingerprints.get(path).and_then(Value::as_object) else {
         return Ok(false);
     };
     if expected.get("state").and_then(Value::as_str) == Some("absent") {
@@ -880,6 +905,7 @@ pub(crate) fn touched_for_lease(
     let mut missing_completion_snapshot = BTreeSet::new();
     let mut missing_release_snapshot = BTreeSet::new();
     let mut changed_after_release = BTreeSet::new();
+    let mut changed_after_attribution_acceptance = BTreeSet::new();
     let mut changed_records = Vec::new();
     let mut stage_records = Vec::new();
     let mut out_of_scope_records = Vec::new();
@@ -887,6 +913,7 @@ pub(crate) fn touched_for_lease(
     let mut missing_completion_snapshot_records = Vec::new();
     let mut missing_release_snapshot_records = Vec::new();
     let mut changed_after_release_records = Vec::new();
+    let mut changed_after_attribution_acceptance_records = Vec::new();
 
     for record in records {
         let paths = record.visible_paths();
@@ -908,6 +935,21 @@ pub(crate) fn touched_for_lease(
         }
         let accepted_baseline_paths =
             !paths.is_empty() && paths.iter().all(|path| accepted_attribution.contains(path));
+        if accepted_baseline_paths {
+            let unchanged = paths
+                .iter()
+                .map(|path| path_matches_accepted_attribution_fingerprint(root, lease, path))
+                .collect::<OrchResult<Vec<_>>>()?
+                .into_iter()
+                .all(|matches| matches);
+            if !unchanged {
+                for path in paths {
+                    changed_after_attribution_acceptance.insert(path);
+                }
+                changed_after_attribution_acceptance_records.push(record);
+                continue;
+            }
+        }
         if !baseline_paths.is_empty() && !all_baseline_paths_committed && !accepted_baseline_paths {
             let relevant_paths: Vec<String> = paths
                 .iter()
@@ -1025,6 +1067,14 @@ pub(crate) fn touched_for_lease(
         "changed_after_release",
         changed_after_release.iter().cloned().collect(),
     );
+    insert_array_if_non_empty(
+        &mut blocked_by,
+        "changed_after_attribution_acceptance",
+        changed_after_attribution_acceptance
+            .iter()
+            .cloned()
+            .collect(),
+    );
     if !blocked_by.is_empty() {
         map.insert("blocked_by".to_string(), Value::Object(blocked_by));
     }
@@ -1050,6 +1100,11 @@ pub(crate) fn touched_for_lease(
         "changed_after_release",
         &changed_after_release_records,
     );
+    insert_records_value_if_non_empty(
+        &mut blocked_by_records,
+        "changed_after_attribution_acceptance",
+        &changed_after_attribution_acceptance_records,
+    );
     if !blocked_by_records.is_empty() {
         map.insert(
             "blocked_by_records".to_string(),
@@ -1068,6 +1123,7 @@ pub(crate) fn touched_for_lease(
         || !missing_completion_snapshot.is_empty()
         || !missing_release_snapshot.is_empty()
         || !changed_after_release.is_empty()
+        || !changed_after_attribution_acceptance.is_empty()
     {
         map.insert("safe_to_stage".to_string(), Value::Bool(false));
     }
